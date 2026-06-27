@@ -1,0 +1,19 @@
+# Reference copy of the old project (has its own .git, 22M) — not tracked here
+old/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node / Expo
+node_modules/
+
+# Env / secrets
+.env
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
