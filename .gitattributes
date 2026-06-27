@@ -1,0 +1,7 @@
+* text=auto
+
+# Binary assets — never apply line-ending conversion
+*.pdf binary
+*.png binary
+*.jpg binary
+*.xlsx binary
