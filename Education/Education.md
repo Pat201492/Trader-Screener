@@ -93,6 +93,7 @@ What trading *is*: the continuous price-discovery and risk-transfer machine. Som
 5. **Advanced/quant** — QuantStart event-driven series; Ernie Chan's books; arXiv microstructure. Paper-trade, then go live small.
 
 **Books (reputable canon):**
+- *Trading and Exchanges: Market Microstructure for Practitioners* — Larry Harris (Oxford, 2003) — **start here for the business of trading**; how/who/why markets work. Detailed summary: [Trading_and_Exchanges_Harris_Summary.md](Trading_and_Exchanges_Harris_Summary.md) · full chapter breakdown PDF: [Trading_and_Exchanges_Harris_Detailed.pdf](Trading_and_Exchanges_Harris_Detailed.pdf)
 - *Trading in the Zone* — Mark Douglas (psychology; read first)
 - *Reminiscences of a Stock Operator* — Edwin Lefèvre (behavioral lessons)
 - *Quantitative Trading* / *Algorithmic Trading* — Ernest Chan (systematic)
