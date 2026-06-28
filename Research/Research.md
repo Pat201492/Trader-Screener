@@ -22,6 +22,7 @@ Everything the Research terminal shows already exists in the shared pipeline (se
 | Macro / rates context | FRED series | `fred.py` (St. Louis Fed) |
 | Smart-money activity | Politician + insider tables | `ingest_*` (Senate/House/EDGAR) |
 | Universe / sector context | `universe.json` | `universe.py` (NASDAQ Trader FTP) |
+| Options chain + IV/Greeks/put-call | `option_contracts` table / options cache | `options.py` (yfinance chains + computed metrics) |
 
 The terminal queries the **same** API (`/api/stocks`, `/api/stocks/{ticker}`, news, fed, politicians routes) the old app exposes — it does not re-scrape sources.
 
