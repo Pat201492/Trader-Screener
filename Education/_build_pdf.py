@@ -35,7 +35,16 @@ th { background: #0b3d6b; color: #fff; text-align: left; padding: 5px 7px; }
 td { border: 1px solid #cdd7e1; padding: 5px 7px; vertical-align: top; }
 tr:nth-child(even) td { background: #f4f7fa; }
 a { color: #1b5e8c; text-decoration: none; }
+img { width: 16.5cm; margin: 8px 0; border: 1px solid #ddd; }
 """
+
+def _resolve_path(uri, rel):
+    """Map relative image URIs (img/foo.png) to absolute local paths for xhtml2pdf."""
+    if uri.startswith(("http://", "https://")):
+        return uri
+    local = os.path.normpath(os.path.join(HERE, uri))
+    return local if os.path.exists(local) else uri
+
 
 def build(md_name):
     src = os.path.join(HERE, md_name)
@@ -48,7 +57,7 @@ def build(md_name):
     )
     html = f"<html><head><meta charset='utf-8'><style>{CSS}</style></head><body>{html_body}</body></html>"
     with open(out, "w+b") as fh:
-        result = pisa.CreatePDF(html, dest=fh, encoding="utf-8")
+        result = pisa.CreatePDF(html, dest=fh, encoding="utf-8", link_callback=_resolve_path)
     if result.err:
         raise SystemExit(f"PDF generation failed for {md_name} with {result.err} error(s)")
     print(f"Wrote {out} ({os.path.getsize(out)} bytes)")

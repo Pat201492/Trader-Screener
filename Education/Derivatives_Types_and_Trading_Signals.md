@@ -52,6 +52,36 @@ The recurring "why trade it" answers reduce to three: **hedge** a real exposure,
 | Option | Exchange/OTC | Yes (listed) | Buyer optional, seller obligated | Leverage, defined-risk hedge, income |
 | Swap | OTC (some cleared) | No | Both sides obligated | Convert exposure (rate/FX/credit) |
 
+### Linear vs asymmetric payoff
+A future moves dollar-for-dollar both ways (symmetric); a long option floors the loss at the premium (asymmetric). This single difference is *why* options carry the volatility signals in Part 2 — their value depends on the *probability distribution* of the move, not just its direction.
+
+![Linear vs asymmetric payoff](img/futures_vs_option.png)
+
+---
+
+# PART 1.5 — POTENTIAL ACTIONS: STRATEGY PAYOFFS & THE METRICS TO READ
+
+Each chart shows the **profit/loss at expiration** for a common action, annotated with the three numbers you read off every payoff — **max loss, max profit, breakeven** — plus the **IV signal you'd screen for** before putting it on. (Strike K = 100, premium = $5 for illustration.)
+
+## Directional / hedge — *buying* options (you pay premium, IV works against you)
+- **Long call** — bullish; loss capped at premium, upside open. Best when options are **cheap** → screen for **low IV Rank**.
+- **Long put** — bearish or portfolio hedge; loss capped at premium, profit grows as price falls. Buy protection *before* fear is priced in (skew/VIX still low).
+
+![Long call and long put payoffs](img/payoff_long_call_put.png)
+
+## Income — *selling* options (you collect premium, IV works for you)
+- **Short put** — bullish-neutral income; max profit = premium, but large loss if price collapses. Sell when premium is **rich** → screen for **high IV Rank**.
+- **Covered call** — income on stock you own; caps upside at the strike in exchange for premium. Write when **IV Rank high** + a neutral/mild-bull view.
+
+![Short put and covered call payoffs](img/payoff_income.png)
+
+## Defined risk/reward — *spreads* (cap both sides, reduce vega)
+- **Bull call spread** — buy a lower strike, sell a higher one. Both max loss (the debit) and max profit (strike width − debit) are fixed. Preferred over a lone long call when **IV is high**, because selling the upper strike offsets the rich premium.
+
+![Bull call spread payoff](img/payoff_bull_call_spread.png)
+
+> **The pattern:** *buy* options when IV Rank is **low** (cheap), *sell/spread* when IV Rank is **high** (rich). That single rule — read off the IV-Rank signal in Part 2 — drives which of these actions fits.
+
 ---
 
 # PART 2 — THE SIGNALS PEOPLE TRADE OFF DERIVATIVES
@@ -76,6 +106,8 @@ Equity screening watches price, volume, fundamentals. **Derivatives — options 
 - **Signal:** the **shape/steepness** of skew measures fear and crash-pricing. Steepening put skew → rising demand for protection → market positioning defensively.
 - **How traded:** skew informs which strikes to buy/sell (e.g., sell the rich OTM put, structure risk-reversals).
 - **Sources:** [QuantInsti — Trading volatility skew](https://quantra.quantinsti.com/glossary/How-to-Trade-Options-Using-Volatility-Skew), [Strike — Volatility skew overview](https://www.strike.money/options/volatility-skew).
+
+![Volatility skew curve](img/vol_skew.png)
 
 ## D. Put/Call Ratio
 - **What:** ratio of put to call activity (by volume or open interest), market-wide or per-name.
@@ -102,6 +134,8 @@ Equity screening watches price, volume, fundamentals. **Derivatives — options 
 ## H. Term Structure of Volatility
 - **What:** IV plotted across **expirations** (near vs far).
 - **Signal:** **contango** (far IV > near) is normal/calm; **backwardation** (near IV > far) signals acute near-term event risk or stress (e.g., VIX term structure inverting in a selloff).
+
+![IV term structure: contango vs backwardation](img/iv_term_structure.png)
 
 ## I. VIX & macro vol gauges
 - **What:** Cboe's VIX = 30-day expected S&P volatility from option prices ("fear gauge").
