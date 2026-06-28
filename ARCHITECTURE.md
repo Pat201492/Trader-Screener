@@ -2,6 +2,18 @@
 
 > Read this first. It explains how the **new** Trader Screener relates to the **old** Stock Tracker / Stock-App, how data flows between them, and the hosting constraints that drive every design decision below.
 
+## Three repos (data-service + two clients)
+
+The data pipeline has been **extracted into its own repo** so both apps read from one source instead of each running their own collector:
+
+| Repo | Role | Writes data? |
+|---|---|---|
+| **[Stock-Data-Pipeline](https://github.com/Pat201492/Stock-Data-Pipeline)** | The single source of truth. Collects/enriches/scores/stores all data. Daily local runner `run.py` + Fly nightly `scheduler.py`. | **Yes — only writer** |
+| **Stock-App** (old) | Web + mobile front-end | No — reads |
+| **Trader-Screener** (this) | Trader screener + research + options-chain feed | No — reads |
+
+Both clients are **readers**; the pipeline repo is the **only writer**. The daily update program (`run.py`) lives in the pipeline repo and follows it.
+
 This repo has three pillars, each documented in its own folder:
 - **[Education](Education/Education.md)** — learning the business of trading (reading path + recent examples).
 - **[Project](Project%20folder/Project.md)** — the screener itself; closest sibling to the old stock screener.
@@ -16,7 +28,7 @@ And `old/Stock-App/` — a reference copy of the old project.
 | | **Old** — Stock Tracker / Stock-App | **New** — Trader Screener |
 |---|---|---|
 | Purpose | Long-term stock valuation + screening | Trader-oriented screening across instruments |
-| Data pipeline | `universe → fundamentals → model → news → etf_universe` (nightly, Fly.io) | **Reuses the same pipeline** |
+| Data pipeline | now lives in **Stock-Data-Pipeline** repo (`run.py` daily / `scheduler.py` Fly nightly) | **Reads the same pipeline output** |
 | Sources | NASDAQ FTP, yfinance, SEC EDGAR, FRED, Senate/House disclosures | **Same sources — collected once** |
 | API | FastAPI `server.py` (`/api/stocks`, etc.) | Reads the same API / same data |
 | Hosting | Fly.io (app + nightly cron machine) | Shares the Fly.io data layer |
@@ -29,7 +41,8 @@ And `old/Stock-App/` — a reference copy of the old project.
 
 ```
                  ┌─────────────────────────────────────────────┐
-                 │   SHARED DATA PIPELINE  (nightly, Fly.io)    │
+                 │   STOCK-DATA-PIPELINE repo (own GitHub repo) │
+                 │   run.py daily (local) / scheduler.py (Fly)  │
                  │  universe → fundamentals → model → news →    │
                  │  etf_universe → options   + fred + ingest_*  │
                  │  (congress, insider, EDGAR)                  │
