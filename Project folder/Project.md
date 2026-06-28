@@ -48,6 +48,51 @@ Implications:
 - Trader-oriented instruments beyond equities (options/futures/forex/crypto — see Education for the landscape).
 - Trader-oriented metrics (volatility, liquidity, momentum) layered on top of the existing fundamental/valuation scores.
 - Possibly intraday vs nightly cadence for some signals (the old pipeline is nightly).
+- **Options-chain feed** — first new feature being built. See below.
+
+---
+
+## Options-Chain Feed (first feature)
+
+The first trader-specific feature: for any ticker already in the shared universe, pull and serve its **options chain** — every listed expiration, with the full grid of calls/puts per strike.
+
+### Data source
+- **Primary:** `yfinance` — already a dependency of the shared pipeline. Provides chains with no extra account/key:
+  - `yf.Ticker(sym).options` → list of expiration dates (`YYYY-MM-DD`).
+  - `yf.Ticker(sym).option_chain(exp)` → `.calls` and `.puts` DataFrames.
+- **Per-contract fields** yfinance returns: `contractSymbol`, `strike`, `lastPrice`, `bid`, `ask`, `change`, `percentChange`, `volume`, `openInterest`, `impliedVolatility`, `inTheMoney`, `lastTradeDate`.
+- **Caveat:** yfinance options are delayed/snapshot and Greeks beyond IV are **not** provided — we compute Greeks (delta/gamma/theta/vega) ourselves (Black-Scholes) or pull a paid feed later. Quote freshness ≠ real-time; fine for screening, not for execution.
+
+### Where it lives in the pipeline
+New collector script in the **shared** pipeline (so the old app can surface it too — collect once, serve both):
+
+```
+options.py   # iterate universe (or a watchlist subset) → for each ticker:
+             #   expirations = yf.Ticker(t).options
+             #   for exp in expirations (cap N nearest): pull calls+puts
+             #   normalize → store rows; derive metrics (see below)
+```
+
+- Slots into `run.py` after `fundamentals.py` (needs the universe; independent of model/news).
+- **Cadence:** options data moves intraday, but the shared pipeline is nightly. Start nightly snapshot (cheap, no new always-on machine — respects the hosting constraint). Flag faster/on-demand refresh as an open item.
+- **Scope control:** full chains for ~all tickers is large. Start with a **watchlist / top-N subset** and a cap on expirations per ticker (e.g. nearest 4–6) to keep storage + fetch time bounded.
+
+### Derived metrics (computed, not fetched)
+Layer trader signals on top of raw chains — these become screener columns and feed the Research tab:
+- **IV rank / IV percentile** (needs IV history — accumulate over nightly snapshots).
+- **Put/call ratio** (volume + open interest) per ticker.
+- **ATM IV / IV skew** (term + strike skew).
+- **Greeks** via Black-Scholes (delta/gamma/theta/vega) using the risk-free rate already pulled from **FRED** (`fred.py`) and dividend yield from `fundamentals.json` — reuse existing data, don't refetch.
+- **Unusual activity** — volume ≫ open interest flags.
+
+### Storage / schema
+- New table(s): `options_expirations` (ticker, exp dates) + `option_contracts` (one row per contract per snapshot date) — or a per-ticker JSON cache mirroring the `fundamentals.json` pattern.
+- Keep a **history** of snapshots so IV-rank / OI-trend metrics are possible (don't overwrite — append by snapshot date).
+
+### API (mirror the old `server.py` style)
+- `GET /api/options/{ticker}` → expirations + summary metrics (ATM IV, put/call, IV rank).
+- `GET /api/options/{ticker}/{expiration}` → full calls/puts grid for one expiry.
+- Optional screener filter additions on `/api/stocks`: `min_iv_rank`, `min_put_call`, `unusual_only`.
 
 ---
 
@@ -59,3 +104,12 @@ Implications:
 - [ ] **New metrics → shared pipeline** — agree that trader-specific metrics get added upstream so old app + Research reuse them.
 - [ ] **Instrument coverage** — yfinance covers equities/ETFs/some crypto; futures/options/forex need a data source decision.
 - [ ] **Auth / accounts** — reuse old `auth.py` / `accounts_database.py` or separate?
+
+### Options-Chain Feed — open items
+- [ ] **Scope** — full universe vs watchlist/top-N; how many expirations per ticker to cap.
+- [ ] **Data source longevity** — is yfinance (delayed snapshot, no Greeks) good enough, or do we budget a paid options feed (Polygon/Tradier/ORATS) later?
+- [ ] **Cadence** — nightly snapshot to start; decide if/when intraday or on-demand refresh is needed (without an always-on machine — hosting cost).
+- [ ] **Greeks** — confirm Black-Scholes-in-house using FRED risk-free rate + fundamentals dividend yield; American-style options approximation acceptable?
+- [ ] **History / storage** — append-by-snapshot schema so IV-rank and OI trends are computable; storage growth bound.
+- [ ] **Shared-pipeline placement** — confirm `options.py` runs in the same nightly Fly.io job so the old app gets it too (collect once).
+- [ ] **API shape** — finalize `/api/options/...` routes + which derived metrics surface as screener columns/filters.

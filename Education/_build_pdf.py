@@ -1,15 +1,21 @@
-"""Convert the Harris detailed-breakdown markdown to a styled PDF.
+"""Convert education markdown docs to styled PDFs.
 
 Pure-Python (markdown + xhtml2pdf), no system deps. Run from this folder:
-    python _build_pdf.py
+    python _build_pdf.py                 # build all docs in DOCS
+    python _build_pdf.py somefile.md     # build one (output: somefile.pdf)
 """
 import os
+import sys
 import markdown
 from xhtml2pdf import pisa
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(HERE, "Trading_and_Exchanges_Harris_Detailed.md")
-OUT = os.path.join(HERE, "Trading_and_Exchanges_Harris_Detailed.pdf")
+
+# Markdown docs that have a PDF companion. Add new ones here.
+DOCS = [
+    "Trading_and_Exchanges_Harris_Detailed.md",
+    "Derivatives_Types_and_Trading_Signals.md",
+]
 
 CSS = """
 @page { size: letter; margin: 2.2cm 2cm; }
@@ -31,19 +37,26 @@ tr:nth-child(even) td { background: #f4f7fa; }
 a { color: #1b5e8c; text-decoration: none; }
 """
 
-def main():
-    with open(SRC, "r", encoding="utf-8") as f:
+def build(md_name):
+    src = os.path.join(HERE, md_name)
+    out = os.path.join(HERE, os.path.splitext(md_name)[0] + ".pdf")
+    with open(src, "r", encoding="utf-8") as f:
         md_text = f.read()
     html_body = markdown.markdown(
         md_text,
         extensions=["tables", "fenced_code", "sane_lists", "toc"],
     )
     html = f"<html><head><meta charset='utf-8'><style>{CSS}</style></head><body>{html_body}</body></html>"
-    with open(OUT, "w+b") as out:
-        result = pisa.CreatePDF(html, dest=out, encoding="utf-8")
+    with open(out, "w+b") as fh:
+        result = pisa.CreatePDF(html, dest=fh, encoding="utf-8")
     if result.err:
-        raise SystemExit(f"PDF generation failed with {result.err} error(s)")
-    print(f"Wrote {OUT} ({os.path.getsize(OUT)} bytes)")
+        raise SystemExit(f"PDF generation failed for {md_name} with {result.err} error(s)")
+    print(f"Wrote {out} ({os.path.getsize(out)} bytes)")
+
+def main():
+    targets = sys.argv[1:] or DOCS
+    for md_name in targets:
+        build(md_name)
 
 if __name__ == "__main__":
     main()

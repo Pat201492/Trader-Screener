@@ -31,8 +31,8 @@ And `old/Stock-App/` — a reference copy of the old project.
                  ┌─────────────────────────────────────────────┐
                  │   SHARED DATA PIPELINE  (nightly, Fly.io)    │
                  │  universe → fundamentals → model → news →    │
-                 │  etf_universe   + fred + ingest_* (congress, │
-                 │  insider, EDGAR)                             │
+                 │  etf_universe → options   + fred + ingest_*  │
+                 │  (congress, insider, EDGAR)                  │
                  └───────────────┬─────────────────────────────┘
                                  │ writes once
                   ┌──────────────┴───────────────┐
