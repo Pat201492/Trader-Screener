@@ -95,6 +95,20 @@ Strike out what you don't care about. Add rows for anything the reading surfaces
 | Stop distance (ATR multiple) | [ ] | | | |
 | Max drawdown (historical) | [ ] | | | |
 
+### 2h. Options / derivatives signals  🔴 (all need an options-chain feed — Polygon / ORATS / Tradier / CBOE)
+> Only relevant if §1 includes options. Background: [Derivatives — Types & Signals](../Education/Derivatives_Types_and_Trading_Signals.md). Raw IV doesn't compare across names — **IV Rank/percentile is the must-have normalizer.**
+| Metric | Want? | Use | Priority | Notes |
+|---|---|---|---|---|
+| Implied volatility (IV) | [ ] | | | expected move; rises into events |
+| **IV Rank / IV Percentile** | [ ] | | | the normalizer — "is IV high *for this name*" |
+| Volatility skew (put vs call IV) | [ ] | | | fear / crash-pricing gauge |
+| Put/Call ratio | [ ] | | | sentiment; contrarian at extremes |
+| Open interest (by strike) | [ ] | | | support/resistance magnets, conviction |
+| Unusual options activity (UOA) | [ ] | | | options-side smart money — ties to §2e moat |
+| Greeks (delta/gamma/theta/vega) | [ ] | | | risk dashboard per position |
+| IV term structure (contango/backwardation) | [ ] | | | near vs far event risk |
+| VIX / macro vol | [ ] | | | regime filter; shares FRED macro tab |
+
 ---
 
 ## 3. Trading style — sanity check
