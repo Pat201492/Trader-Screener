@@ -39,6 +39,8 @@ What trading *is*: the continuous price-discovery and risk-transfer machine. Som
 > **Before opening any leveraged account:** CFTC — [Learn to Trade Futures and Options Without Getting Scammed](https://www.cftc.gov/LearnAndProtect/AdvisoriesAndArticles/learn_to_trade_without_scam.htm) and SEC [investor.gov](https://www.investor.gov).
 
 > **Deep-dive:** [Derivatives — Types & The Signals People Trade Off Them](Derivatives_Types_and_Trading_Signals.md) ([PDF](Derivatives_Types_and_Trading_Signals.pdf)) — full taxonomy (forwards/futures/options/swaps) plus the options/volatility signal set (IV, IV Rank, skew, put/call, open interest, unusual activity, the Greeks, term structure, VIX).
+>
+> **Examples gallery:** [Derivatives Examples Gallery](Derivatives_Examples_Gallery.md) ([PDF](Derivatives_Examples_Gallery.pdf)) — visual catalog of ~14 strategies (single legs, spreads, straddle/strangle/condor/butterfly, covered call/collar) with payoff charts + key metrics, and the **Greeks** (delta/gamma/vega/theta) profiles professionals watch.
 
 ---
 
