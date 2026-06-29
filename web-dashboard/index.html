@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Trader Screener — Dashboard</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --border:#30363d; --txt:#e6edf3;
+    --muted:#8b949e; --accent:#2f81f7; --green:#3fb950; --red:#f85149;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif}
+  header{display:flex;align-items:center;gap:16px;padding:12px 18px;border-bottom:1px solid var(--border);background:var(--panel);position:sticky;top:0;z-index:10}
+  header h1{font-size:16px;margin:0;font-weight:700}
+  nav{display:flex;gap:6px}
+  nav button{background:transparent;border:1px solid transparent;color:var(--muted);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px}
+  nav button.active{color:var(--txt);background:#21262d;border-color:var(--border)}
+  .api{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}
+  .api input{background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:5px 8px;width:200px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--red)}
+  .dot.ok{background:var(--green)}
+  main{padding:18px;max-width:1200px;margin:0 auto}
+  .controls{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+  input[type=text],select{background:var(--panel);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:7px 10px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:600;cursor:pointer;user-select:none;position:sticky;top:53px;background:var(--bg)}
+  tr:hover td{background:#161b2233}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  .pos{color:var(--green)} .neg{color:var(--red)}
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+  .group-title{margin:18px 0 8px;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px}
+  .card .name{font-weight:600;margin-bottom:2px}
+  .card .price{font-size:20px;font-variant-numeric:tabular-nums}
+  .card .sub{font-size:12px;color:var(--muted);margin-top:4px;display:flex;justify-content:space-between}
+  .rangebar{height:5px;background:#21262d;border-radius:3px;margin-top:8px;position:relative}
+  .rangebar i{position:absolute;top:-2px;width:9px;height:9px;border-radius:50%;background:var(--accent);transform:translateX(-50%)}
+  .muted{color:var(--muted)} .big{font-size:18px;font-weight:600}
+  .pill{display:inline-block;padding:2px 8px;border-radius:20px;background:#21262d;font-size:12px;margin-right:6px}
+  .loading{color:var(--muted);padding:30px;text-align:center}
+  .err{color:var(--red);padding:18px;border:1px solid var(--red);border-radius:8px;background:#f8514911}
+</style>
+</head>
+<body>
+<header>
+  <h1>📈 Trader Screener</h1>
+  <nav>
+    <button data-tab="screener" class="active">Screener</button>
+    <button data-tab="commodities">Commodities</button>
+    <button data-tab="options">Options</button>
+    <button data-tab="drivers">Drivers</button>
+  </nav>
+  <div class="api">
+    <span class="dot" id="dot"></span> API
+    <input id="apiBase" value="http://127.0.0.1:8000" />
+  </div>
+</header>
+<main id="view"><div class="loading">Loading…</div></main>
+
+<script>
+const API = () => document.getElementById('apiBase').value.replace(/\/$/,'');
+let TAB = 'screener';
+let screenerRows = [], sortKey = 'rank', sortAsc = true;
+
+async function jget(path){
+  const r = await fetch(API()+path);
+  if(!r.ok) throw new Error(path+' → '+r.status);
+  return r.json();
+}
+function fmt(v,d=2){ return v==null?'–':Number(v).toLocaleString(undefined,{maximumFractionDigits:d}); }
+function pct(v){ if(v==null) return '<span class="muted">–</span>'; const c=v>=0?'pos':'neg'; const s=v>=0?'+':''; return `<span class="${c}">${s}${v.toFixed(2)}%</span>`; }
+
+async function ping(){
+  try{ const h=await jget('/health'); document.getElementById('dot').classList.toggle('ok',!!h.ok); return h; }
+  catch{ document.getElementById('dot').classList.remove('ok'); return null; }
+}
+
+// ── SCREENER ──────────────────────────────────────────────
+async function renderScreener(){
+  const v=document.getElementById('view');
+  v.innerHTML=`<div class="controls">
+    <input type="text" id="q" placeholder="Search ticker / name…" />
+    <select id="sector"><option value="">All sectors</option></select>
+    <span class="muted" id="count"></span></div>
+    <div id="tbl"><div class="loading">Loading stocks…</div></div>`;
+  try{
+    const d=await jget('/api/stocks?limit=1000');
+    screenerRows=d.stocks;
+    const secs=[...new Set(screenerRows.map(r=>r.sector).filter(Boolean))].sort();
+    const sel=document.getElementById('sector');
+    secs.forEach(s=>{const o=document.createElement('option');o.value=o.textContent=s;sel.appendChild(o);});
+    document.getElementById('q').oninput=drawScreener;
+    sel.onchange=drawScreener;
+    drawScreener();
+  }catch(e){ v.querySelector('#tbl').innerHTML=`<div class="err">${e.message}<br>Is the API running? (uvicorn api:app)</div>`; }
+}
+function drawScreener(){
+  const q=(document.getElementById('q').value||'').toLowerCase();
+  const sec=document.getElementById('sector').value;
+  let rows=screenerRows.filter(r=>
+    (!sec||r.sector===sec) &&
+    (!q || (r.ticker||'').toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q)));
+  rows.sort((a,b)=>{ let x=a[sortKey],y=b[sortKey];
+    if(x==null)return 1; if(y==null)return -1;
+    if(typeof x==='string')return sortAsc?x.localeCompare(y):y.localeCompare(x);
+    return sortAsc?x-y:y-x; });
+  document.getElementById('count').textContent=`${rows.length} stocks`;
+  const cols=[['rank','#'],['ticker','Ticker'],['name','Name'],['sector','Sector'],
+              ['price','Price'],['score','Score'],['pe','P/E'],['upside','Upside %']];
+  const th=cols.map(([k,l])=>`<th class="${['price','score','pe','upside','rank'].includes(k)?'num':''}" onclick="setSort('${k}')">${l}${sortKey===k?(sortAsc?' ▲':' ▼'):''}</th>`).join('');
+  const body=rows.slice(0,300).map(r=>`<tr>
+    <td class="num muted">${r.rank??'–'}</td>
+    <td><b>${r.ticker}</b></td>
+    <td class="muted">${(r.name||'').slice(0,38)}</td>
+    <td class="muted">${r.sector||'–'}</td>
+    <td class="num">${r.price!=null?'$'+fmt(r.price):'–'}</td>
+    <td class="num">${fmt(r.score,0)}</td>
+    <td class="num">${fmt(r.pe,1)}</td>
+    <td class="num">${r.upside!=null?pct(r.upside):'–'}</td></tr>`).join('');
+  document.getElementById('tbl').innerHTML=`<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
+}
+function setSort(k){ if(sortKey===k)sortAsc=!sortAsc; else{sortKey=k;sortAsc=true;} drawScreener(); }
+
+// ── COMMODITIES ───────────────────────────────────────────
+async function renderCommodities(){
+  const v=document.getElementById('view');
+  v.innerHTML=`<div class="loading">Loading commodities…</div>`;
+  try{
+    const d=await jget('/api/commodities');
+    let html=`<div class="muted" style="margin-bottom:6px">as of ${d.asof} · ${d.count} instruments</div>`;
+    for(const [grp,items] of Object.entries(d.groups)){
+      html+=`<div class="group-title">${grp}</div><div class="cards">`;
+      html+=items.map(c=>{
+        const rng=c.range_pct!=null?c.range_pct:50;
+        return `<div class="card">
+          <div class="name">${c.name}</div>
+          <div class="price">${fmt(c.price)}</div>
+          <div class="sub"><span>1d ${pct(c.chg_1d)}</span><span>vol ${fmt(c.vol_20d,0)}</span></div>
+          <div class="sub"><span>1m ${pct(c.chg_1m)}</span><span>ytd ${pct(c.chg_ytd)}</span></div>
+          <div class="rangebar" title="52w range"><i style="left:${rng}%"></i></div>
+        </div>`;}).join('');
+      html+=`</div>`;
+    }
+    v.innerHTML=html;
+  }catch(e){ v.innerHTML=`<div class="err">${e.message}</div>`; }
+}
+
+// ── OPTIONS ───────────────────────────────────────────────
+async function renderOptions(){
+  const v=document.getElementById('view');
+  v.innerHTML=`<div class="controls">
+    <input type="text" id="optTk" placeholder="Ticker (e.g. NVDA)" value="NVDA" />
+    <button onclick="loadOptions()" class="pill" style="cursor:pointer;border:1px solid var(--border)">Load</button></div>
+    <div id="optBox"><div class="muted">Enter a ticker that's in the options feed (top-N universe).</div></div>`;
+  document.getElementById('optTk').addEventListener('keydown',e=>{if(e.key==='Enter')loadOptions();});
+  loadOptions();
+}
+async function loadOptions(){
+  const tk=(document.getElementById('optTk').value||'').toUpperCase().trim();
+  const box=document.getElementById('optBox');
+  if(!tk) return;
+  box.innerHTML=`<div class="loading">Loading ${tk}…</div>`;
+  try{
+    const s=await jget('/api/options/'+tk);
+    const sm=s.summary||{};
+    let head=`<div style="margin:6px 0 14px">
+      <span class="pill">spot $${fmt(sm.spot)}</span>
+      <span class="pill">ATM IV ${sm.atm_iv!=null?(sm.atm_iv*100).toFixed(1)+'%':'–'}</span>
+      <span class="pill">IV mean ${sm.iv_mean!=null?(sm.iv_mean*100).toFixed(1)+'%':'–'}</span>
+      <span class="pill">P/C OI ${fmt(sm.put_call_oi)}</span>
+      <span class="pill">OI ${fmt(sm.total_oi,0)}</span></div>`;
+    const exp=s.expirations&&s.expirations[0];
+    if(!exp){ box.innerHTML=head+`<div class="muted">no expirations</div>`; return; }
+    const ch=await jget(`/api/options/${tk}/${exp}`);
+    const rows=ch.contracts.sort((a,b)=>a.strike-b.strike).map(c=>`<tr>
+      <td>${c.type}</td><td class="num">${fmt(c.strike)}</td>
+      <td class="num">${fmt(c.bid)}</td><td class="num">${fmt(c.ask)}</td>
+      <td class="num">${c.iv!=null?(c.iv*100).toFixed(1)+'%':'–'}</td>
+      <td class="num">${c.delta??'–'}</td><td class="num">${fmt(c.open_interest,0)}</td>
+      <td class="num">${fmt(c.volume,0)}</td></tr>`).join('');
+    box.innerHTML=head+`<div class="muted" style="margin-bottom:6px">nearest expiry ${exp} · ${ch.contracts.length} contracts</div>
+      <table><thead><tr><th>Type</th><th class="num">Strike</th><th class="num">Bid</th><th class="num">Ask</th>
+      <th class="num">IV</th><th class="num">Δ</th><th class="num">OI</th><th class="num">Vol</th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+  }catch(e){ box.innerHTML=`<div class="err">${e.message}<br>Ticker may not be in the options feed (only top-N universe tickers are collected).</div>`; }
+}
+
+// ── DRIVERS (commodity exposure) ──────────────────────────
+async function renderDrivers(){
+  const v=document.getElementById('view');
+  v.innerHTML=`<div class="controls">
+    <input type="text" id="drvTk" placeholder="Ticker (e.g. PSX, TSM, DAL)" value="PSX" />
+    <button onclick="loadDrivers()" class="pill" style="cursor:pointer;border:1px solid var(--border)">Load</button>
+    <span class="muted">what commodities drive this stock</span></div>
+    <div id="drvBox"></div>`;
+  document.getElementById('drvTk').addEventListener('keydown',e=>{if(e.key==='Enter')loadDrivers();});
+  loadDrivers();
+}
+async function loadDrivers(){
+  const tk=(document.getElementById('drvTk').value||'').toUpperCase().trim();
+  const box=document.getElementById('drvBox'); if(!tk) return;
+  box.innerHTML=`<div class="loading">Loading ${tk}…</div>`;
+  try{
+    const d=await jget('/api/stocks/'+tk+'/commodities');
+    let html='';
+    // curated
+    if(d.curated&&d.curated.length){
+      html+=`<div class="group-title">Curated — economic links</div><table>
+        <thead><tr><th>Commodity</th><th>Role</th><th>Effect of price ↑</th><th>Why</th></tr></thead><tbody>`;
+      html+=d.curated.map(c=>{
+        const eff=c.sign>0?'<span class="pos">helps ▲</span>':'<span class="neg">hurts ▼</span>';
+        return `<tr><td><b>${c.root}</b></td><td class="muted">${c.role}</td><td>${eff}</td><td class="muted">${c.note||''}</td></tr>`;
+      }).join('')+`</tbody></table>`;
+    }
+    // computed
+    if(d.computed&&d.computed.length){
+      html+=`<div class="group-title">Computed — return regression (1y)</div><table>
+        <thead><tr><th>Commodity</th><th class="num">Beta</th><th class="num">Corr</th><th class="num">R²</th></tr></thead><tbody>`;
+      html+=d.computed.map(c=>{
+        const bc=c.beta>=0?'pos':'neg';
+        return `<tr><td><b>${c.root}</b></td><td class="num ${bc}">${c.beta}</td><td class="num">${c.corr}</td><td class="num muted">${c.r2}</td></tr>`;
+      }).join('')+`</tbody></table>`;
+    } else {
+      html+=`<div class="muted" style="margin-top:14px">Computed betas not generated yet (run <code>EXPOSURE_COMPUTE=1 python commodity_exposure.py</code> when the pipeline is idle).</div>`;
+    }
+    box.innerHTML=html;
+  }catch(e){ box.innerHTML=`<div class="err">${e.message}<br>No exposure mapped for ${tk}. Curated set covers refiners, E&P, airlines, miners, chemicals, food, semis, autos.</div>`; }
+}
+
+// ── nav ───────────────────────────────────────────────────
+const R={screener:renderScreener,commodities:renderCommodities,options:renderOptions,drivers:renderDrivers};
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active'); TAB=b.dataset.tab; R[TAB]();
+});
+document.getElementById('apiBase').onchange=()=>{ping();R[TAB]();};
+ping(); renderScreener();
+setInterval(ping, 30000);
+</script>
+</body>
+</html>
