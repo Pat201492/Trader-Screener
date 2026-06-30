@@ -29,6 +29,17 @@ try:
 except (AttributeError, ValueError):
     pass
 
+# Enable ANSI colors on Windows consoles (VT processing).
+if sys.platform == "win32":
+    try:
+        import ctypes
+        _k = ctypes.windll.kernel32
+        _k.SetConsoleMode(_k.GetStdHandle(-11), 7)
+    except Exception:
+        pass
+
+GREEN, YELLOW, RED, RESET = "\033[92m", "\033[93m", "\033[91m", "\033[0m"
+
 def Ncdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
@@ -504,7 +515,9 @@ def _build_long(com, F, sigma, gold, cdir, name, cheap, rich):
     ks = strikes_for(S); chain = {}
     print(f"\n   {name} @ {S:.2f}   LONG {kind.upper()}   IV {iv_tag(com.iv_rank())}  (implied vol {sigma*100:.0f}%)")
     print("   (ITM = already exercisable, costs more, higher odds; OTM = cheap, lower odds.")
-    print("    'profit odds' = est. chance the price clears your breakeven by expiry.)")
+    print(f"    'profit odds' = est. chance the price clears your breakeven. "
+          f"{GREEN}green = most likely{RESET}, {RED}red = least likely{RESET}.)")
+    rows = []
     for i, K in enumerate(ks, 1):
         prem = black_premium(kind, F, K, sigma, T)
         be = K + prem if kind == "call" else K - prem
@@ -513,8 +526,18 @@ def _build_long(com, F, sigma, gold, cdir, name, cheap, rich):
         mny = "ITM" if intr > 0 else ("ATM" if K == round(S) else "OTM")
         note = f"{intr:.2f} intrinsic" if intr > 0 else f"needs {'rise' if kind=='call' else 'fall'} past {K}"
         chain[str(i)] = (K, prem)
+        rows.append((i, K, prem, mny, note, odds))
+    hi = max(rows, key=lambda r: r[5])[0]
+    lo = min(rows, key=lambda r: r[5])[0]
+    for i, K, prem, mny, note, odds in rows:
+        if i == hi:
+            col, tag = GREEN, "  <- MOST likely"
+        elif i == lo:
+            col, tag = RED, "  <- LEAST likely"
+        else:
+            col, tag = YELLOW, ""
         print(f"   {i}) strike {K:<4} premium {prem:>5.2f}/u  contract {prem*UNITS:>6.2f}  "
-              f"[{mny}: {note}]  ~{odds:.0f}% profit odds")
+              f"[{mny}: {note}]  {col}~{odds:.0f}% profit odds{RESET}{tag}")
     K, prem = ask("Pick a strike (number): ", chain)
     cost = prem * UNITS
     if cost > gold:
