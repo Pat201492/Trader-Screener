@@ -45,6 +45,8 @@ What trading *is*: the continuous price-discovery and risk-transfer machine. Som
 > **Tear sheet (firm-style):** [Instrument Information Sheet / Tear Sheet](Information_Sheet_Tearsheet.md) ([PDF](Information_Sheet_Tearsheet.pdf)) — the one-page desk brief format + **6 worked examples** (bull/bear spreads, producer collar, iron condor, long straddle, protective put), each ending in a specific **derivative recommendation** with payoff. Illustrative/educational. Doubles as the screener's per-instrument output spec.
 >
 > **How to read it:** [How to Read a Tear Sheet](How_to_Read_a_Tear_Sheet.md) ([PDF](How_to_Read_a_Tear_Sheet.pdf)) — line-by-line guide explaining what each block means and **why it matters** (why dollar-volume, beta, ATR, IV Rank, skew, positioning each earn their place), plus the 60-second pro scan.
+>
+> **Play it:** [Catan Options game](game/catan_options_game.py) ([how to play](game/HOW_TO_PLAY.md)) — a tiny terminal game; trade calls/puts on the five Catan commodities (Brick/Lumber/Wool/Grain/Ore). Teaches call vs put, strike/moneyness, premium-as-max-loss, breakeven, and implied volatility (high-vol commodities cost more). Run `python game/catan_options_game.py`.
 
 ---
 
