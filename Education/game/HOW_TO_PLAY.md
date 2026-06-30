@@ -24,7 +24,7 @@ powershell -ExecutionPolicy Bypass -File create_desktop_shortcut.ps1
 Both pages are also reachable mid-game from the action prompt: `h` (history), `i` (info), `c` (quick charts).
 
 ## The idea
-You start with **100 gold**. Over **10 seasons** you buy options on commodities; each season prices move and your option settles.
+You start with **100 gold** and trade over a series of turns (the plain edition runs 10 turns; the signals edition runs 12 months). Each turn you may buy or sell an option; then time advances, prices move, and your option settles.
 
 - **Call** = right to buy at the strike → profits if price goes **up** past it.
 - **Put** = right to sell at the strike → profits if price goes **down** past it.
