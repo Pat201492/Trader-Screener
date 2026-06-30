@@ -448,6 +448,8 @@ def settle(pos, S, gold, scored):
     print(f"\n   SETTLE {pos['label']} on {pos['name']}: price -> {S:.2f}.  P/L {pl:+.2f}.")
     if pos["vol"] == "long" and pl <= -pos["max_loss"] + 0.01:
         print(f"   Expired worthless — lost the premium ({pos['max_loss']:.2f}, the max loss).")
+    scored["trades"].append(dict(label=pos["label"], name=pos["name"], pl=pl,
+                                 good=bool(pos.get("good")), vol=pos["vol"]))
     if pos.get("good"):
         scored["n"] += 1; scored["pl"] += pl
         side = "bought CHEAP IV with the catalyst" if pos["vol"] == "long" else "sold RICH IV (collected premium)"
@@ -459,12 +461,76 @@ def settle(pos, S, gold, scored):
     return gold
 
 # ---------------------------------------------------------------- main
+def grade(net, edge_pl, noise_pl, win_rate, discipline):
+    pts = 0
+    pts += 2 if net > 0 else 0
+    pts += 2 if edge_pl > 0 else 0
+    pts += 1 if edge_pl > noise_pl else 0
+    pts += 1 if win_rate >= 0.5 else 0
+    pts += 1 if discipline >= 0.5 else 0          # most trades were edge plays / sat out junk
+    return ["F", "F", "D", "C", "C", "B", "B", "A"][max(0, min(7, pts))]
+
+def scorecard(start, final, scored):
+    trades = scored["trades"]
+    net = final - start
+    roi = net / start * 100
+    n = len(trades)
+    wins = sum(1 for t in trades if t["pl"] > 0.01)
+    losses = sum(1 for t in trades if t["pl"] < -0.01)
+    win_rate = wins / n if n else 0.0
+    edge = [t for t in trades if t["good"]]
+    noise = [t for t in trades if not t["good"]]
+    edge_pl = sum(t["pl"] for t in edge)
+    noise_pl = sum(t["pl"] for t in noise)
+    buys = [t for t in trades if t["vol"] == "long"]
+    sells = [t for t in trades if t["vol"] == "short"]
+    discipline = (len(edge) / n) if n else 1.0
+    g = grade(net, edge_pl, noise_pl, win_rate, discipline)
+
+    bar = "═" * 60
+    print("\n" + bar)
+    print("                     S C O R E C A R D")
+    print(bar)
+    print(f"  Starting gold ........ {start:8.2f}")
+    print(f"  Final gold ........... {final:8.2f}")
+    print(f"  Net P/L .............. {net:+8.2f}   ({roi:+.1f}% ROI)")
+    print("  " + "-" * 56)
+    print(f"  Trades taken ......... {n}   (wins {wins} / losses {losses}, "
+          f"win rate {win_rate*100:.0f}%)")
+    print(f"  Buys / Sells ......... {len(buys)} / {len(sells)}")
+    if trades:
+        best = max(trades, key=lambda t: t["pl"])
+        worst = min(trades, key=lambda t: t["pl"])
+        print(f"  Best trade ........... {best['pl']:+8.2f}  ({best['label']} on {best['name']})")
+        print(f"  Worst trade .......... {worst['pl']:+8.2f}  ({worst['label']} on {worst['name']})")
+    print("  " + "-" * 56)
+    print(f"  EDGE trades .......... {len(edge):2d}   net {edge_pl:+8.2f}   <- your skill")
+    print(f"  Coin-flip trades ..... {len(noise):2d}   net {noise_pl:+8.2f}   <- noise")
+    print("  " + "-" * 56)
+    print(f"  GRADE ................   {g}")
+    print(bar)
+    # tailored feedback
+    if not trades:
+        wrap("You never traded. Capital preserved — but you also learned nothing this run. "
+             "Next time act when a catalyst lines up with cheap/rich IV.")
+    else:
+        if edge_pl > 0 and edge_pl >= noise_pl:
+            wrap("Your edge trades carried the result — that's exactly the goal: profit comes "
+                 "from reading the catalyst + IV, not from coin flips.")
+        if noise_pl < 0 and len(noise) > len(edge):
+            wrap("Too many no-edge trades dragged you down. Discipline — sitting out when there's "
+                 "no signal — is itself a skill.")
+        if edge_pl <= 0 and edge:
+            wrap("Even edge trades lost this run — variance happens over a short season. The setups "
+                 "were right; small samples are noisy. Process over outcome.")
+    print(bar)
+
 def play():
     random.seed()
     coms = {n: Commodity(n, dict(p)) for n, p in COMMODITIES.items()}
     intro(coms)
     gold = START_GOLD
-    scored = {"n": 0, "pl": 0.0}
+    scored = {"n": 0, "pl": 0.0, "trades": []}
     month_idx = HIST_MONTHS            # first played month = right after history
 
     for turn in range(1, PLAY_MONTHS + 1):
@@ -489,17 +555,7 @@ def play():
         if gold < 1:
             print("\n   Out of gold. Game over."); break
 
-    print("\n" + "=" * 84)
-    net = gold - START_GOLD
-    print(f"FINAL GOLD: {gold:.2f}   (started {START_GOLD:.0f}, net {net:+.2f})")
-    if scored["n"]:
-        print(f"Edge trades (with catalyst, cheap/fair IV): {scored['n']}   net P/L {scored['pl']:+.2f}")
-        wrap("That edge P/L is your skill; the rest is noise. Information — reading the "
-             "history, the IV Rank, and the catalyst — is what separates trading from gambling.")
-    else:
-        wrap("No edge trades made. With no signal behind a position it's a coin flip — "
-             "exactly the plain game's point.")
-    print("=" * 84)
+    scorecard(START_GOLD, gold, scored)
     print("Real parallel: history/sparkline = price chart; rVol & IV Rank = volatility "
           "signals; catalyst = news/earnings/supply data. The Trader Screener surfaces all "
           "of these so your decisions carry an edge.")

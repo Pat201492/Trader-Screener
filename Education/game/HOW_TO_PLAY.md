@@ -9,6 +9,14 @@ python catan_options_game.py
 ```
 No dependencies (pure standard library).
 
+**Desktop shortcut (Windows):** run once to drop a "Catan Options" icon on your Desktop that launches the signals game:
+```
+powershell -ExecutionPolicy Bypass -File create_desktop_shortcut.ps1
+```
+(or double-click `run_game.bat` in this folder). The shortcut runs the repo script, so updates apply automatically.
+
+**Scorecard:** every game ends with a scorecard — net P/L & ROI, win rate, best/worst trade, your **edge trades vs coin-flip trades**, and a letter grade with tailored feedback.
+
 ## The idea
 You start with **100 gold**. Over **10 seasons** you buy options on commodities; each season prices move and your option settles.
 
