@@ -119,6 +119,141 @@ A producer is **long physical crude** and wants to **protect a budget floor** wi
 
 ---
 
+# EXAMPLE 3 — EQUITY, BEARISH (hypothetical)
+
+## Overdrive Retail — OVR · Equity · Consumer Discretionary
+**Date:** illustrative · **Rating: SELL** · **12-mo target: $125** (−17% vs $150 spot)
+
+### Snapshot
+| Metric | Value | Metric | Value |
+|---|---|---|---|
+| Price | $150 | Avg daily $ vol | $420M |
+| Fwd P/E | 31× (vs peers 18×) | Beta | 1.1 |
+| 52-wk range | $138 – $205 | Realized vol (30d) | 39% |
+| Upside to target | −17% | **IV / IV Rank** | **47% / 80** (very rich) |
+
+### Thesis
+Margins compressing as discount peers take share; valuation still priced for growth. Price broke below the 200-day MA. **IV Rank 80** → puts are expensive, so a *lone* long put overpays vega → use a **spread**.
+
+### Catalysts & risks
+- **Catalysts:** holiday sales data, guidance cut risk at earnings.
+- **Risks (to the short):** short squeeze (high short interest), a takeout bid, a dovish macro turn lifting all retail.
+
+### ▶ Derivative recommendation — **Bear Put Spread**
+**Long 150 put / short 130 put, ~3-month · net debit $7/share.**
+
+| Metric | Value |
+|---|---|
+| Max profit | **$13/share** (at ≤ $130) |
+| Max loss | **$7/share** (debit) |
+| Breakeven | **$143** |
+| Why | bearish in **high IV** → the short 130 put funds the long, caps vega cost vs a lone put |
+
+![OVR bear put spread payoff](img/tear_bear_put_payoff.png)
+
+---
+
+# EXAMPLE 4 — EQUITY, RANGE-BOUND / INCOME (hypothetical)
+
+## Rangebound Utilities — RNG · Equity · Utilities
+**Date:** illustrative · **View: NEUTRAL (range $93–$107)** · **Goal: income**
+
+### Snapshot
+| Metric | Value | Metric | Value |
+|---|---|---|---|
+| Price | $100 | Beta | 0.45 (low) |
+| 52-wk range | $88 – $112 | Realized vol (30d) | 16% (calm) |
+| Dividend yield | 3.8% | **IV / IV Rank** | **24% / 78** (rich vs its own calm) |
+
+### Thesis
+Low-beta, rate-sensitive, **tends to mean-revert in a tight band**. No near-term catalyst. **IV Rank is high relative to its low realized vol** → option premium is overpriced for how little this name actually moves. **Sell** that premium, defined-risk.
+
+### ▶ Derivative recommendation — **Iron Condor**
+**Sell 93/107 strikes, buy 88/112 wings, ~6-week · net credit $1.60.**
+
+| Metric | Value |
+|---|---|
+| Max profit | **+$1.60** (price stays $93–$107) |
+| Max loss | **−$3.40** (wing width − credit) |
+| Breakevens | **$91.40 / $108.60** |
+| Greek bias | **−vega, +theta** — profits from time decay + falling IV |
+
+![RNG iron condor payoff](img/tear_iron_condor_payoff.png)
+
+---
+
+# EXAMPLE 5 — EQUITY, EVENT / LONG VOLATILITY (hypothetical)
+
+## Biocatalyst Therapeutics — BIO · Equity · Biotech
+**Date:** illustrative · **View: BIG MOVE, direction unknown** · **Event: trial readout**
+
+### Snapshot
+| Metric | Value | Metric | Value |
+|---|---|---|---|
+| Price | $50 | Catalyst | Phase-3 readout (~4 wks) |
+| 52-wk range | $22 – $78 | Realized vol (30d) | 55% (high, but...) |
+| Binary outcome | yes | **IV / IV Rank** | **60% / 30** (low *for this name*) |
+
+### Thesis
+A trial readout is **binary** — the stock gaps up on success or craters on failure; direction is genuinely unknown. Crucially **IV Rank is only 30** — the market hasn't *yet* fully priced the event, so volatility is **cheap relative to the move coming.** Buy volatility, not direction.
+
+### ▶ Derivative recommendation — **Long Straddle**
+**Long 50 call + long 50 put, expiry after the readout · total premium $4.**
+
+| Metric | Value |
+|---|---|
+| Max profit | large (either tail) |
+| Max loss | **$4** (both premiums) |
+| Breakevens | **$46 / $54** |
+| Greek bias | **+vega, −theta** — wants the move *and* rising IV; hurt by delay |
+| ⚠️ Risk | **IV crush** — if the event resolves mildly, IV collapses and both legs lose |
+
+![BIO long straddle payoff](img/tear_straddle_payoff.png)
+
+---
+
+# EXAMPLE 6 — ETF / PORTFOLIO HEDGE (hypothetical)
+
+## Broad-Market ETF — BMKT · Equity index ETF
+**Date:** illustrative · **View: LONG-TERM HOLD, hedge a drawdown** · **Use: portfolio insurance**
+
+### Snapshot
+| Metric | Value | Metric | Value |
+|---|---|---|---|
+| Price | $500 | Holding | core long position |
+| **IV / IV Rank** | **18% / 25** (low — cheap insurance) | Macro | election + rate uncertainty ahead |
+
+### Thesis
+Keep the long-term holding, but **near-term tail risk** is elevated and **IV Rank is low** → protection is *cheap right now*. Buy insurance before fear is priced in (Harris: hedge before the adverse-selection premium widens).
+
+### ▶ Derivative recommendation — **Protective Put**
+**Long ETF + buy 480 put, ~3-month · premium $8/share.**
+
+| Metric | Value |
+|---|---|
+| Max profit | unlimited (the ETF's upside, less premium) |
+| Max loss | **floored at −$28/share** (below $480) |
+| Cost of insurance | $8/share (≈1.6%) |
+| Why now | **low IV Rank = cheap puts**; defined, known downside |
+
+![BMKT protective put payoff](img/tear_protective_put_payoff.png)
+
+---
+
+## The six examples in one table
+| # | Instrument | View | IV Rank | Structure | Why that structure |
+|---|---|---|---|---|---|
+| 1 | NWS (equity) | Bullish | 72 (high) | Bull call spread | bullish but IV rich → cap vega cost |
+| 2 | WTI (commodity) | Hedge long | 65 (high) | Costless collar | sell rich call to fund put floor |
+| 3 | OVR (equity) | Bearish | 80 (high) | Bear put spread | bearish in high IV → spread not lone put |
+| 4 | RNG (equity) | Neutral/range | 78 (high) | Iron condor | sell overpriced premium, defined risk |
+| 5 | BIO (equity) | Big move, unknown dir | 30 (low) | Long straddle | buy cheap vol before a binary event |
+| 6 | BMKT (ETF) | Hold + hedge | 25 (low) | Protective put | cheap insurance, low IV Rank |
+
+> **The through-line:** the **view sets the delta** (up/down/neutral/move), the **IV Rank sets the structure** (buy premium when low, sell/spread when high). Same rule, six situations.
+
+---
+
 # WHY THIS IS THE SCREENER'S TARGET OUTPUT
 This tear sheet is essentially **what the Trader Screener's per-instrument detail view should generate.** Every block maps to data the project already has or plans to collect:
 
