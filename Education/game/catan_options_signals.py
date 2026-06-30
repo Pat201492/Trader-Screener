@@ -36,29 +36,38 @@ def Ncdf(x):
 # drift: annual log-trend | seas_amp/phase: annual seasonality | rho: cyclical
 # persistence (momentum vs mean-reversion) | vol_m: base monthly vol | jump_p/size:
 # shock probability/magnitude | analog: the real instrument it mimics.
+# Realism params (added):
+#   beta   = loading on a shared MACRO factor -> commodities co-move (real markets do)
+#   mom_k  = short-term MOMENTUM gain on recent 3-month return (trend then reverts)
+#   jbias  = probability a jump is UPWARD (supply shocks skew ag/metal spikes up)
 COMMODITIES = {
     "Grain":  dict(start=7.0,  drift=0.015, seas_amp=0.13, phase=1.6, rho=0.70,
-                   vol_m=0.060, jump_p=0.04, jump=0.14, analog="agricultural grain (seasonal)",
+                   vol_m=0.060, jump_p=0.04, jump=0.14, beta=0.45, mom_k=0.25, jbias=0.65,
+                   analog="agricultural grain (seasonal)",
                    exporters="Russia, USA, Canada, Ukraine, Australia, EU",
                    importers="Egypt, China, Indonesia, Algeria, Turkey",
                    drivers="weather/harvest, planting cycles, export bans, fuel & fertilizer costs"),
     "Lumber": dict(start=9.0,  drift=0.020, seas_amp=0.03, phase=0.0, rho=0.93,
-                   vol_m=0.110, jump_p=0.05, jump=0.20, analog="lumber (boom/bust cyclical)",
+                   vol_m=0.110, jump_p=0.05, jump=0.20, beta=0.55, mom_k=0.35, jbias=0.55,
+                   analog="lumber (boom/bust cyclical)",
                    exporters="Canada, Russia, Sweden, Finland, Germany",
                    importers="USA, China, Japan, UK",
                    drivers="housing starts, interest rates, wildfires, sawmill capacity"),
     "Brick":  dict(start=10.0, drift=0.035, seas_amp=0.02, phase=0.0, rho=0.85,
-                   vol_m=0.050, jump_p=0.02, jump=0.10, analog="construction material (steady trend)",
+                   vol_m=0.050, jump_p=0.02, jump=0.10, beta=0.50, mom_k=0.20, jbias=0.50,
+                   analog="construction material (steady trend)",
                    exporters="Vietnam, Turkey, Thailand, UAE, China",
                    importers="USA, Bangladesh, Philippines, Australia",
                    drivers="construction activity, energy costs, infrastructure spending"),
     "Wool":   dict(start=8.0,  drift=0.005, seas_amp=0.07, phase=2.4, rho=0.80,
-                   vol_m=0.080, jump_p=0.03, jump=0.12, analog="soft commodity (mild seasonal)",
+                   vol_m=0.080, jump_p=0.03, jump=0.12, beta=0.40, mom_k=0.20, jbias=0.55,
+                   analog="soft commodity (mild seasonal)",
                    exporters="Australia, New Zealand, China, South Africa",
                    importers="China, India, Italy, Czechia",
                    drivers="flock sizes, textile/fashion demand, synthetic substitutes, drought"),
     "Ore":    dict(start=14.0, drift=0.012, seas_amp=0.02, phase=0.0, rho=0.90,
-                   vol_m=0.110, jump_p=0.05, jump=0.22, analog="industrial metal / iron ore (cyclical)",
+                   vol_m=0.110, jump_p=0.05, jump=0.22, beta=0.65, mom_k=0.30, jbias=0.60,
+                   analog="industrial metal / iron ore (cyclical)",
                    exporters="Australia, Brazil, South Africa, India",
                    importers="China, Japan, South Korea, Germany",
                    drivers="Chinese steel demand, mine outages/supply, infrastructure cycles"),
@@ -175,7 +184,7 @@ INFO = [
     ("Implied vol", "The vol used to price options = fair dispersion x an IV-Rank markup (0.85-1.15x).",
      "Above realized = options rich (sell); below = cheap (buy). The gap is the variance risk premium."),
     ("Trend (up/flat/down)", "Sign of the 6-month price change, with a +/-4% dead-band.",
-     "Context, NOT a standalone edge here. In this simulation prices MEAN-REVERT around their trend (verified by validate_model.py), so a stretched move tends to partially reverse — don't blindly chase it. The reliable edges are the catalyst and IV Rank. (Real markets show momentum too; this sim does not.)"),
+     "Now carries SHORT-TERM momentum: recent moves tend to persist a month or two (verified by validate_model.py, lag-1 autocorr > 0), so trend is a useful secondary confirmation. But moves are bounded and seasonals mean-revert over longer horizons — don't chase a stretched move. The primary edges remain the catalyst + IV Rank; trend confirms direction."),
     ("Catalyst / market news", "An event shifting supply or demand (harvest, mine outage, housing, policy).",
      "The 'why now'. Match direction (bull->call, bear->put); no catalyst = no edge = sit out."),
     ("Forward price (F)", "Monte-Carlo mean of the next month's price with no catalyst.",
@@ -229,9 +238,10 @@ def show_information():
     print("Rule of thumb: BUY (call/put) when IV is CHEAP + a catalyst; SELL (CSP / covered "
           "call / credit spread) when IV is RICH; sit out when neither.")
     wrap("Model is validated by validate_model.py: catalysts move price (bull>none>bear), "
-         "volatility clusters (IV Rank is informative), the priced forward is unbiased (honest "
-         "pricing), and signal-aligned trades beat no-edge beat wrong-way. Prices mean-revert "
-         "around trend, so the catalyst + IV Rank — not the trend arrow — are the real edges.")
+         "volatility clusters (IV Rank is informative), prices show short-term momentum + "
+         "co-move via a shared macro factor, the priced forward is unbiased (honest pricing), "
+         "and signal-aligned trades beat no-edge beat wrong-way. Edges: catalyst + IV Rank, "
+         "with trend as secondary confirmation.")
     print("#" * 72)
 
 def annualized_vol(logrets):
@@ -252,14 +262,30 @@ class Commodity:
         self._build_history()
         self._iv_distribution()
 
-    def _emit(self, rng, catalyst_drift=0.0):
+    def _emit(self, rng, catalyst_drift=0.0, market=None):
         pp = self.p
+        # stochastic volatility (clustering)
         self.h = 0.9 * self.h + 0.30 * rng.gauss(0, 1)
         sigma = pp["vol_m"] * math.exp(0.5 * self.h)
+        # shock: blend a shared MACRO factor (co-movement) with idiosyncratic noise.
+        idio = rng.gauss(0, 1)
+        if market is None:
+            shock = idio                                   # unit variance either way
+        else:
+            b = pp["beta"]
+            shock = b * market + math.sqrt(max(0.0, 1 - b * b)) * idio
+        # asymmetric jumps (supply shocks skew up)
         jump = 0.0
         if rng.random() < pp["jump_p"]:
-            jump = pp["jump"] * (1 if rng.random() < 0.5 else -1)
-        self.c = pp["rho"] * self.c + sigma * rng.gauss(0, 1) + jump + catalyst_drift
+            jump = pp["jump"] * (1 if rng.random() < pp["jbias"] else -1)
+        # short-term momentum from the recent 3-month return (clipped; decays via rho)
+        mom = 0.0
+        if len(self.prices) >= 4:
+            rr = self.prices[-1] / self.prices[-4] - 1
+            rr = max(-0.4, min(0.4, rr))               # clip to avoid runaway feedback
+            mom = pp["mom_k"] * rr
+        self.c = pp["rho"] * self.c + sigma * shock + jump + catalyst_drift + mom
+        self.c = max(-1.5, min(1.5, self.c))           # bound deviation (price in ~0.2x..4.5x trend)
         self.t += 1
         month = self.t % 12
         seas = pp["seas_amp"] * math.sin(2 * math.pi * month / 12 + pp["phase"])
@@ -303,8 +329,8 @@ class Commodity:
         w = self.prices[-n:]
         return min(w), max(w)
 
-    def advance(self, catalyst_drift):
-        return self._emit(random, catalyst_drift)   # forward uses global RNG
+    def advance(self, catalyst_drift, market=None):
+        return self._emit(random, catalyst_drift, market)   # forward uses global RNG
 
 # ---------------------------------------------------------------- pricing
 def forward_stats(com, sims=500):
@@ -659,13 +685,15 @@ def play():
         pos, gold = trade_phase(coms, gold, catalyst, priced_in)
 
         input("\n(press Enter to advance one month...)")
-        # forward step: catalyst adds monthly log-drift to its commodity (damped if priced in)
+        # forward step: one shared MACRO shock drives co-movement; catalyst adds monthly
+        # log-drift to its commodity (damped if priced in).
+        market = random.gauss(0, 1)
         for n, c in coms.items():
             d = 0.0
             if n == ccom and cdir != "none":
                 sign = 1 if cdir == "bull" else -1
                 d = sign * (strength / 12) * (0.3 if priced_in else 1.0)
-            c.advance(d)
+            c.advance(d, market=market)
         month_idx += 1
         if pos:
             gold = settle(pos, coms[pos["name"]].price(), gold, scored)
