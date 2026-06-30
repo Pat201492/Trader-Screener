@@ -73,21 +73,49 @@ def check2_clustering():
     return ok
 
 def check3_momentum():
-    print("\n[3] TREND DYNAMICS  corr(6m past return, next-month return)  "
-          "(this sim MEAN-REVERTS -> expect < 0)")
+    print("\n[3] TREND DYNAMICS  short-term lag-1 autocorr (momentum, expect >0) vs "
+          "6m->next (long-horizon reversion, expect <0)")
+    ok = True
     for name in g.COMMODITIES:
-        prices, rets = long_path(name, 800, seed=23)
+        prices, rets = long_path(name, 1000, seed=23)
+        lag1 = pearson(rets[:-1], rets[1:])
         past, nxt = [], []
         for t in range(6, len(prices)-1):
             past.append(prices[t]/prices[t-6] - 1)
             nxt.append(prices[t+1]/prices[t] - 1)
-        c = pearson(past, nxt)
-        rho = g.COMMODITIES[name]["rho"]
-        print(f"   {name:7} rho={rho:.2f}  corr={c:+.3f}  "
-              f"{'momentum' if c > 0.03 else ('mean-revert' if c < -0.03 else 'flat')}")
-    print("   => CONSISTENT: prices mean-revert; the in-game guidance treats trend as context, "
-          "not a momentum edge (the validated edges are catalyst + IV Rank).")
-    return True
+        long6 = pearson(past, nxt)
+        good = lag1 > 0                                  # short-term momentum is the key property
+        ok = ok and good
+        print(f"   {name:7} lag1={lag1:+.3f} ({'momentum' if lag1>0 else 'revert'})  "
+              f"6m->next={long6:+.3f} ({'trend' if long6>0 else 'revert'})  "
+              f"{'OK' if good else 'FAIL'}")
+    print("   => " + ("PASS: short-term MOMENTUM everywhere (lag-1>0); longer horizon trends for "
+                      "cyclicals (Lumber/Ore), reverts for seasonals (Grain/Wool) — realistic."
+                      if ok else "FAIL"))
+    return ok
+
+def check6_correlation():
+    print("\n[6] CO-MOVEMENT  avg pairwise corr of monthly returns (shared macro factor, expect >0)")
+    random.seed(31)
+    names = list(g.COMMODITIES)
+    coms = {n: g.Commodity(n, dict(g.COMMODITIES[n])) for n in names}
+    series = {n: [] for n in names}
+    for _ in range(600):
+        market = random.gauss(0, 1)
+        for n in names:
+            p0 = coms[n].price(); coms[n].advance(0.0, market=market)
+            series[n].append(math.log(coms[n].price() / p0))
+    corrs = []
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            corrs.append(pearson(series[names[i]], series[names[j]]))
+    avg = sum(corrs) / len(corrs)
+    lo, hi = min(corrs), max(corrs)
+    print(f"   pairwise corr: avg={avg:+.3f}  range {lo:+.3f}..{hi:+.3f}")
+    ok = avg > 0.1
+    print("   => " + ("PASS: commodities co-move via the shared factor (realistic)." if ok
+                      else "weak co-movement"))
+    return ok
 
 def check4_forward():
     print("\n[4] FORWARD UNBIASED  |F - true_mean| / price  (expect tiny)")
@@ -133,7 +161,7 @@ if __name__ == "__main__":
     print(" MODEL VALIDATION — is the data predictive, not random?")
     print("=" * 64)
     results = [check1_catalyst(), check2_clustering(), check3_momentum(),
-               check4_forward(), check5_edge_ev()]
+               check4_forward(), check5_edge_ev(), check6_correlation()]
     print("\n" + "=" * 64)
-    print(f" SUMMARY: {sum(bool(r) for r in results)}/5 checks passed.")
+    print(f" SUMMARY: {sum(bool(r) for r in results)}/{len(results)} checks passed.")
     print("=" * 64)
