@@ -52,7 +52,15 @@ A **call/put reference banner stays at the top** of every turn. Each turn is **o
 
 **What you read each month** (shown per commodity): current price, a **5-year sparkline**, the 5y range, **realized volatility**, **IV Rank** (how high its vol is vs its own 5y history → CHEAP/FAIR/RICH), and a **trend arrow**. Premiums are priced off each commodity's realized vol, so RICH-IV options genuinely cost more.
 
-**Your edge:** trade WITH a catalyst when IV is **CHEAP/FAIR** (bullish→call, bearish→put). Avoid **RICH** IV — the move is largely priced in and the premium is inflated. No catalyst = no edge = sit out.
+**Two ways to trade (the action menu):**
+- **Buy premium** (long call/put) — cheap, max loss = premium. Best when **IV is CHEAP + a catalyst** is coming.
+- **Sell premium** — you *collect* premium and win if the move **doesn't** happen. Best when **IV is RICH**. Choices:
+  - **Cash-secured put** — bullish/neutral income; needs strike×size as collateral.
+  - **Covered call** — buys the stock + sells a call against it; caps upside for income.
+  - **Bull put / bear call credit spread** — defined-risk; capped profit and capped loss.
+  Selling requires capital to back the risk (the game enforces a collateral check).
+
+**Your edge:** **buy** when IV is CHEAP + a catalyst (bullish→call, bearish→put); **sell** when IV is RICH (and don't sell *against* a catalyst). No catalyst + fair IV = sit out. Options carry an IV premium scaled to IV Rank, so this buy-cheap / sell-rich rule is genuinely +EV in the sim (verified by Monte Carlo), not just flavor.
 
 The end screen scores your **edge trades** separately so information visibly beats luck:
 ```

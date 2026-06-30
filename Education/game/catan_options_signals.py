@@ -180,6 +180,13 @@ def forward_stats(com, sims=500):
     sigma = math.sqrt(var) * math.sqrt(12)
     return F, max(sigma, 0.05)
 
+def iv_markup(rank):
+    """Implied vol carries a rank-based premium over true dispersion (the variance
+    risk premium). RICH IV (high rank) -> options priced ABOVE fair (selling harvests
+    it); CHEAP IV -> priced BELOW fair (buying gets a bargain); FAIR (~50) -> ~fair."""
+    rank = max(0, min(100, rank))
+    return 1 + 0.15 * (rank - 50) / 50
+
 def black_premium(kind, F, K, sigma, T):
     """Black model: option priced on the forward F (r=0). No-drift-edge baked out."""
     sigma = max(sigma, 0.05)
@@ -221,8 +228,14 @@ def intro(coms):
          "commodity (a sparkline), its realized volatility, and its IV RANK (how high its "
          "vol is vs its own history). CHEAP IV (low rank) = options underpriced; RICH IV "
          "(high rank) = options expensive and the move is likely already priced in.")
-    wrap("EDGE: trade WITH a catalyst when IV is CHEAP (bullish->call, bearish->put). "
-         "Avoid RICH IV. No catalyst = no edge = sit out.")
+    wrap("TWO WAYS TO TRADE:")
+    wrap("- BUY premium (long call/put): cheap and best when IV is CHEAP + a catalyst is "
+         "coming. Max loss = the premium.", "  ")
+    wrap("- SELL premium (cash-secured put, covered call, credit spreads): you COLLECT the "
+         "premium and win if the move DOESN'T happen. Best when IV is RICH (premium fat). "
+         "Needs capital as collateral; spreads cap the risk.", "  ")
+    wrap("EDGE RULE: buy when IV CHEAP + catalyst; sell when IV RICH. No catalyst and low "
+         "IV = sit out.")
     print()
     wrap("STRIKES & MONEYNESS: each option offers three strikes. A CALL with strike "
          "BELOW spot — or a PUT with strike ABOVE spot — is IN-THE-MONEY: it already "
@@ -254,20 +267,104 @@ def show_board(coms, month_idx, turn, gold):
         print(f"{n:<9}{c.price():>7.2f}  {spark:<30}{f'{lo:.1f}-{hi:.1f}':>14}  "
               f"{c.realized_vol()*100:>4.0f}%  {iv_tag(c.iv_rank()):<10}{c.trend():>5}")
 
-def buy_phase(coms, gold, catalyst, priced_in):
+def intrinsic(kind, K, S):
+    return max(S - K, 0) if kind == "call" else max(K - S, 0)
+
+def _build_long(com, F, sigma, gold, cdir, name, cheap, rich):
+    """Buy a single call or put (long premium). Returns pos or None."""
+    S = com.price(); T = 1 / 12
+    kind = ask("Call (up) or Put (down)? (c/p): ", {"c": "call", "p": "put"})
+    ks = strikes_for(S); chain = {}
+    print(f"\n   {name} @ {S:.2f}   LONG {kind.upper()}   IV {iv_tag(com.iv_rank())}  (implied vol {sigma*100:.0f}%)")
+    print("   (ITM = already exercisable, has intrinsic value, costs more; OTM = needs a move, cheap)")
+    for i, K in enumerate(ks, 1):
+        prem = black_premium(kind, F, K, sigma, T)
+        intr = intrinsic(kind, S, K) if False else intrinsic(kind, K, S)
+        mny = "ITM" if intr > 0 else ("ATM" if K == round(S) else "OTM")
+        note = f"{intr:.2f} intrinsic" if intr > 0 else f"needs {'rise' if kind=='call' else 'fall'} past {K}"
+        chain[str(i)] = (K, prem)
+        print(f"   {i}) strike {K:<4} premium {prem:>5.2f}/u  contract {prem*UNITS:>6.2f}  [{mny}: {note}]")
+    K, prem = ask("Pick a strike (number): ", chain)
+    cost = prem * UNITS
+    if cost > gold:
+        print(f"   Not enough gold for {cost:.2f}."); return None
+    bias = "bull" if kind == "call" else "bear"
+    aligned = (name == cdir[0] and cdir[1] != "none" and
+               ((cdir[1] == "bull" and kind == "call") or (cdir[1] == "bear" and kind == "put")))
+    be = K + prem if kind == "call" else K - prem
+    print(f"\n   BOUGHT long {kind} on {name} @ {K}, paid {cost:.2f} (max loss). Breakeven {be:.2f}.")
+    return dict(name=name, label=f"long {kind} @ {K}",
+                legs=[(kind, K, +1, prem)], stock=None, entry=-cost,
+                max_profit=None, max_loss=cost, be=(K + prem if kind == "call" else K - prem),
+                bias=bias, vol="long", good=aligned and cheap)
+
+def _build_sell(com, F, sigma, gold, cdir, name, cheap, rich, choice):
+    """Build a premium-SELLING structure. choice in 1..4. Returns pos or None."""
+    S = com.price(); T = 1 / 12
+    def P(kind, K): return black_premium(kind, F, K, sigma, T)
+
+    if choice == "1":   # cash-secured put (income, bullish/neutral)
+        K = max(1, round(S * 0.95)); p = P("put", K)
+        legs = [("put", K, -1, p)]; entry = p * UNITS
+        max_profit = p * UNITS; max_loss = K * UNITS - p * UNITS; be = K - p
+        label = f"cash-secured put @ {K}"; bias = "bull"
+    elif choice == "2": # covered call (own stock + short call)
+        Kc = round(S * 1.05); c = P("call", Kc)
+        legs = [("call", Kc, -1, c)]; stock = (UNITS, S)
+        entry = c * UNITS - S * UNITS
+        max_profit = (Kc - S) * UNITS + c * UNITS; max_loss = S * UNITS - c * UNITS; be = S - c
+        label = f"covered call @ {Kc} (own stock @ {S:.2f})"; bias = "neutral"
+        pos = dict(name=name, label=label, legs=legs, stock=stock, entry=entry,
+                   max_profit=max_profit, max_loss=max_loss, be=be, bias=bias, vol="short")
+        return _finish_sell(pos, gold, cdir, name, rich)
+    elif choice == "3": # bull put credit spread (defined risk, bullish/neutral)
+        Kh = round(S * 0.97); Kl = round(S * 0.90)
+        if Kl >= Kh: Kl = Kh - 1
+        ph, pl = P("put", Kh), P("put", Kl); credit = max(ph - pl, 0.05)
+        legs = [("put", Kh, -1, ph), ("put", Kl, +1, pl)]; entry = credit * UNITS
+        width = Kh - Kl
+        max_profit = credit * UNITS; max_loss = (width - credit) * UNITS; be = Kh - credit
+        label = f"bull put spread {Kl}/{Kh}"; bias = "bull"
+    else:               # bear call credit spread (defined risk, bearish/neutral)
+        Kl = round(S * 1.03); Kh = round(S * 1.10)
+        if Kh <= Kl: Kh = Kl + 1
+        cl, ch = P("call", Kl), P("call", Kh); credit = max(cl - ch, 0.05)
+        legs = [("call", Kl, -1, cl), ("call", Kh, +1, ch)]; entry = credit * UNITS
+        width = Kh - Kl
+        max_profit = credit * UNITS; max_loss = (width - credit) * UNITS; be = Kl + credit
+        label = f"bear call spread {Kl}/{Kh}"; bias = "bear"
+
+    pos = dict(name=name, label=label, legs=legs, stock=None, entry=entry,
+               max_profit=max_profit, max_loss=max_loss, be=be, bias=bias, vol="short")
+    return _finish_sell(pos, gold, cdir, name, rich)
+
+def _finish_sell(pos, gold, cdir, name, rich):
+    if pos["max_loss"] > gold:
+        print(f"   Need {pos['max_loss']:.2f} gold as collateral to sell this; you have "
+              f"{gold:.2f}. (Selling premium requires capital to back the risk.)")
+        return None
+    cd = cdir[1]
+    not_against = (cd == "none") or not ((pos["bias"] == "bull" and cd == "bear") or
+                                         (pos["bias"] == "bear" and cd == "bull"))
+    pos["good"] = rich and not_against
+    print(f"\n   SOLD {pos['label']} on {name}: collected {pos['entry']:+.2f} now. "
+          f"Max profit {pos['max_profit']:.2f}, max loss {pos['max_loss']:.2f}, breakeven {pos['be']:.2f}.")
+    return pos
+
+def trade_phase(coms, gold, catalyst, priced_in):
     head, ccom, cdir, _ = catalyst
     print("\n  MARKET NEWS:  " + head)
     if cdir != "none":
         rank = coms[ccom].iv_rank()
-        note = "RICH (likely already priced in)" if priced_in else "CHEAP/FAIR (room to run)"
-        hint = "call" if cdir == "bull" else "put"
+        note = "RICH (likely already priced in -> favor SELLING premium)" if priced_in \
+               else "CHEAP/FAIR (room to run -> favor BUYING premium)"
         print(f"  -> {ccom} ({cdir}ish).  Its IV Rank = {rank} -> {note}.")
-        print(f"     Textbook: {cdir}ish + {'CHEAP' if not priced_in else 'RICH'} IV -> "
-              f"{'buy a ' + hint if not priced_in else 'AVOID (premium too rich, move priced in)'}.")
     else:
-        print("  -> no clear catalyst; no edge this month. Sitting out is fine.")
+        print("  -> no clear catalyst; no directional edge. Selling premium in RICH IV is still valid.")
 
-    if not ask("\nBuy an option? (y/n): ", {"y": True, "n": False}):
+    action = ask("\nAction: (b)uy option, (s)ell premium, or (n)othing? ",
+                 {"b": "buy", "s": "sell", "n": "none"})
+    if action == "none":
         return None, gold
 
     names = list(coms.keys()); menu = {str(i+1): n for i, n in enumerate(names)}
@@ -275,58 +372,47 @@ def buy_phase(coms, gold, catalyst, priced_in):
         flag = "   <- in the news" if n == ccom and cdir != "none" else ""
         print(f"   {k}) {n}  @ {coms[n].price():.2f}   IV {iv_tag(coms[n].iv_rank())}{flag}")
     name = ask("Pick a commodity (number): ", menu)
-    com = coms[name]; S = com.price()
-    kind = ask("Call (up) or Put (down)? (c/p): ", {"c": "call", "p": "put"})
+    com = coms[name]
+    F, sigma_true = forward_stats(com)
+    rank = com.iv_rank(); rich = rank >= 66; cheap = rank <= 40
+    sigma = sigma_true * iv_markup(rank)         # implied vol = fair dispersion + rank-based premium
+    cd = (ccom, cdir)
 
-    T = 1 / 12                                   # 1-month option
-    F, sigma = forward_stats(com)                 # fair forward + true dispersion -> fair premium
-    ks = strikes_for(S); chain = {}
-    print(f"\n   {name} @ {S:.2f}   {kind.upper()}   IV {iv_tag(com.iv_rank())}  (fair vol {sigma*100:.0f}%)")
-    print("   (ITM = already exercisable, has intrinsic value, costs more; "
-          "OTM = needs a move to pay off, cheap)")
-    for i, K in enumerate(ks, 1):
-        prem = black_premium(kind, F, K, sigma, T)
-        if kind == "call":
-            intrinsic = max(S - K, 0)
-        else:
-            intrinsic = max(K - S, 0)
-        mny = "ITM" if intrinsic > 0 else ("ATM" if K == round(S) else "OTM")
-        note = (f"{intrinsic:.2f} intrinsic" if intrinsic > 0
-                else (f"needs {kind=='call' and 'rise' or 'fall'} past {K}"))
-        chain[str(i)] = (K, prem)
-        print(f"   {i}) strike {K:<4} premium {prem:>5.2f}/u  contract {prem*UNITS:>6.2f}  "
-              f"[{mny}: {note}]")
-    K, prem = ask("Pick a strike (number): ", chain)
+    if action == "buy":
+        pos = _build_long(com, F, sigma, gold, cd, name, cheap, rich)
+    else:
+        print("\n   SELL premium — pick a structure:")
+        print("   1) Cash-secured put   (income; bullish/neutral; profit if price stays up)")
+        print("   2) Covered call       (own stock + sell call; neutral/mild-bull; capped upside)")
+        print("   3) Bull put spread    (defined-risk credit; bullish/neutral)")
+        print("   4) Bear call spread   (defined-risk credit; bearish/neutral)")
+        choice = ask("Structure (1-4): ", {"1": 1, "2": 2, "3": 3, "4": 4})
+        pos = _build_sell(com, F, sigma, gold, cd, name, cheap, rich, str(choice))
 
-    cost = prem * UNITS
-    if cost > gold:
-        print(f"   Not enough gold for {cost:.2f}. Skipping."); return None, gold
-    be = K + prem if kind == "call" else K - prem
-    gold -= cost
-    aligned = (name == ccom and cdir != "none" and
-               ((cdir == "bull" and kind == "call") or (cdir == "bear" and kind == "put")))
-    print(f"\n   BOUGHT {kind} on {name} @ {K}, paid {cost:.2f}. Breakeven {be:.2f}.")
-    pos = dict(name=name, kind=kind, K=K, cost=cost, be=be,
-               aligned=aligned, good=aligned and not priced_in,
-               priced=priced_in and name == ccom)
+    if pos is None:
+        return None, gold
+    gold += pos["entry"]
     return pos, gold
 
 def settle(pos, S, gold, scored):
-    K = pos["K"]
-    payoff = (max(S - K, 0) if pos["kind"] == "call" else max(K - S, 0)) * UNITS
-    pl = payoff - pos["cost"]; gold += payoff
-    print(f"\n   SETTLE {pos['kind']} on {pos['name']}: price -> {S:.2f}, strike {K}.")
-    if payoff == 0:
-        print(f"   Worthless. Lost the {pos['cost']:.2f} premium (max loss).")
-    else:
-        print(f"   Payoff {payoff:.2f} - premium {pos['cost']:.2f} = P/L {pl:+.2f}.")
-    if pos["good"]:
+    add = 0.0
+    if pos["stock"]:
+        qty, _ = pos["stock"]; add += qty * S
+    for kind, K, sign, _ in pos["legs"]:
+        add += sign * intrinsic(kind, K, S) * UNITS
+    gold += add
+    pl = pos["entry"] + add
+    print(f"\n   SETTLE {pos['label']} on {pos['name']}: price -> {S:.2f}.  P/L {pl:+.2f}.")
+    if pos["vol"] == "long" and pl <= -pos["max_loss"] + 0.01:
+        print(f"   Expired worthless — lost the premium ({pos['max_loss']:.2f}, the max loss).")
+    if pos.get("good"):
         scored["n"] += 1; scored["pl"] += pl
-        print("   (Edge play: with the catalyst at cheap/fair IV.)")
-    elif pos["priced"]:
-        print("   (Paid RICH IV — premium inflated and the move was largely priced in.)")
-    elif not pos["aligned"]:
-        print("   (No signal behind this — a coin flip.)")
+        side = "bought CHEAP IV with the catalyst" if pos["vol"] == "long" else "sold RICH IV (collected premium)"
+        print(f"   (Edge play: {side}.)")
+    elif pos["vol"] == "long":
+        print("   (No cheap-IV + catalyst edge here — closer to a coin flip.)")
+    else:
+        print("   (Sold premium without a RICH-IV edge — thin reward for the risk.)")
     return gold
 
 # ---------------------------------------------------------------- main
@@ -343,7 +429,7 @@ def play():
         catalyst = random.choice(CATALYSTS)
         _, ccom, cdir, strength = catalyst
         priced_in = (cdir != "none" and (coms[ccom].iv_rank() >= 66 or random.random() < 0.25))
-        pos, gold = buy_phase(coms, gold, catalyst, priced_in)
+        pos, gold = trade_phase(coms, gold, catalyst, priced_in)
 
         input("\n(press Enter to advance one month...)")
         # forward step: catalyst adds monthly log-drift to its commodity (damped if priced in)
