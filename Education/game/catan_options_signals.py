@@ -402,6 +402,17 @@ def iv_markup(rank):
     rank = max(0, min(100, rank))
     return 1 + 0.15 * (rank - 50) / 50
 
+def prob_profit(kind, F, breakeven, sigma, T):
+    """Estimated chance the option finishes PAST breakeven by expiry, from the
+    forward F and vol (lognormal). A plain 'odds this trade makes money'."""
+    sigma = max(sigma, 0.05)
+    if T <= 0 or breakeven <= 0:
+        return 0.0
+    m = math.log(F) - 0.5 * sigma**2 * T          # mean of ln(S_T)
+    s = sigma * math.sqrt(T)
+    z = (math.log(breakeven) - m) / s
+    return (Ncdf(-z) if kind == "call" else Ncdf(z))   # call: P(S>BE); put: P(S<BE)
+
 def black_premium(kind, F, K, sigma, T):
     """Black model: option priced on the forward F (r=0). No-drift-edge baked out."""
     sigma = max(sigma, 0.05)
@@ -492,14 +503,18 @@ def _build_long(com, F, sigma, gold, cdir, name, cheap, rich):
     kind = ask("Call (up) or Put (down)? (c/p): ", {"c": "call", "p": "put"})
     ks = strikes_for(S); chain = {}
     print(f"\n   {name} @ {S:.2f}   LONG {kind.upper()}   IV {iv_tag(com.iv_rank())}  (implied vol {sigma*100:.0f}%)")
-    print("   (ITM = already exercisable, has intrinsic value, costs more; OTM = needs a move, cheap)")
+    print("   (ITM = already exercisable, costs more, higher odds; OTM = cheap, lower odds.")
+    print("    'profit odds' = est. chance the price clears your breakeven by expiry.)")
     for i, K in enumerate(ks, 1):
         prem = black_premium(kind, F, K, sigma, T)
-        intr = intrinsic(kind, S, K) if False else intrinsic(kind, K, S)
+        be = K + prem if kind == "call" else K - prem
+        odds = prob_profit(kind, F, be, sigma, T) * 100
+        intr = intrinsic(kind, K, S)
         mny = "ITM" if intr > 0 else ("ATM" if K == round(S) else "OTM")
         note = f"{intr:.2f} intrinsic" if intr > 0 else f"needs {'rise' if kind=='call' else 'fall'} past {K}"
         chain[str(i)] = (K, prem)
-        print(f"   {i}) strike {K:<4} premium {prem:>5.2f}/u  contract {prem*UNITS:>6.2f}  [{mny}: {note}]")
+        print(f"   {i}) strike {K:<4} premium {prem:>5.2f}/u  contract {prem*UNITS:>6.2f}  "
+              f"[{mny}: {note}]  ~{odds:.0f}% profit odds")
     K, prem = ask("Pick a strike (number): ", chain)
     cost = prem * UNITS
     if cost > gold:
@@ -779,11 +794,16 @@ def coach_setup(catalyst, coms, reco):
         wrap(f"Q2 (cheap/pricey): {ccom} IV Rank = {rank} -> {tag}.", "  | ")
         wrap(f"Q3 (action) -> SUGGESTED MOVE: {reco}.", "  | ")
         if rank <= 40:
+            atm = round(coms[ccom].price())
             wrap("Why: news says it moves + options are cheap -> BUYING is the cheap, "
                  "defined-risk way to bet that direction.", "  | ")
+            wrap(f"Suggested strike: {atm} (at-the-money — the middle choice). ATM balances "
+                 f"cost vs odds; pick the OTM strike only for a cheaper, longer-shot bet.", "  | ")
         elif rank >= 66:
             wrap("Why: options are pricey -> better to SELL premium (collect the fat fee) "
                  "than overpay to buy it.", "  | ")
+            wrap("Strikes: the game auto-picks them for sell structures (an out-of-the-money "
+                 "put/call, or the two legs of a spread) — no strike to choose here.", "  | ")
         else:
             wrap("Why: only a small edge at fair IV -> a spread or sitting out is reasonable.", "  | ")
     print("  +----------------------------------------------------------------+")
