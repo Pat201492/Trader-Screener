@@ -517,6 +517,8 @@ def _build_long(com, F, sigma, gold, cdir, name, cheap, rich):
     print("   (ITM = already exercisable, costs more, higher odds; OTM = cheap, lower odds.")
     print(f"    'profit odds' = est. chance the price clears your breakeven. "
           f"{GREEN}green = most likely{RESET}, {RED}red = least likely{RESET}.)")
+    print("    NOTE: these are MARKET odds (they ignore the news). Buying WITH a catalyst, your")
+    print("    REAL odds are higher — that gap is your edge. Don't let a low % scare you off a good setup.")
     rows = []
     for i, K in enumerate(ks, 1):
         prem = black_premium(kind, F, K, sigma, T)
@@ -637,6 +639,28 @@ def trade_phase(coms, gold, catalyst, priced_in):
         break
     if action == "none":
         return None, gold
+
+    # (c) One-tap recommended SELL — skip the commodity + structure prompts.
+    if action == "sell":
+        mode = ask("\n   (r) take the RECOMMENDED structure (one-tap), or (m) choose manually? ",
+                   {"r": "rec", "m": "man"})
+        if mode == "rec":
+            if cdir == "bull":
+                name, choice, lbl = ccom, "3", "bull put spread"
+            elif cdir == "bear":
+                name, choice, lbl = ccom, "4", "bear call spread"
+            else:
+                name = max(coms, key=lambda n: coms[n].iv_rank()); choice, lbl = "1", "cash-secured put"
+            com = coms[name]; F, sigma_true = forward_stats(com)
+            rank = com.iv_rank(); rich = rank >= 66; cheap = rank <= 40
+            sigma = sigma_true * iv_markup(rank); cd = (ccom, cdir)
+            print(f"\n   Recommended: {lbl} on {name} (IV {iv_tag(rank)}).")
+            pos = _build_sell(com, F, sigma, gold, cd, name, cheap, rich, choice)
+            if pos is None:
+                return None, gold
+            gold += pos["entry"]
+            return pos, gold
+        # else fall through to manual selection below
 
     names = list(coms.keys()); menu = {str(i+1): n for i, n in enumerate(names)}
     for k, n in menu.items():
