@@ -32,6 +32,28 @@ You start with **100 gold**. Over **10 seasons** you buy options on commodities;
 - Buying options needs a move **bigger than the premium** to win — being right on direction isn't enough if the move is small.
 - OTM options are cheap but usually expire worthless; ITM options cost more but start with intrinsic value.
 
+## Two editions
+
+### `catan_options_game.py` — plain (random walk)
+Prices move randomly with **no information**. Every trade is a coin flip, so over time the premium bleeds you. **That's the lesson:** trading with no edge is gambling.
+
+### `catan_options_signals.py` — signals edition (recommended)
+Each season you get **data to read**:
+- **Market news** — a catalyst that biases one commodity up or down (e.g. "Drought ruins the harvest — GRAIN scarce" → grain bullish).
+- **IV tag** — each option is **CHEAP** (move not yet priced in) or **RICH** (already priced; premium inflated).
+
+Your **edge**: trade WITH a catalyst when IV is CHEAP (bullish→call, bearish→put). Avoid RICH IV — the inflated premium eats the profit even when you're right. Some seasons are red herrings (no catalyst) — sitting out is correct.
+
+The end screen scores your **edge trades** (with-signal, cheap-IV) separately, so you can see information beat luck:
+```
+Edge trades (with catalyst, cheap IV): 3   net P/L +53.10
+```
+Real-world parallel: catalyst = news/earnings/supply data; IV tag = **IV Rank**. The Trader Screener's job is to surface these so your decisions have an edge.
+
+```
+python catan_options_signals.py
+```
+
 ## Pricing note
 Premiums use Black-Scholes (r=0, one season = 0.25y), so they behave like real option prices: higher volatility, more time, and being in-the-money all raise the premium. Prices move by a lognormal random walk scaled by each commodity's volatility.
 

@@ -46,7 +46,9 @@ What trading *is*: the continuous price-discovery and risk-transfer machine. Som
 >
 > **How to read it:** [How to Read a Tear Sheet](How_to_Read_a_Tear_Sheet.md) ([PDF](How_to_Read_a_Tear_Sheet.pdf)) — line-by-line guide explaining what each block means and **why it matters** (why dollar-volume, beta, ATR, IV Rank, skew, positioning each earn their place), plus the 60-second pro scan.
 >
-> **Play it:** [Catan Options game](game/catan_options_game.py) ([how to play](game/HOW_TO_PLAY.md)) — a tiny terminal game; trade calls/puts on the five Catan commodities (Brick/Lumber/Wool/Grain/Ore). Teaches call vs put, strike/moneyness, premium-as-max-loss, breakeven, and implied volatility (high-vol commodities cost more). Run `python game/catan_options_game.py`.
+> **Play it:** Catan Options terminal game — trade calls/puts on the five Catan commodities (Brick/Lumber/Wool/Grain/Ore). [how to play](game/HOW_TO_PLAY.md).
+> - [Plain edition](game/catan_options_game.py) — random walk; teaches mechanics (call/put, strike/moneyness, premium-as-max-loss, breakeven, IV pricing) **and** that trading with no edge is gambling.
+> - [**Signals edition**](game/catan_options_signals.py) — adds market-news catalysts + an IV CHEAP/RICH tag, so reading the signal is your edge (catalyst = news, IV tag = IV Rank). Scores your edge trades vs coin flips. Run `python game/catan_options_signals.py`.
 
 ---
 
