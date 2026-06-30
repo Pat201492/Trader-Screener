@@ -45,13 +45,8 @@
 </head>
 <body>
 <header>
-  <h1>📈 Trader Screener</h1>
-  <nav>
-    <button data-tab="screener" class="active">Screener</button>
-    <button data-tab="commodities">Commodities</button>
-    <button data-tab="options">Options</button>
-    <button data-tab="drivers">Drivers</button>
-  </nav>
+  <h1 id="brand" style="cursor:pointer" title="Home">📈 Trader Screener</h1>
+  <nav id="nav"></nav>
   <div class="api">
     <span class="dot" id="dot"></span> API
     <input id="apiBase" value="http://127.0.0.1:8000" />
@@ -396,14 +391,78 @@ async function openStock(tk){
   }catch(e){ v.innerHTML=`<button class="pill" style="cursor:pointer;border:1px solid var(--border)" onclick="renderScreener()">← Screener</button><div class="err" style="margin-top:12px">${e.message}</div>`; }
 }
 
-// ── nav ───────────────────────────────────────────────────
-const R={screener:renderScreener,commodities:renderCommodities,options:renderOptions,drivers:renderDrivers};
-document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
-  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
-  b.classList.add('active'); TAB=b.dataset.tab; R[TAB]();
-});
-document.getElementById('apiBase').onchange=()=>{ping();R[TAB]();};
-ping(); renderScreener();
+// ── DATA workspace (pipeline status) ──────────────────────
+async function renderData(){
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading data status…</div>';
+  try{
+    const h=await jget('/health');
+    const outs=h.outputs||{};
+    let counts={};
+    try{ counts.stocks=(await jget('/api/stocks?limit=1')).total; }catch{}
+    try{ counts.commodities=(await jget('/api/commodities')).count; }catch{}
+    const base=API();
+    const fileRow=(f,ok)=>`<tr><td>${f}</td><td>${ok?'<span class="pos">✓ present</span>':'<span class="neg">✗ missing</span>'}</td></tr>`;
+    const ep=(m,p,d)=>`<tr><td class="muted">${m}</td><td><a href="${base}${p}" target="_blank" style="color:var(--accent)">${p}</a></td><td class="muted">${d}</td></tr>`;
+    v.innerHTML=`<div class="group-title">Pipeline status</div>
+      <div style="margin-bottom:14px">
+        <span class="pill">API ${h.ok?'<span class="pos">online</span>':'<span class="neg">offline</span>'}</span>
+        <span class="pill">stocks ${counts.stocks??'–'}</span>
+        <span class="pill">commodities ${counts.commodities??'–'}</span>
+        <a href="${base}/docs" target="_blank" class="pill" style="color:var(--accent)">Swagger /docs ↗</a></div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <div class="card" style="flex:1;min-width:240px"><div class="name">Output files</div>
+          <table style="font-size:13px">${Object.entries(outs).map(([f,ok])=>fileRow(f,ok)).join('')}</table></div>
+        <div class="card" style="flex:2;min-width:320px"><div class="name">Endpoints</div>
+          <table style="font-size:13px">
+            ${ep('GET','/api/stocks','screener: filter/sort/page')}
+            ${ep('GET','/api/stocks/{t}','one stock (merged)')}
+            ${ep('GET','/api/stocks/{t}/commodities','commodity drivers')}
+            ${ep('GET','/api/commodities','all commodities')}
+            ${ep('GET','/api/commodities/{root}','detail: history/seasonality/trade')}
+            ${ep('GET','/api/options/{t}','options summary + chain')}
+            ${ep('GET','/health','output status')}
+          </table></div>
+      </div>`;
+  }catch(e){ v.innerHTML=`<div class="err">${e.message}<br>API unreachable at ${API()} — set the base above.</div>`; }
+}
+
+// ── workspaces / routing ──────────────────────────────────
+const SECTIONS={
+  data:  {label:'Data',  icon:'🗄️', desc:'Pipeline status, API health, raw endpoints',
+          tabs:[['status','Status',renderData]]},
+  trader:{label:'Trader',icon:'📊', desc:'Commodities, options, commodity drivers',
+          tabs:[['commodities','Commodities',renderCommodities],['options','Options',renderOptions],['drivers','Drivers',renderDrivers]]},
+  stock: {label:'Stock', icon:'🏢', desc:'Equity screener + per-stock detail',
+          tabs:[['screener','Screener',renderScreener]]},
+};
+let SECTION=null;
+function renderNav(){
+  const nav=document.getElementById('nav');
+  if(!SECTION){ nav.innerHTML=''; return; }
+  nav.innerHTML=`<button onclick="goHome()">← Home</button>`+
+    SECTIONS[SECTION].tabs.map(([id,label])=>
+      `<button class="${TAB===id?'active':''}" onclick="goTab('${id}')">${label}</button>`).join('');
+}
+function goHome(){ SECTION=null; TAB=null; renderNav(); renderHome(); }
+function goSection(id){ SECTION=id; const t=SECTIONS[id].tabs[0]; TAB=t[0]; renderNav(); t[2](); }
+function goTab(id){ TAB=id; renderNav(); const t=SECTIONS[SECTION].tabs.find(x=>x[0]===id); if(t) t[2](); }
+function renderHome(){
+  const v=document.getElementById('view');
+  v.innerHTML=`<div style="text-align:center;margin:34px 0 22px">
+      <div class="big" style="font-size:28px">Trader Screener</div>
+      <div class="muted">pick a workspace</div></div>
+    <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));max-width:780px;margin:0 auto">
+      ${Object.entries(SECTIONS).map(([id,s])=>`
+        <div class="card" style="cursor:pointer;text-align:center;padding:30px 18px" onclick="goSection('${id}')">
+          <div style="font-size:40px;line-height:1">${s.icon}</div>
+          <div class="big" style="margin:10px 0 6px">${s.label}</div>
+          <div class="muted" style="font-size:13px">${s.desc}</div></div>`).join('')}
+    </div>`;
+}
+document.getElementById('brand').onclick=goHome;
+document.getElementById('apiBase').onchange=()=>{ ping(); if(SECTION&&TAB) goTab(TAB); else renderHome(); };
+ping(); goHome();
 setInterval(ping, 30000);
 </script>
 </body>
