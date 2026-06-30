@@ -72,6 +72,9 @@ Real-world parallel: sparkline = price chart; realized vol & IV Rank = volatilit
 python catan_options_signals.py
 ```
 
+## Stats reference
+For exact derivations, ranges, and what each value's position implies (rVol, IV Rank, implied vol, forward, premium, breakeven), see **[STATS_EXPLAINED.md](STATS_EXPLAINED.md)**.
+
 ## Pricing note
 Premiums use Black-Scholes (r=0, one season = 0.25y), so they behave like real option prices: higher volatility, more time, and being in-the-money all raise the premium. Prices move by a lognormal random walk scaled by each commodity's volatility.
 
