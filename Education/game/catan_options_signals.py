@@ -169,6 +169,49 @@ def show_history(coms):
          "export ban) cuts supply -> price up; weakness in a big IMPORTER (recession, less "
          "construction) cuts demand -> price down. That's where real catalysts come from.")
 
+# ============================== PAGE: GUIDE (plain-English) ==============================
+def show_guide():
+    print("\n" + "#" * 72)
+    print("#  GUIDE — start here. Plain English: what to do and why.")
+    print("#" * 72)
+    wrap("THE GOAL: grow your gold by betting on where commodity prices go, using options.")
+    print()
+    wrap("AN OPTION is just a bet with a fee (the 'premium'):")
+    wrap("- BUY a call  = pay a small fee to bet the price goes UP.   You risk only the fee.", "   ")
+    wrap("- BUY a put   = pay a small fee to bet the price goes DOWN. You risk only the fee.", "   ")
+    wrap("- SELL an option = you are the bookie. You COLLECT the fee now and keep it if the "
+         "move does NOT happen. You need cash set aside, and can lose more than you collected.", "   ")
+    print()
+    print("  EVERY TURN, ANSWER 3 QUESTIONS:")
+    wrap("1) Which way will it move?  -> the NEWS tells you. 'scarce / boom / demand' = UP "
+         "(bullish). 'glut / record / floods' = DOWN (bearish).", "   ")
+    wrap("2) Are options cheap or pricey right now?  -> IV RANK. Low (CHEAP) = cheap to BUY. "
+         "High (RICH) = pricey, so better to SELL.", "   ")
+    wrap("3) So what do I do?  -> read the table:", "   ")
+    print()
+    print("   NEWS up   + options CHEAP  ->  BUY A CALL        (cheap bet it rises)")
+    print("   NEWS down + options CHEAP  ->  BUY A PUT         (cheap bet it falls)")
+    print("   NEWS up   + options RICH   ->  SELL A PUT        (get paid; win if it rises/stays)")
+    print("                                 or a bull put spread (same idea, capped risk)")
+    print("   NEWS down + options RICH   ->  SELL A CALL/bear call spread (win if it falls/stays)")
+    print("   NO clear news              ->  usually SIT OUT   (no edge = don't trade)")
+    print()
+    wrap("WHY buy when cheap / sell when pricey: the fee (premium) is bigger when options are "
+         "'RICH'. If you're BUYING, you want to pay little (CHEAP). If you're SELLING, you want "
+         "to collect a lot (RICH). Same as buying low / selling high — but on the option fee.")
+    print()
+    print("  WORKED EXAMPLE")
+    wrap("News: 'Drought ruins the harvest — GRAIN scarce'  => grain prices likely UP (bullish).", "   ")
+    wrap("Grain IV Rank shows CHEAP(25)  => options are cheap.", "   ")
+    wrap("Table says: UP + CHEAP -> BUY A CALL on Grain. Pick a strike near the price. If grain "
+         "rises past (strike + fee) you profit; if it doesn't, you only lose the small fee.", "   ")
+    wrap("On the screen: choose (b)uy -> pick Grain -> (c)all -> pick a strike. Done.", "   ")
+    print()
+    wrap("Tip: during play, a 'SUGGESTED MOVE' line shows the textbook play each turn — follow "
+         "it while learning, then start deciding on your own. The end-of-game scorecard shows "
+         "the suggested move vs what you did, every month.")
+    print("#" * 72)
+
 # ============================== PAGE: INFORMATION ==============================
 INFO = [
     ("Price", "Latest market price of the commodity.",
@@ -539,11 +582,14 @@ def trade_phase(coms, gold, catalyst, priced_in):
         print(f"  -> {ccom} ({cdir}ish).  Its IV Rank = {rank} -> {stance}.")
     else:
         print("  -> no clear catalyst; no directional edge. Selling premium when IV is RICH is still valid.")
+    print("  SUGGESTED MOVE: " + recommend(catalyst, coms) + "   (follow it while learning, or ignore)")
 
     while True:
-        action = ask("\nAction: (b)uy, (s)ell, (c)harts, (i)nfo, (h)istory, or (n)othing? ",
-                     {"b": "buy", "s": "sell", "c": "charts", "i": "info",
+        action = ask("\nAction: (b)uy, (s)ell, (g)uide, (i)nfo, (c)harts, (h)istory, or (n)othing? ",
+                     {"b": "buy", "s": "sell", "g": "guide", "c": "charts", "i": "info",
                       "h": "history", "n": "none"})
+        if action == "guide":
+            show_guide(); input("\n(press Enter to return...)"); continue
         if action == "charts":
             show_charts(coms); input("\n(press Enter to return...)"); continue
         if action == "info":
@@ -755,12 +801,16 @@ def main():
         print("            CATAN OPTIONS — MAIN MENU")
         print("=" * 60)
         print("   1) Play          — start a 12-month trading run")
-        print("   2) History       — price charts + who exports/imports each")
-        print("   3) Information    — every metric: definition & impact")
-        print("   4) Quit")
-        choice = ask("Choose (1-4): ", {"1": "play", "2": "history", "3": "info", "4": "quit"})
+        print("   2) Guide         — START HERE: plain-English how-to + example")
+        print("   3) History       — price charts + who exports/imports each")
+        print("   4) Information    — every metric & action: definition & impact")
+        print("   5) Quit")
+        choice = ask("Choose (1-5): ",
+                     {"1": "play", "2": "guide", "3": "history", "4": "info", "5": "quit"})
         if choice == "play":
             play()
+        elif choice == "guide":
+            show_guide(); input("\n(press Enter to return to menu...)")
         elif choice == "history":
             show_history(menu_coms); input("\n(press Enter to return to menu...)")
         elif choice == "info":
