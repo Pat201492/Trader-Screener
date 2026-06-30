@@ -38,15 +38,30 @@ def Ncdf(x):
 # shock probability/magnitude | analog: the real instrument it mimics.
 COMMODITIES = {
     "Grain":  dict(start=7.0,  drift=0.015, seas_amp=0.13, phase=1.6, rho=0.70,
-                   vol_m=0.060, jump_p=0.04, jump=0.14, analog="agricultural grain (seasonal)"),
+                   vol_m=0.060, jump_p=0.04, jump=0.14, analog="agricultural grain (seasonal)",
+                   exporters="Russia, USA, Canada, Ukraine, Australia, EU",
+                   importers="Egypt, China, Indonesia, Algeria, Turkey",
+                   drivers="weather/harvest, planting cycles, export bans, fuel & fertilizer costs"),
     "Lumber": dict(start=9.0,  drift=0.020, seas_amp=0.03, phase=0.0, rho=0.93,
-                   vol_m=0.110, jump_p=0.05, jump=0.20, analog="lumber (boom/bust cyclical)"),
+                   vol_m=0.110, jump_p=0.05, jump=0.20, analog="lumber (boom/bust cyclical)",
+                   exporters="Canada, Russia, Sweden, Finland, Germany",
+                   importers="USA, China, Japan, UK",
+                   drivers="housing starts, interest rates, wildfires, sawmill capacity"),
     "Brick":  dict(start=10.0, drift=0.035, seas_amp=0.02, phase=0.0, rho=0.85,
-                   vol_m=0.050, jump_p=0.02, jump=0.10, analog="construction block (steady trend)"),
+                   vol_m=0.050, jump_p=0.02, jump=0.10, analog="construction material (steady trend)",
+                   exporters="Vietnam, Turkey, Thailand, UAE, China",
+                   importers="USA, Bangladesh, Philippines, Australia",
+                   drivers="construction activity, energy costs, infrastructure spending"),
     "Wool":   dict(start=8.0,  drift=0.005, seas_amp=0.07, phase=2.4, rho=0.80,
-                   vol_m=0.080, jump_p=0.03, jump=0.12, analog="soft commodity (mild seasonal)"),
+                   vol_m=0.080, jump_p=0.03, jump=0.12, analog="soft commodity (mild seasonal)",
+                   exporters="Australia, New Zealand, China, South Africa",
+                   importers="China, India, Italy, Czechia",
+                   drivers="flock sizes, textile/fashion demand, synthetic substitutes, drought"),
     "Ore":    dict(start=14.0, drift=0.012, seas_amp=0.02, phase=0.0, rho=0.90,
-                   vol_m=0.110, jump_p=0.05, jump=0.22, analog="industrial metal (cyclical)"),
+                   vol_m=0.110, jump_p=0.05, jump=0.22, analog="industrial metal / iron ore (cyclical)",
+                   exporters="Australia, Brazil, South Africa, India",
+                   importers="China, Japan, South Korea, Germany",
+                   drivers="Chinese steel demand, mine outages/supply, infrastructure cycles"),
 }
 
 CATALYSTS = [
@@ -123,6 +138,71 @@ def show_charts(coms):
               f"IV {iv_tag(c.iv_rank())}   trend {c.trend()}")
         print(area_chart(c.prices[-HIST_MONTHS:]))
     print("=" * 72)
+
+# ============================== PAGE: HISTORY ==============================
+def show_history(coms):
+    print("\n" + "#" * 72)
+    print("#  HISTORY — price history & real-world trade for each commodity")
+    print("#" * 72)
+    for n, c in coms.items():
+        p = c.p
+        lo, hi = c.lo_hi(HIST_MONTHS)
+        print(f"\n{'='*72}\n{n}  ~ {p['analog']}")
+        print(f"  now {c.price():.2f}   5y range {lo:.2f}-{hi:.2f}   "
+              f"rVol {c.realized_vol()*100:.0f}%   IV {iv_tag(c.iv_rank())}   trend {c.trend()}")
+        print()
+        print(area_chart(c.prices[-HIST_MONTHS:]))
+        print(f"\n  Top EXPORTERS:  {p['exporters']}")
+        print(f"  Top IMPORTERS:  {p['importers']}")
+        print(f"  Price drivers:  {p['drivers']}")
+    print("#" * 72)
+    wrap("Why exporters/importers matter: a shock in a big EXPORTER (drought, mine outage, "
+         "export ban) cuts supply -> price up; weakness in a big IMPORTER (recession, less "
+         "construction) cuts demand -> price down. That's where real catalysts come from.")
+
+# ============================== PAGE: INFORMATION ==============================
+INFO = [
+    ("Price", "Latest market price of the commodity.",
+     "The reference for strikes, moneyness, and breakevens. Meaningless alone — read it vs the range, trend, and catalyst."),
+    ("5y history / sparkline", "The price path over the trailing 60 months (a mini chart).",
+     "Shows trend, seasonality, and regime. Buy dips in uptrends; respect seasonal cycles; don't chase vertical spikes."),
+    ("5y range (lo-hi)", "Min and max price over the last 5 years.",
+     "Context for cheap vs expensive. Near the high = strength/overextended; near the low = value or a falling knife."),
+    ("rVol (realized volatility)", "Annualized stdev of the last 12 monthly returns (x sqrt12).",
+     "How much it ACTUALLY moves. High rVol -> trade smaller, wider stops, pricier options. It's the baseline IV is judged against."),
+    ("IV Rank (0-100)", "Percentile of today's 3-month vol within its own 5-year vol history.",
+     "THE buy/sell switch. CHEAP (<=40) -> buy premium; RICH (>=66) -> sell premium (move likely priced in); FAIR in between."),
+    ("Implied vol", "The vol used to price options = fair dispersion x an IV-Rank markup (0.85-1.15x).",
+     "Above realized = options rich (sell); below = cheap (buy). The gap is the variance risk premium."),
+    ("Trend (up/flat/down)", "Sign of the 6-month price change, with a +/-4% dead-band.",
+     "Directional bias. Favor calls in uptrends, puts in downtrends; counter-trend needs a stronger catalyst."),
+    ("Catalyst / market news", "An event shifting supply or demand (harvest, mine outage, housing, policy).",
+     "The 'why now'. Match direction (bull->call, bear->put); no catalyst = no edge = sit out."),
+    ("Forward price (F)", "Monte-Carlo mean of the next month's price with no catalyst.",
+     "Options are priced off F, so direction alone is ~zero-EV. Your edge is only what F doesn't already include."),
+    ("Strike & moneyness", "Strike vs spot: ITM (call<spot / put>spot), ATM (~spot), OTM (other side).",
+     "Sets odds & risk/reward. OTM = cheap, low-odds lottery; ATM = balanced; ITM = stock-like, high-odds, costs more."),
+    ("Intrinsic vs time value", "Intrinsic = exercise-now worth; time value = premium - intrinsic.",
+     "Time value decays to zero by expiry (theta). Buyers fight it; sellers harvest it."),
+    ("Premium", "Black-model price on the forward (1-month option).",
+     "Buyer's MAX LOSS / seller's MAX PROFIT. Overpay and a correct direction can still lose."),
+    ("Breakeven", "Call: strike+premium. Put: strike-premium. Spread: short strike +/- credit.",
+     "The price the move must clear to profit. Compare to a realistic move (rVol x catalyst) before entering."),
+]
+
+def show_information():
+    print("\n" + "#" * 72)
+    print("#  INFORMATION — every metric: definition & impact")
+    print("#" * 72)
+    for name, defn, impact in INFO:
+        print(f"\n{name}")
+        wrap(f"Definition: {defn}", "   ")
+        wrap(f"Impact: {impact}", "   ")
+    print("\n" + "#" * 72)
+    wrap("Decision chain: rVol sets the baseline -> IV Rank says buy-vs-sell -> trend+catalyst "
+         "set direction -> forward/implied mean direction alone is ~free -> premium & breakeven "
+         "are the final cost/feasibility check.")
+    print("#" * 72)
 
 def annualized_vol(logrets):
     if len(logrets) < 2:
@@ -393,19 +473,27 @@ def trade_phase(coms, gold, catalyst, priced_in):
     print("\n  MARKET NEWS:  " + head)
     if cdir != "none":
         rank = coms[ccom].iv_rank()
-        note = "RICH (likely already priced in -> favor SELLING premium)" if priced_in \
-               else "CHEAP/FAIR (room to run -> favor BUYING premium)"
-        print(f"  -> {ccom} ({cdir}ish).  Its IV Rank = {rank} -> {note}.")
+        if rank >= 66:
+            stance = "RICH -> options pricey; favor SELLING premium (move may be priced in)"
+        elif rank <= 40:
+            hint = "calls" if cdir == "bull" else "puts"
+            stance = f"CHEAP -> options cheap; favor BUYING {hint} on this {cdir}ish news"
+        else:
+            stance = "FAIR -> only a small edge; spreads or sitting out are reasonable"
+        print(f"  -> {ccom} ({cdir}ish).  Its IV Rank = {rank} -> {stance}.")
     else:
-        print("  -> no clear catalyst; no directional edge. Selling premium in RICH IV is still valid.")
+        print("  -> no clear catalyst; no directional edge. Selling premium when IV is RICH is still valid.")
 
     while True:
-        action = ask("\nAction: (b)uy option, (s)ell premium, (c)harts to study, or (n)othing? ",
-                     {"b": "buy", "s": "sell", "c": "charts", "n": "none"})
+        action = ask("\nAction: (b)uy, (s)ell, (c)harts, (i)nfo, (h)istory, or (n)othing? ",
+                     {"b": "buy", "s": "sell", "c": "charts", "i": "info",
+                      "h": "history", "n": "none"})
         if action == "charts":
-            show_charts(coms)
-            input("\n(press Enter to return...)")
-            continue
+            show_charts(coms); input("\n(press Enter to return...)"); continue
+        if action == "info":
+            show_information(); input("\n(press Enter to return...)"); continue
+        if action == "history":
+            show_history(coms); input("\n(press Enter to return...)"); continue
         break
     if action == "none":
         return None, gold
@@ -560,8 +648,29 @@ def play():
           "signals; catalyst = news/earnings/supply data. The Trader Screener surfaces all "
           "of these so your decisions carry an edge.")
 
+def main():
+    """Start menu — toggle into History or Information pages before playing."""
+    menu_coms = {n: Commodity(n, dict(p)) for n, p in COMMODITIES.items()}
+    while True:
+        print("\n" + "=" * 60)
+        print("            CATAN OPTIONS — MAIN MENU")
+        print("=" * 60)
+        print("   1) Play          — start a 12-month trading run")
+        print("   2) History       — price charts + who exports/imports each")
+        print("   3) Information    — every metric: definition & impact")
+        print("   4) Quit")
+        choice = ask("Choose (1-4): ", {"1": "play", "2": "history", "3": "info", "4": "quit"})
+        if choice == "play":
+            play()
+        elif choice == "history":
+            show_history(menu_coms); input("\n(press Enter to return to menu...)")
+        elif choice == "info":
+            show_information(); input("\n(press Enter to return to menu...)")
+        else:
+            print("Farewell, trader."); return
+
 if __name__ == "__main__":
     try:
-        play()
+        main()
     except (KeyboardInterrupt, EOFError):
         print("\nLeft the trading post. Farewell.")

@@ -17,8 +17,14 @@ powershell -ExecutionPolicy Bypass -File create_desktop_shortcut.ps1
 
 **Scorecard:** every game ends with a scorecard — net P/L & ROI, win rate, best/worst trade, your **edge trades vs coin-flip trades**, and a letter grade with tailored feedback.
 
+**Start menu & pages:** the signals game opens on a menu — **1) Play · 2) History · 3) Information · 4) Quit**.
+- **History** — full 5-year price chart for each commodity plus its real-world **top exporters/importers** and price drivers (where catalysts come from).
+- **Information** — every metric (price, range, rVol, IV Rank, implied vol, trend, catalyst, forward, moneyness, intrinsic/time value, premium, breakeven) with a **definition + impact**.
+
+Both pages are also reachable mid-game from the action prompt: `h` (history), `i` (info), `c` (quick charts).
+
 ## The idea
-You start with **100 gold**. Over **10 seasons** you buy options on commodities; each season prices move and your option settles.
+You start with **100 gold** and trade over a series of turns (the plain edition runs 10 turns; the signals edition runs 12 months). Each turn you may buy or sell an option; then time advances, prices move, and your option settles.
 
 - **Call** = right to buy at the strike → profits if price goes **up** past it.
 - **Put** = right to sell at the strike → profits if price goes **down** past it.
