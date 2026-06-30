@@ -92,7 +92,7 @@ HIST_MONTHS = 60          # 5 years of history
 PLAY_MONTHS = 12          # play one year forward
 START_YEAR = 2021         # history begins here; play starts at +5y
 UNITS = 10
-START_GOLD = 100.0
+START_GOLD = 1000.0
 SPARK = "▁▂▃▄▅▆▇█"
 
 def wrap(s, indent=""):
