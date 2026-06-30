@@ -62,6 +62,16 @@
 <script>
 const API = () => document.getElementById('apiBase').value.replace(/\/$/,'');
 let TAB = 'screener';
+// commodity futures symbol -> spelled-out name
+const COMMODITY_NAMES = {
+  'CL=F':'WTI Crude','BZ=F':'Brent Crude','NG=F':'Natural Gas','RB=F':'Gasoline','HO=F':'Heating Oil',
+  'GC=F':'Gold','SI=F':'Silver','PL=F':'Platinum','PA=F':'Palladium','HG=F':'Copper','ALI=F':'Aluminum',
+  'ZC=F':'Corn','ZW=F':'Wheat','KE=F':'KC HRW Wheat','RS=F':'Canola','DC=F':'Milk (Class III)',
+  'ZS=F':'Soybeans','ZL=F':'Soybean Oil','ZM=F':'Soybean Meal','ZO=F':'Oats','ZR=F':'Rough Rice',
+  'KC=F':'Coffee','SB=F':'Sugar','CC=F':'Cocoa','CT=F':'Cotton','OJ=F':'Orange Juice','LBS=F':'Lumber',
+  'LE=F':'Live Cattle','GF=F':'Feeder Cattle','HE=F':'Lean Hogs',
+};
+const nm = r => COMMODITY_NAMES[r] || r;
 let screenerRows = [], sortKey = 'rank', sortAsc = true;
 
 async function jget(path){
@@ -110,9 +120,9 @@ function drawScreener(){
   const cols=[['rank','#'],['ticker','Ticker'],['name','Name'],['sector','Sector'],
               ['price','Price'],['score','Score'],['pe','P/E'],['upside','Upside %']];
   const th=cols.map(([k,l])=>`<th class="${['price','score','pe','upside','rank'].includes(k)?'num':''}" onclick="setSort('${k}')">${l}${sortKey===k?(sortAsc?' ▲':' ▼'):''}</th>`).join('');
-  const body=rows.slice(0,300).map(r=>`<tr>
+  const body=rows.slice(0,300).map(r=>`<tr style="cursor:pointer" onclick="openStock('${r.ticker}')" title="Open ${r.ticker} detail">
     <td class="num muted">${r.rank??'–'}</td>
-    <td><b>${r.ticker}</b></td>
+    <td><b style="color:var(--accent)">${r.ticker}</b></td>
     <td class="muted">${(r.name||'').slice(0,38)}</td>
     <td class="muted">${r.sector||'–'}</td>
     <td class="num">${r.price!=null?'$'+fmt(r.price):'–'}</td>
@@ -134,7 +144,7 @@ async function renderCommodities(){
       html+=`<div class="group-title">${grp}</div><div class="cards">`;
       html+=items.map(c=>{
         const rng=c.range_pct!=null?c.range_pct:50;
-        return `<div class="card">
+        return `<div class="card" style="cursor:pointer" onclick="openCommodity('${c.root}')" title="Open ${c.name} detail">
           <div class="name">${c.name}</div>
           <div class="price">${fmt(c.price)}</div>
           <div class="sub"><span>1d ${pct(c.chg_1d)}</span><span>vol ${fmt(c.vol_20d,0)}</span></div>
@@ -145,6 +155,99 @@ async function renderCommodities(){
     }
     v.innerHTML=html;
   }catch(e){ v.innerHTML=`<div class="err">${e.message}</div>`; }
+}
+
+// ── COMMODITY DETAIL (click a card) ───────────────────────
+function fmtAxis(v){ const a=Math.abs(v); return a>=1000?(v/1000).toFixed(1)+'k':a>=100?v.toFixed(0):v.toFixed(2); }
+// line chart with y-price ticks + x-date labels. points: [[label, value], …]
+function chart(points, opts={}){
+  if(!points||points.length<2) return '<div class="muted">no data</div>';
+  const w=opts.w||660, h=opts.h||230, ml=48, mr=12, mt=10, mb=30;
+  const iw=w-ml-mr, ih=h-mt-mb;
+  const vals=points.map(p=>p[1]);
+  const min=Math.min(...vals), max=Math.max(...vals), span=(max-min)||1;
+  const x=i=>ml+(i/(points.length-1))*iw, y=v=>mt+ih-((v-min)/span)*ih;
+  const col=opts.color||(vals[vals.length-1]>=vals[0]?'var(--green)':'var(--red)');
+  const path=points.map((p,i)=>`${i?'L':'M'}${x(i).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ');
+  let yt='';
+  for(let k=0;k<=4;k++){const v=min+span*k/4,yy=y(v);
+    yt+=`<line x1="${ml}" y1="${yy.toFixed(1)}" x2="${w-mr}" y2="${yy.toFixed(1)}" stroke="#21262d"/>
+      <text x="${ml-6}" y="${(yy+3).toFixed(1)}" fill="var(--muted)" font-size="10" text-anchor="end">${fmtAxis(v)}</text>`;}
+  let xt='';const step=Math.max(1,Math.floor((points.length-1)/5));
+  for(let i=0;i<points.length;i+=step){xt+=`<text x="${x(i).toFixed(1)}" y="${h-9}" fill="var(--muted)" font-size="10" text-anchor="middle">${points[i][0]}</text>`;}
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" style="display:block">${yt}
+    <path d="${path}" fill="none" stroke="${col}" stroke-width="2"/>${xt}
+    ${opts.ylabel?`<text x="12" y="${mt+ih/2}" fill="var(--muted)" font-size="10" text-anchor="middle" transform="rotate(-90 12 ${mt+ih/2})">${opts.ylabel}</text>`:''}</svg>`;
+}
+// seasonality: 12 bars of seasonal index (100 = annual average)
+function seasonalChart(seas){
+  if(!seas||seas.length<6) return '<div class="muted">not enough history for seasonality</div>';
+  const w=660,h=230,ml=40,mr=12,mt=10,mb=26,iw=w-ml-mr,ih=h-mt-mb;
+  const idx=seas.map(s=>s[2]??100);
+  const min=Math.min(100,...idx), max=Math.max(100,...idx), span=(max-min)||1;
+  const y=v=>mt+ih-((v-min)/span)*ih, bw=iw/seas.length*0.7;
+  let bars='';
+  seas.forEach((s,i)=>{const v=s[2]??100, cx=ml+(i+0.5)*iw/seas.length;
+    const top=Math.min(y(v),y(100)), bh=Math.abs(y(v)-y(100));
+    const col=v>=100?'var(--green)':'var(--red)';
+    bars+=`<rect x="${(cx-bw/2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(bh,1).toFixed(1)}" fill="${col}" opacity="0.8"/>
+      <text x="${cx.toFixed(1)}" y="${h-9}" fill="var(--muted)" font-size="10" text-anchor="middle">${s[0]}</text>`;});
+  const y100=y(100);
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" style="display:block">
+    <line x1="${ml}" y1="${y100.toFixed(1)}" x2="${w-mr}" y2="${y100.toFixed(1)}" stroke="var(--muted)" stroke-dasharray="3 3"/>
+    <text x="${ml-4}" y="${(y100+3).toFixed(1)}" fill="var(--muted)" font-size="10" text-anchor="end">100</text>${bars}</svg>`;
+}
+function tradeTable(title, rows){
+  if(!rows||!rows.length) return '';
+  const max=Math.max(...rows.map(r=>r[1]));
+  return `<div class="card" style="flex:1;min-width:240px"><div class="name">${title}</div><table style="font-size:13px">`+
+    rows.map(([c,p])=>`<tr><td style="border:none;padding:4px 8px 4px 0">${c}</td>
+      <td style="border:none;padding:4px 0;width:55%"><div style="background:#21262d;border-radius:3px;height:14px;position:relative">
+        <div style="background:var(--accent);height:14px;border-radius:3px;width:${(p/max*100).toFixed(0)}%"></div></div></td>
+      <td class="num muted" style="border:none;padding:4px 0 4px 8px">${p}%</td></tr>`).join('')+
+    `</table></div>`;
+}
+async function openCommodity(root){
+  TAB='commodities';
+  const v=document.getElementById('view');
+  v.innerHTML=`<div class="loading">Loading ${root}…</div>`;
+  try{
+    const c=await jget('/api/commodities/'+encodeURIComponent(root));
+    // price history points [label(YYYY-MM), value]; fall back to 30d spark
+    const hpts=(c.history&&c.history.length)?c.history.map(p=>[p[0].slice(0,7),p[1]])
+              :(c.spark||[]).map((v,i)=>[String(i+1),v]);
+    let html=`<button class="pill" style="cursor:pointer;border:1px solid var(--border)" onclick="renderCommodities()">← Commodities</button>
+      <div style="display:flex;align-items:baseline;gap:12px;margin:12px 0 2px">
+        <span class="big" style="font-size:24px">${c.name}</span><span class="muted">${c.group} · ${c.root}</span></div>
+      <div style="margin:6px 0 14px">
+        <span class="pill">${fmt(c.price)}</span>
+        <span class="pill">1d ${pct(c.chg_1d)}</span><span class="pill">1m ${pct(c.chg_1m)}</span>
+        <span class="pill">YTD ${pct(c.chg_ytd)}</span><span class="pill">1y ${pct(c.chg_1y)}</span>
+        <span class="pill">vol ${fmt(c.vol_20d,0)}</span>
+        <span class="pill">52w ${fmt(c.low_52w)}–${fmt(c.high_52w)}</span></div>
+      <div class="group-title">Price — last year (monthly tick)</div>
+      <div class="card">${chart(hpts,{ylabel:'price'})}</div>`;
+    // monthly averages (up to 5y)
+    if(c.monthly&&c.monthly.length>2){
+      html+=`<div class="group-title">Monthly average price (up to 5y)</div>
+        <div class="card">${chart(c.monthly,{ylabel:'avg price',color:'var(--accent)'})}</div>`;
+    }
+    // seasonality
+    if(c.seasonality&&c.seasonality.length>=6){
+      html+=`<div class="group-title">Seasonality — avg by calendar month <span class="muted">(index, 100 = annual avg; green = seasonally strong)</span></div>
+        <div class="card">${seasonalChart(c.seasonality)}</div>`;
+    }
+    // trade
+    if(c.trade){
+      html+=`<div class="group-title">Global trade — ${c.trade.unit} <span class="muted">(approx. share, recent yrs)</span></div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap">
+        ${tradeTable('Top exporters', c.trade.exporters)}
+        ${tradeTable('Top importers', c.trade.importers)}</div>`;
+    } else {
+      html+=`<div class="muted" style="margin-top:14px">No global trade reference for this commodity (US-centric or thinly traded).</div>`;
+    }
+    v.innerHTML=html;
+  }catch(e){ v.innerHTML=`<button class="pill" style="cursor:pointer;border:1px solid var(--border)" onclick="renderCommodities()">← Commodities</button><div class="err" style="margin-top:12px">${e.message}</div>`; }
 }
 
 // ── OPTIONS ───────────────────────────────────────────────
@@ -204,29 +307,93 @@ async function loadDrivers(){
   box.innerHTML=`<div class="loading">Loading ${tk}…</div>`;
   try{
     const d=await jget('/api/stocks/'+tk+'/commodities');
-    let html='';
-    // curated
-    if(d.curated&&d.curated.length){
-      html+=`<div class="group-title">Curated — economic links</div><table>
-        <thead><tr><th>Commodity</th><th>Role</th><th>Effect of price ↑</th><th>Why</th></tr></thead><tbody>`;
-      html+=d.curated.map(c=>{
-        const eff=c.sign>0?'<span class="pos">helps ▲</span>':'<span class="neg">hurts ▼</span>';
-        return `<tr><td><b>${c.root}</b></td><td class="muted">${c.role}</td><td>${eff}</td><td class="muted">${c.note||''}</td></tr>`;
-      }).join('')+`</tbody></table>`;
-    }
-    // computed
-    if(d.computed&&d.computed.length){
-      html+=`<div class="group-title">Computed — return regression (1y)</div><table>
-        <thead><tr><th>Commodity</th><th class="num">Beta</th><th class="num">Corr</th><th class="num">R²</th></tr></thead><tbody>`;
-      html+=d.computed.map(c=>{
-        const bc=c.beta>=0?'pos':'neg';
-        return `<tr><td><b>${c.root}</b></td><td class="num ${bc}">${c.beta}</td><td class="num">${c.corr}</td><td class="num muted">${c.r2}</td></tr>`;
-      }).join('')+`</tbody></table>`;
-    } else {
-      html+=`<div class="muted" style="margin-top:14px">Computed betas not generated yet (run <code>EXPOSURE_COMPUTE=1 python commodity_exposure.py</code> when the pipeline is idle).</div>`;
-    }
-    box.innerHTML=html;
+    box.innerHTML=exposureHTML(d);
   }catch(e){ box.innerHTML=`<div class="err">${e.message}<br>No exposure mapped for ${tk}. Curated set covers refiners, E&P, airlines, miners, chemicals, food, semis, autos.</div>`; }
+}
+// shared exposure renderer (used by Drivers tab + stock detail)
+function exposureHTML(d){
+  let html='';
+  if(d.curated&&d.curated.length){
+    html+=`<div class="group-title">Commodity drivers — curated</div><table>
+      <thead><tr><th>Commodity</th><th>Role</th><th>Effect of price ↑</th><th>Why</th></tr></thead><tbody>`;
+    html+=d.curated.map(c=>{
+      const eff=c.sign>0?'<span class="pos">helps ▲</span>':'<span class="neg">hurts ▼</span>';
+      return `<tr><td><b>${nm(c.root)}</b></td><td class="muted">${c.role}</td><td>${eff}</td><td class="muted">${c.note||''}</td></tr>`;
+    }).join('')+`</tbody></table>`;
+  }
+  if(d.computed&&d.computed.length){
+    html+=`<div class="group-title">Commodity drivers — computed (1y return regression)</div><table>
+      <thead><tr><th>Commodity</th><th class="num">Beta</th><th class="num">Corr</th><th class="num">R²</th></tr></thead><tbody>`;
+    html+=d.computed.map(c=>{
+      const bc=c.beta>=0?'pos':'neg';
+      return `<tr><td><b>${nm(c.root)}</b></td><td class="num ${bc}">${c.beta}</td><td class="num">${c.corr}</td><td class="num muted">${c.r2}</td></tr>`;
+    }).join('')+`</tbody></table>`;
+  }
+  if(!html) html=`<div class="muted">No commodity exposure mapped for this stock.</div>`;
+  return html;
+}
+
+// ── STOCK DETAIL (click a ticker) ─────────────────────────
+async function openStock(tk){
+  TAB='screener';
+  const v=document.getElementById('view');
+  v.innerHTML=`<div class="loading">Loading ${tk}…</div>`;
+  try{
+    const s=await jget('/api/stocks/'+tk);
+    // header
+    const score=s.score_composite, label=s.score_label, stars=s.score_stars;
+    let html=`<button class="pill" style="cursor:pointer;border:1px solid var(--border)" onclick="renderScreener()">← Screener</button>
+      <div style="display:flex;align-items:baseline;gap:12px;margin:12px 0 4px">
+        <span class="big" style="font-size:24px">${s.ticker}</span>
+        <span class="muted">${s.name||''}</span></div>
+      <div class="muted" style="margin-bottom:10px">${s.sector||''} · ${s.industry||''} · ${s.cap_size||''} · rank #${s.rank??'–'}</div>
+      <div style="margin-bottom:14px">
+        <span class="pill">$${fmt(s.price)}</span>
+        <span class="pill">mkt cap ${s.mkt_cap!=null?'$'+fmt(s.mkt_cap)+'B':'–'}</span>
+        ${score!=null?`<span class="pill">score ${fmt(score,0)} ${label?'· '+label:''} ${stars?'· '+'★'.repeat(Math.round(stars)):''}</span>`:'<span class="pill muted">score pending</span>'}
+        ${s.avg_upside!=null?`<span class="pill">upside ${pct(s.avg_upside)}</span>`:''}
+      </div>`;
+    // 52w range
+    if(s.low52!=null&&s.high52!=null&&s.high52>s.low52){
+      const pos=((s.price-s.low52)/(s.high52-s.low52)*100).toFixed(0);
+      html+=`<div class="muted" style="font-size:12px">52w range $${fmt(s.low52)} – $${fmt(s.high52)}</div>
+        <div class="rangebar" style="max-width:320px;margin:6px 0 14px"><i style="left:${pos}%"></i></div>`;
+    }
+    // metric blocks
+    const blocks=[
+      ['Valuation',[['P/E',s.pe],['Fwd P/E',s.fwd_pe],['P/B',s.pb],['P/S',s.ps],['EV/EBITDA',s.ev_ebitda],['PEG',s.peg],['Div yield',s.div_yield,'%'],['Beta',s.beta]]],
+      ['Quality / margins',[['ROIC',s.roic,'%'],['ROE',s.roe,'%'],['Gross mgn',s.gross_margin,'%'],['Op mgn',s.op_margin,'%'],['Net mgn',s.net_margin,'%'],['FCF mgn',s.fcf_margin,'%'],['Debt/EBITDA',s.d_to_ebitda],['Curr ratio',s.curr_ratio]]],
+      ['Growth (CAGR)',[['Rev 5y',s.rev_cagr_5y,'%'],['EPS 5y',s.eps_cagr_5y,'%'],['FCF 5y',s.fcf_cagr_5y,'%'],['Rev 1y',s.rev_cagr_1y,'%'],['EPS ttm',s.eps_ttm],['EPS fwd',s.eps_fwd]]],
+      ['Valuation models',[['DCF intrinsic',s.dcf_intrinsic],['DCF upside',s.dcf_upside_pct,'%'],['Comps FV',s.comps_fair_value],['Comps upside',s.comps_upside_pct,'%'],['EPV',s.epv_value],['Graham',s.graham_value],['Signal',s.combined_signal]]],
+      ['Analysts / technicals',[['Mean tgt',s.analyst_mean],['Low',s.analyst_low],['High',s.analyst_high],['# analysts',s.num_analysts],['1y return',s.ret_1y,'%'],['RSI',s.rsi],['Momentum',s.mom_signal]]],
+    ];
+    html+=`<div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">`;
+    for(const [title,rows] of blocks){
+      html+=`<div class="card"><div class="name">${title}</div><table style="font-size:12px">`+
+        rows.map(([k,val,suf])=>`<tr><td class="muted" style="border:none;padding:3px 6px 3px 0">${k}</td>
+          <td class="num" style="border:none;padding:3px 0">${val==null||val===''?'–':(typeof val==='number'?fmt(val,2):val)}${(val!=null&&suf)?suf:''}</td></tr>`).join('')+
+        `</table></div>`;
+    }
+    html+=`</div>`;
+    // options + drivers placeholders, filled async
+    html+=`<div id="detOpt"></div><div id="detDrv"><div class="loading">Loading commodity drivers…</div></div>`;
+    v.innerHTML=html;
+    // options summary (optional)
+    try{
+      const o=await jget('/api/options/'+tk);
+      const sm=o.summary||{};
+      document.getElementById('detOpt').innerHTML=`<div class="group-title">Options</div>
+        <span class="pill">ATM IV ${sm.atm_iv!=null?(sm.atm_iv*100).toFixed(1)+'%':'–'}</span>
+        <span class="pill">IV mean ${sm.iv_mean!=null?(sm.iv_mean*100).toFixed(1)+'%':'–'}</span>
+        <span class="pill">P/C OI ${fmt(sm.put_call_oi)}</span>
+        <span class="pill">OI ${fmt(sm.total_oi,0)}</span>`;
+    }catch{ document.getElementById('detOpt').innerHTML=''; }
+    // commodity drivers
+    try{
+      const drv=await jget('/api/stocks/'+tk+'/commodities');
+      document.getElementById('detDrv').innerHTML=exposureHTML(drv);
+    }catch{ document.getElementById('detDrv').innerHTML=`<div class="group-title">Commodity drivers</div><div class="muted">No commodity exposure mapped for ${tk}.</div>`; }
+  }catch(e){ v.innerHTML=`<button class="pill" style="cursor:pointer;border:1px solid var(--border)" onclick="renderScreener()">← Screener</button><div class="err" style="margin-top:12px">${e.message}</div>`; }
 }
 
 // ── nav ───────────────────────────────────────────────────
