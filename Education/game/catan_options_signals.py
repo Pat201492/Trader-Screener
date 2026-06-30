@@ -18,6 +18,7 @@ commodity's realized vol, so IV is genuine — RICH IV options really do cost mo
 Pure stdlib. Run:  python catan_options_signals.py
 Educational only — not investment advice.
 """
+import copy
 import math
 import random
 import sys
@@ -160,13 +161,33 @@ class Commodity:
         return self._emit(random, catalyst_drift)   # forward uses global RNG
 
 # ---------------------------------------------------------------- pricing
-def bs_premium(kind, S, K, sigma, T):
+def forward_stats(com, sims=500):
+    """Simulate next month with NO catalyst -> fair forward F (mean) AND the true
+    one-step dispersion as an annualized sigma. Pricing off BOTH (mean and the real
+    spread, which includes jumps/vol-clustering) makes a no-edge trade ~zero-EV, so
+    only the catalyst (unknown to the pricer) is an edge."""
+    base = com.price()
+    prices, rets = [], []
+    for _ in range(sims):
+        c = copy.deepcopy(com)
+        c.advance(0.0)
+        p = c.price()
+        prices.append(p)
+        rets.append(math.log(p / base))
+    F = sum(prices) / sims
+    m = sum(rets) / sims
+    var = sum((r - m) ** 2 for r in rets) / (sims - 1)
+    sigma = math.sqrt(var) * math.sqrt(12)
+    return F, max(sigma, 0.05)
+
+def black_premium(kind, F, K, sigma, T):
+    """Black model: option priced on the forward F (r=0). No-drift-edge baked out."""
     sigma = max(sigma, 0.05)
-    if T <= 0:
-        return round(max(S - K, 0) if kind == "call" else max(K - S, 0), 2)
-    d1 = (math.log(S / K) + 0.5 * sigma**2 * T) / (sigma * math.sqrt(T))
+    if T <= 0 or F <= 0:
+        return round(max(F - K, 0) if kind == "call" else max(K - F, 0), 2)
+    d1 = (math.log(F / K) + 0.5 * sigma**2 * T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
-    val = (S * Ncdf(d1) - K * Ncdf(d2)) if kind == "call" else (K * Ncdf(-d2) - S * Ncdf(-d1))
+    val = (F * Ncdf(d1) - K * Ncdf(d2)) if kind == "call" else (K * Ncdf(-d2) - F * Ncdf(-d1))
     return max(round(val, 2), 0.05)
 
 def strikes_for(S):
@@ -202,6 +223,14 @@ def intro(coms):
          "(high rank) = options expensive and the move is likely already priced in.")
     wrap("EDGE: trade WITH a catalyst when IV is CHEAP (bullish->call, bearish->put). "
          "Avoid RICH IV. No catalyst = no edge = sit out.")
+    print()
+    wrap("STRIKES & MONEYNESS: each option offers three strikes. A CALL with strike "
+         "BELOW spot — or a PUT with strike ABOVE spot — is IN-THE-MONEY: it already "
+         "has intrinsic value, so it costs more but moves almost dollar-for-dollar with "
+         "the commodity. (Yes, a put above the current price is normal — it can already "
+         "be exercised at a gain.) OUT-OF-THE-MONEY options are cheap but need a real "
+         "move to pay off. Options are priced on the fair forward, so with NO catalyst "
+         "the expected profit is ~zero — your only edge is the news + IV.")
     print("\nThe five commodities (each shaped like a real-world analog):")
     for n, c in coms.items():
         print(f"   {n:<7} ~ {c.p['analog']}")
@@ -247,17 +276,26 @@ def buy_phase(coms, gold, catalyst, priced_in):
         print(f"   {k}) {n}  @ {coms[n].price():.2f}   IV {iv_tag(coms[n].iv_rank())}{flag}")
     name = ask("Pick a commodity (number): ", menu)
     com = coms[name]; S = com.price()
-    sigma = max(com.realized_vol(), 0.10)        # IV proxy = realized vol
     kind = ask("Call (up) or Put (down)? (c/p): ", {"c": "call", "p": "put"})
 
     T = 1 / 12                                   # 1-month option
+    F, sigma = forward_stats(com)                 # fair forward + true dispersion -> fair premium
     ks = strikes_for(S); chain = {}
-    print(f"\n   {name} @ {S:.2f}   {kind.upper()}   IV {iv_tag(com.iv_rank())}  (vol {sigma*100:.0f}%)")
+    print(f"\n   {name} @ {S:.2f}   {kind.upper()}   IV {iv_tag(com.iv_rank())}  (fair vol {sigma*100:.0f}%)")
+    print("   (ITM = already exercisable, has intrinsic value, costs more; "
+          "OTM = needs a move to pay off, cheap)")
     for i, K in enumerate(ks, 1):
-        prem = bs_premium(kind, S, K, sigma, T)
-        mny = "ITM" if ((kind=="call" and S>K) or (kind=="put" and S<K)) else ("ATM" if K==round(S) else "OTM")
+        prem = black_premium(kind, F, K, sigma, T)
+        if kind == "call":
+            intrinsic = max(S - K, 0)
+        else:
+            intrinsic = max(K - S, 0)
+        mny = "ITM" if intrinsic > 0 else ("ATM" if K == round(S) else "OTM")
+        note = (f"{intrinsic:.2f} intrinsic" if intrinsic > 0
+                else (f"needs {kind=='call' and 'rise' or 'fall'} past {K}"))
         chain[str(i)] = (K, prem)
-        print(f"   {i}) strike {K:<4} premium {prem:>5.2f}/u  contract {prem*UNITS:>6.2f}  [{mny}]")
+        print(f"   {i}) strike {K:<4} premium {prem:>5.2f}/u  contract {prem*UNITS:>6.2f}  "
+              f"[{mny}: {note}]")
     K, prem = ask("Pick a strike (number): ", chain)
 
     cost = prem * UNITS
