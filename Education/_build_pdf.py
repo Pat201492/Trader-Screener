@@ -16,6 +16,7 @@ DOCS = [
     "Trading_and_Exchanges_Harris_Detailed.md",
     "Derivatives_Types_and_Trading_Signals.md",
     "Derivatives_Examples_Gallery.md",
+    "Information_Sheet_Tearsheet.md",
 ]
 
 CSS = """

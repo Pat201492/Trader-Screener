@@ -41,6 +41,8 @@ What trading *is*: the continuous price-discovery and risk-transfer machine. Som
 > **Deep-dive:** [Derivatives — Types & The Signals People Trade Off Them](Derivatives_Types_and_Trading_Signals.md) ([PDF](Derivatives_Types_and_Trading_Signals.pdf)) — full taxonomy (forwards/futures/options/swaps) plus the options/volatility signal set (IV, IV Rank, skew, put/call, open interest, unusual activity, the Greeks, term structure, VIX).
 >
 > **Examples gallery:** [Derivatives Examples Gallery](Derivatives_Examples_Gallery.md) ([PDF](Derivatives_Examples_Gallery.pdf)) — visual catalog of ~14 strategies (single legs, spreads, straddle/strangle/condor/butterfly, covered call/collar) with payoff charts + key metrics, and the **Greeks** (delta/gamma/vega/theta) profiles professionals watch.
+>
+> **Tear sheet (firm-style):** [Instrument Information Sheet / Tear Sheet](Information_Sheet_Tearsheet.md) ([PDF](Information_Sheet_Tearsheet.pdf)) — the one-page desk brief format + worked equity and commodity examples, each ending in a specific **derivative recommendation** (bull call spread, producer collar) with payoff. Illustrative/educational. Doubles as the screener's per-instrument output spec.
 
 ---
 
