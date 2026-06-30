@@ -175,7 +175,7 @@ INFO = [
     ("Implied vol", "The vol used to price options = fair dispersion x an IV-Rank markup (0.85-1.15x).",
      "Above realized = options rich (sell); below = cheap (buy). The gap is the variance risk premium."),
     ("Trend (up/flat/down)", "Sign of the 6-month price change, with a +/-4% dead-band.",
-     "Directional bias. Favor calls in uptrends, puts in downtrends; counter-trend needs a stronger catalyst."),
+     "Context, NOT a standalone edge here. In this simulation prices MEAN-REVERT around their trend (verified by validate_model.py), so a stretched move tends to partially reverse — don't blindly chase it. The reliable edges are the catalyst and IV Rank. (Real markets show momentum too; this sim does not.)"),
     ("Catalyst / market news", "An event shifting supply or demand (harvest, mine outage, housing, policy).",
      "The 'why now'. Match direction (bull->call, bear->put); no catalyst = no edge = sit out."),
     ("Forward price (F)", "Monte-Carlo mean of the next month's price with no catalyst.",
@@ -190,6 +190,23 @@ INFO = [
      "The price the move must clear to profit. Compare to a realistic move (rVol x catalyst) before entering."),
 ]
 
+ACTIONS = [
+    ("Buy a call (long call)", "Pay a premium for the RIGHT to buy at the strike.",
+     "Bullish, leveraged. Max loss = the premium; upside large. Long vega, hurt by time decay. Best when IV is CHEAP + a bullish catalyst."),
+    ("Buy a put (long put)", "Pay a premium for the RIGHT to sell at the strike.",
+     "Bearish, or a hedge on something you own. Max loss = the premium; profit grows as price falls. Best when IV is CHEAP + a bearish catalyst."),
+    ("Sell a cash-secured put", "Sell a put and reserve cash to buy the stock if assigned.",
+     "Bullish/neutral INCOME. Max profit = premium collected; large loss if price collapses toward zero. Ties up collateral. Short vega, gains from time decay. Best when IV is RICH."),
+    ("Sell a covered call", "Own the underlying AND sell a call against it.",
+     "Neutral / mild-bull INCOME. Premium + gains up to the strike are yours; upside ABOVE the strike is capped; still fully exposed to the stock's downside. Best when IV is RICH."),
+    ("Bull put credit spread", "Sell a put and buy a lower-strike put (net credit).",
+     "Bullish/neutral, DEFINED risk. Max profit = the credit; max loss = strike width - credit. Wins if price stays ABOVE the short strike. Best when IV is RICH."),
+    ("Bear call credit spread", "Sell a call and buy a higher-strike call (net credit).",
+     "Bearish/neutral, DEFINED risk. Max profit = the credit; max loss = strike width - credit. Wins if price stays BELOW the short strike. Best when IV is RICH."),
+    ("Sit out (do nothing)", "Take no position this turn.",
+     "Valid and often correct. No catalyst + fair IV = no edge; preserving capital beats a coin-flip trade. Discipline is a skill."),
+]
+
 def show_information():
     print("\n" + "#" * 72)
     print("#  INFORMATION — every metric: definition & impact")
@@ -198,10 +215,23 @@ def show_information():
         print(f"\n{name}")
         wrap(f"Definition: {defn}", "   ")
         wrap(f"Impact: {impact}", "   ")
+    print("\n" + "=" * 72)
+    print("  ACTIONS — what you can do, and when")
+    print("=" * 72)
+    for name, defn, impact in ACTIONS:
+        print(f"\n{name}")
+        wrap(f"What it is: {defn}", "   ")
+        wrap(f"When / impact: {impact}", "   ")
     print("\n" + "#" * 72)
     wrap("Decision chain: rVol sets the baseline -> IV Rank says buy-vs-sell -> trend+catalyst "
          "set direction -> forward/implied mean direction alone is ~free -> premium & breakeven "
          "are the final cost/feasibility check.")
+    print("Rule of thumb: BUY (call/put) when IV is CHEAP + a catalyst; SELL (CSP / covered "
+          "call / credit spread) when IV is RICH; sit out when neither.")
+    wrap("Model is validated by validate_model.py: catalysts move price (bull>none>bear), "
+         "volatility clusters (IV Rank is informative), the priced forward is unbiased (honest "
+         "pricing), and signal-aligned trades beat no-edge beat wrong-way. Prices mean-revert "
+         "around trend, so the catalyst + IV Rank — not the trend arrow — are the real edges.")
     print("#" * 72)
 
 def annualized_vol(logrets):
