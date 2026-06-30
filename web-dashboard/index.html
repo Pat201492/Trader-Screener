@@ -391,46 +391,71 @@ async function openStock(tk){
   }catch(e){ v.innerHTML=`<button class="pill" style="cursor:pointer;border:1px solid var(--border)" onclick="renderScreener()">← Screener</button><div class="err" style="margin-top:12px">${e.message}</div>`; }
 }
 
-// ── DATA workspace (pipeline status) ──────────────────────
+// ── DATA workspace (data integrity) ───────────────────────
+function ageStr(iso){
+  if(!iso) return '–';
+  const d=new Date(iso.length<=10?iso+'T00:00:00':iso), hrs=(Date.now()-d.getTime())/3.6e6;
+  const lab= hrs<24?`${hrs.toFixed(0)}h ago` : `${(hrs/24).toFixed(1)}d ago`;
+  return `${iso.slice(0,16).replace('T',' ')} <span class="muted">(${lab})</span>`;
+}
+function covBar(val,total,label){
+  const pct=total?Math.min(100,val/total*100):0;
+  const col=pct>=90?'var(--green)':pct>=60?'var(--accent)':'var(--red)';
+  return `<tr><td style="border:none;padding:4px 8px 4px 0">${label}</td>
+    <td style="border:none;padding:4px 0;width:55%"><div style="background:#21262d;border-radius:3px;height:14px">
+      <div style="background:${col};height:14px;border-radius:3px;width:${pct.toFixed(0)}%"></div></div></td>
+    <td class="num muted" style="border:none;padding:4px 0 4px 8px">${val??'–'}/${total??'–'} (${pct.toFixed(0)}%)</td></tr>`;
+}
 async function renderData(){
   const v=document.getElementById('view');
-  v.innerHTML='<div class="loading">Loading data status…</div>';
+  v.innerHTML='<div class="loading">Loading data integrity…</div>';
   try{
-    const h=await jget('/health');
-    const outs=h.outputs||{};
-    let counts={};
-    try{ counts.stocks=(await jget('/api/stocks?limit=1')).total; }catch{}
-    try{ counts.commodities=(await jget('/api/commodities')).count; }catch{}
-    const base=API();
-    const fileRow=(f,ok)=>`<tr><td>${f}</td><td>${ok?'<span class="pos">✓ present</span>':'<span class="neg">✗ missing</span>'}</td></tr>`;
-    const ep=(m,p,d)=>`<tr><td class="muted">${m}</td><td><a href="${base}${p}" target="_blank" style="color:var(--accent)">${p}</a></td><td class="muted">${d}</td></tr>`;
-    v.innerHTML=`<div class="group-title">Pipeline status</div>
-      <div style="margin-bottom:14px">
-        <span class="pill">API ${h.ok?'<span class="pos">online</span>':'<span class="neg">offline</span>'}</span>
-        <span class="pill">stocks ${counts.stocks??'–'}</span>
-        <span class="pill">commodities ${counts.commodities??'–'}</span>
-        <a href="${base}/docs" target="_blank" class="pill" style="color:var(--accent)">Swagger /docs ↗</a></div>
-      <div style="display:flex;gap:12px;flex-wrap:wrap">
-        <div class="card" style="flex:1;min-width:240px"><div class="name">Output files</div>
-          <table style="font-size:13px">${Object.entries(outs).map(([f,ok])=>fileRow(f,ok)).join('')}</table></div>
-        <div class="card" style="flex:2;min-width:320px"><div class="name">Endpoints</div>
-          <table style="font-size:13px">
-            ${ep('GET','/api/stocks','screener: filter/sort/page')}
-            ${ep('GET','/api/stocks/{t}','one stock (merged)')}
-            ${ep('GET','/api/stocks/{t}/commodities','commodity drivers')}
-            ${ep('GET','/api/commodities','all commodities')}
-            ${ep('GET','/api/commodities/{root}','detail: history/seasonality/trade')}
-            ${ep('GET','/api/options/{t}','options summary + chain')}
-            ${ep('GET','/health','output status')}
-          </table></div>
+    const d=await jget('/api/integrity');
+    const cov=d.coverage||{}, gen=d.generated||{}, mc=d.model_completeness||{}, q=d.quality_summary||{}, cm=d.commodities||{};
+    const baseTot=cov.fundamentals||cov.model||0;
+    // freshness
+    let html=`<div class="group-title">Freshness — when each dataset was last built</div>
+      <div class="card"><table style="font-size:13px">
+        ${Object.entries(gen).map(([k,t])=>`<tr><td class="muted" style="border:none;padding:4px 16px 4px 0;text-transform:capitalize">${k}</td><td style="border:none;padding:4px 0">${ageStr(t)}</td></tr>`).join('')}
+      </table></div>`;
+    // coverage
+    html+=`<div class="group-title">Coverage — rows present per stage</div>
+      <div class="card"><table style="font-size:13px">
+        ${covBar(cov.universe,cov.universe,'Universe (discovered)')}
+        ${covBar(cov.fundamentals,Math.max(cov.universe||0,cov.fundamentals||0),'Fundamentals')}
+        ${covBar(cov.model,Math.max(cov.universe||0,cov.model||0),'Valuation model')}
+        <tr><td class="muted" style="border:none;padding:4px 0">Options tickers</td><td colspan="2" style="border:none;padding:4px 0">${cov.options_tickers??'–'}</td></tr>
+        <tr><td class="muted" style="border:none;padding:4px 0">Exposure tickers</td><td colspan="2" style="border:none;padding:4px 0">${cov.exposure_tickers??'–'}</td></tr>
+      </table></div>`;
+    // data quality + model completeness side by side
+    html+=`<div style="display:flex;gap:12px;flex-wrap:wrap">
+      <div class="card" style="flex:1;min-width:260px"><div class="name">Data quality (fundamentals)</div>
+        <table style="font-size:13px">${Object.entries(q).map(([k,val])=>{
+          const col=k.startsWith('High')?'pos':k.startsWith('Low')?'neg':'';
+          return `<tr><td class="${col}" style="border:none;padding:4px 16px 4px 0">${k}</td><td class="num" style="border:none;padding:4px 0">${val}</td></tr>`;
+        }).join('')||'<tr><td class="muted">n/a</td></tr>'}</table></div>
+      <div class="card" style="flex:1;min-width:260px"><div class="name">Valuation-model completeness</div>
+        <table style="font-size:13px">
+          ${covBar(mc.dcf,mc.total,'DCF')}
+          ${covBar(mc.comps,mc.total,'Comps')}
+          ${covBar(mc.m3,mc.total,'EPV/Graham')}
+          ${covBar(mc.all3,mc.total,'All three')}
+        </table></div></div>`;
+    // commodities gaps
+    html+=`<div class="group-title">Commodities — fetch completeness</div>
+      <div class="card">
+        <span class="pill">${cm.fetched??'–'}/${cm.expected??'–'} fetched</span>
+        ${(cm.missing&&cm.missing.length)?`<span class="pill neg">${cm.missing.length} missing</span>`:'<span class="pill pos">all fetched</span>'}
+        ${(cm.missing&&cm.missing.length)?`<div class="muted" style="margin-top:8px">missing: ${cm.missing.map(x=>x.name+' ('+x.root+')').join(', ')}</div>`:''}
       </div>`;
+    v.innerHTML=html;
   }catch(e){ v.innerHTML=`<div class="err">${e.message}<br>API unreachable at ${API()} — set the base above.</div>`; }
 }
 
 // ── workspaces / routing ──────────────────────────────────
 const SECTIONS={
-  data:  {label:'Data',  icon:'🗄️', desc:'Pipeline status, API health, raw endpoints',
-          tabs:[['status','Status',renderData]]},
+  data:  {label:'Data',  icon:'🗄️', desc:'Data integrity — freshness, coverage, quality, gaps',
+          tabs:[['integrity','Integrity',renderData]]},
   trader:{label:'Trader',icon:'📊', desc:'Commodities, options, commodity drivers',
           tabs:[['commodities','Commodities',renderCommodities],['options','Options',renderOptions],['drivers','Drivers',renderDrivers]]},
   stock: {label:'Stock', icon:'🏢', desc:'Equity screener + per-stock detail',
