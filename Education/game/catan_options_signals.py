@@ -751,20 +751,81 @@ def scorecard(start, final, scored):
             print(f"     you:  {m['you']}")
         print(bar)
 
-def play():
-    random.seed()
+def tutorial_intro():
+    print("\n" + "=" * 72)
+    print("        TUTORIAL — a short, guided 5-month walkthrough")
+    print("=" * 72)
+    wrap("I'll walk you through each turn: read the news, check the IV, and I'll tell you the "
+         "best move and WHY. You make the move yourself (so you learn the keys). After it "
+         "settles, I'll explain what happened. Start with the SUGGESTED MOVE every time — "
+         "you can branch out later in a normal game.")
+    wrap("The whole game is just this loop: NEWS (which way) + IV RANK (cheap or pricey) "
+         "-> an action. That's it.")
+    print("-" * 72)
+
+def coach_setup(catalyst, coms, reco):
+    head, ccom, cdir, _ = catalyst
+    print("\n  +--- TUTORIAL ---------------------------------------------------+")
+    if cdir == "none":
+        wrap("Q1 (direction): the news has no clear catalyst -> no view on direction.", "  | ")
+        wrap("Q2 (cheap/pricey): with no catalyst there's usually no edge to act on.", "  | ")
+        wrap(f"Q3 (action): {reco}.", "  | ")
+        wrap("Lesson: NOT trading is a real choice. No edge -> keep your gold.", "  | ")
+    else:
+        dir_word = "UP (bullish)" if cdir == "bull" else "DOWN (bearish)"
+        rank = coms[ccom].iv_rank()
+        tag = "CHEAP (good to BUY)" if rank <= 40 else ("RICH (good to SELL)" if rank >= 66 else "FAIR (small edge)")
+        wrap(f"Q1 (direction): news on {ccom} suggests price goes {dir_word}.", "  | ")
+        wrap(f"Q2 (cheap/pricey): {ccom} IV Rank = {rank} -> {tag}.", "  | ")
+        wrap(f"Q3 (action) -> SUGGESTED MOVE: {reco}.", "  | ")
+        if rank <= 40:
+            wrap("Why: news says it moves + options are cheap -> BUYING is the cheap, "
+                 "defined-risk way to bet that direction.", "  | ")
+        elif rank >= 66:
+            wrap("Why: options are pricey -> better to SELL premium (collect the fat fee) "
+                 "than overpay to buy it.", "  | ")
+        else:
+            wrap("Why: only a small edge at fair IV -> a spread or sitting out is reasonable.", "  | ")
+    print("  +----------------------------------------------------------------+")
+
+def coach_debrief(pos, scored):
+    print("\n  +--- TUTORIAL: what happened -----------------------------------+")
+    if not pos:
+        wrap("You sat out — no gold at risk. Correct when there's no edge.", "  | ")
+    else:
+        t = scored["trades"][-1]
+        if t["pl"] > 0:
+            wrap(f"Profit {t['pl']:+.2f}. The move went your way and beat your breakeven "
+                 f"(after the fee). That's the goal.", "  | ")
+        elif t["pl"] < 0:
+            if t["vol"] == "long":
+                wrap(f"Loss {t['pl']:+.2f}. Either the move didn't come or it didn't clear "
+                     f"your breakeven. Note: the premium was the MOST you could lose.", "  | ")
+            else:
+                wrap(f"Loss {t['pl']:+.2f}. You sold premium and the move went against you — "
+                     f"selling can lose more than the fee collected (that's the risk).", "  | ")
+        else:
+            wrap("Broke even.", "  | ")
+        if t["good"]:
+            wrap("This was an EDGE play (signal + right IV). Over many turns these win.", "  | ")
+    print("  +----------------------------------------------------------------+")
+
+def play(months=PLAY_MONTHS, tutorial=False, seed=None):
+    random.seed(seed) if seed is not None else random.seed()
     coms = {n: Commodity(n, dict(p)) for n, p in COMMODITIES.items()}
-    intro(coms)
+    tutorial_intro() if tutorial else intro(coms)
     gold = START_GOLD
     scored = {"n": 0, "pl": 0.0, "trades": [], "plan": []}
     month_idx = HIST_MONTHS            # first played month = right after history
 
-    for turn in range(1, PLAY_MONTHS + 1):
+    for turn in range(1, months + 1):
         show_board(coms, month_idx, turn, gold)
         catalyst = random.choice(CATALYSTS)
         _, ccom, cdir, strength = catalyst
         priced_in = (cdir != "none" and (coms[ccom].iv_rank() >= 66 or random.random() < 0.25))
         reco = recommend(catalyst, coms)              # baseline (uses IV the player can see)
+        if tutorial:
+            coach_setup(catalyst, coms, reco)
         pos, gold = trade_phase(coms, gold, catalyst, priced_in)
         scored["plan"].append(dict(month=month_label(month_idx),
                                    news=catalyst[0],
@@ -784,14 +845,20 @@ def play():
         month_idx += 1
         if pos:
             gold = settle(pos, coms[pos["name"]].price(), gold, scored)
+        if tutorial:
+            coach_debrief(pos, scored)
         print(f"\n   Gold now: {gold:.2f}")
         if gold < 1:
             print("\n   Out of gold. Game over."); break
 
     scorecard(START_GOLD, gold, scored)
-    print("Real parallel: history/sparkline = price chart; rVol & IV Rank = volatility "
-          "signals; catalyst = news/earnings/supply data. The Trader Screener surfaces all "
-          "of these so your decisions carry an edge.")
+    if tutorial:
+        wrap("Tutorial done. You've seen the full loop. Now try menu option 1 (Play) for a "
+             "real 12-month run — follow the SUGGESTED MOVE while you build confidence.")
+    else:
+        print("Real parallel: history/sparkline = price chart; rVol & IV Rank = volatility "
+              "signals; catalyst = news/earnings/supply data. The Trader Screener surfaces all "
+              "of these so your decisions carry an edge.")
 
 def main():
     """Start menu — toggle into History or Information pages before playing."""
@@ -800,17 +867,21 @@ def main():
         print("\n" + "=" * 60)
         print("            CATAN OPTIONS — MAIN MENU")
         print("=" * 60)
-        print("   1) Play          — start a 12-month trading run")
+        print("   1) Play          — full 12-month trading run")
         print("   2) Guide         — START HERE: plain-English how-to + example")
-        print("   3) History       — price charts + who exports/imports each")
-        print("   4) Information    — every metric & action: definition & impact")
-        print("   5) Quit")
-        choice = ask("Choose (1-5): ",
-                     {"1": "play", "2": "guide", "3": "history", "4": "info", "5": "quit"})
+        print("   3) Tutorial      — guided 5-month walkthrough (coached each turn)")
+        print("   4) History       — price charts + who exports/imports each")
+        print("   5) Information    — every metric & action: definition & impact")
+        print("   6) Quit")
+        choice = ask("Choose (1-6): ",
+                     {"1": "play", "2": "guide", "3": "tutorial", "4": "history",
+                      "5": "info", "6": "quit"})
         if choice == "play":
             play()
         elif choice == "guide":
             show_guide(); input("\n(press Enter to return to menu...)")
+        elif choice == "tutorial":
+            play(months=5, tutorial=True, seed=7)
         elif choice == "history":
             show_history(menu_coms); input("\n(press Enter to return to menu...)")
         elif choice == "info":
