@@ -605,6 +605,30 @@ def settle(pos, S, gold, scored):
     return gold
 
 # ---------------------------------------------------------------- main
+def recommend(catalyst, coms):
+    """The textbook play given the news + IV Rank (the decision recipe).
+    Used as the post-game baseline to compare your choices against."""
+    head, ccom, cdir, _ = catalyst
+    if cdir == "none":
+        rich_name = max(coms, key=lambda n: coms[n].iv_rank())
+        r = coms[rich_name].iv_rank()
+        if r >= 66:
+            return f"Sell premium on {rich_name} (IV RICH {r}) — credit spread / cash-secured put"
+        return "Sit out — no catalyst and no richly-priced IV (no edge)"
+    r = coms[ccom].iv_rank()
+    if cdir == "bull":
+        if r <= 40:
+            return f"BUY a CALL on {ccom} (bullish + cheap IV {r})"
+        if r >= 66:
+            return f"SELL puts on {ccom} (bullish + rich IV {r}) — cash-secured put / bull put spread"
+        return f"Bull put spread on {ccom} (bullish, fair IV {r}) — or sit out"
+    else:
+        if r <= 40:
+            return f"BUY a PUT on {ccom} (bearish + cheap IV {r})"
+        if r >= 66:
+            return f"SELL calls on {ccom} (bearish + rich IV {r}) — bear call spread"
+        return f"Bear call spread on {ccom} (bearish, fair IV {r}) — or sit out"
+
 def grade(net, edge_pl, noise_pl, win_rate, discipline):
     pts = 0
     pts += 2 if net > 0 else 0
@@ -669,12 +693,24 @@ def scorecard(start, final, scored):
                  "were right; small samples are noisy. Process over outcome.")
     print(bar)
 
+    # Coach's baseline: the textbook play each month vs what you did.
+    plan = scored.get("plan", [])
+    if plan:
+        print("\n  COACH'S BASELINE — best play each month vs your choice")
+        print("  (compare your decisions to the news + IV-Rank recipe)")
+        print("  " + "-" * 56)
+        for m in plan:
+            print(f"  {m['month']}  news: {m['news']}")
+            print(f"     reco: {m['reco']}")
+            print(f"     you:  {m['you']}")
+        print(bar)
+
 def play():
     random.seed()
     coms = {n: Commodity(n, dict(p)) for n, p in COMMODITIES.items()}
     intro(coms)
     gold = START_GOLD
-    scored = {"n": 0, "pl": 0.0, "trades": []}
+    scored = {"n": 0, "pl": 0.0, "trades": [], "plan": []}
     month_idx = HIST_MONTHS            # first played month = right after history
 
     for turn in range(1, PLAY_MONTHS + 1):
@@ -682,7 +718,12 @@ def play():
         catalyst = random.choice(CATALYSTS)
         _, ccom, cdir, strength = catalyst
         priced_in = (cdir != "none" and (coms[ccom].iv_rank() >= 66 or random.random() < 0.25))
+        reco = recommend(catalyst, coms)              # baseline (uses IV the player can see)
         pos, gold = trade_phase(coms, gold, catalyst, priced_in)
+        scored["plan"].append(dict(month=month_label(month_idx),
+                                   news=catalyst[0],
+                                   reco=reco,
+                                   you=(pos["label"] if pos else "sat out")))
 
         input("\n(press Enter to advance one month...)")
         # forward step: one shared MACRO shock drives co-movement; catalyst adds monthly
