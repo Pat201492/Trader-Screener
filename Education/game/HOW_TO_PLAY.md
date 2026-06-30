@@ -38,17 +38,27 @@ You start with **100 gold**. Over **10 seasons** you buy options on commodities;
 Prices move randomly with **no information**. Every trade is a coin flip, so over time the premium bleeds you. **That's the lesson:** trading with no edge is gambling.
 
 ### `catan_options_signals.py` — signals edition (recommended)
-Each season you get **data to read**:
-- **Market news** — a catalyst that biases one commodity up or down (e.g. "Drought ruins the harvest — GRAIN scarce" → grain bullish).
-- **IV tag** — each option is **CHEAP** (move not yet priced in) or **RICH** (already priced; premium inflated).
+A **call/put reference banner stays at the top** of every turn. Each turn is **one month** and **real dates advance** (e.g. 2026-01 → 2026-02 …).
 
-Your **edge**: trade WITH a catalyst when IV is CHEAP (bullish→call, bearish→put). Avoid RICH IV — the inflated premium eats the profit even when you're right. Some seasons are red herrings (no catalyst) — sitting out is correct.
+**Real-world-shaped data.** Every commodity is modeled after a real analog, so its **5-year history has a characteristic shape** (the shape, not real prices):
 
-The end screen scores your **edge trades** (with-signal, cheap-IV) separately, so you can see information beat luck:
+| Commodity | Analog | Shape |
+|---|---|---|
+| Grain | agricultural grain | strong annual **seasonality**, mean-reverting |
+| Lumber | lumber | **boom/bust** cyclical, momentum, high vol |
+| Brick | construction block | steady **up-trend**, low vol |
+| Wool | soft commodity | mild seasonality, slow trends |
+| Ore | industrial metal | cyclical, trending, high vol, supply shocks |
+
+**What you read each month** (shown per commodity): current price, a **5-year sparkline**, the 5y range, **realized volatility**, **IV Rank** (how high its vol is vs its own 5y history → CHEAP/FAIR/RICH), and a **trend arrow**. Premiums are priced off each commodity's realized vol, so RICH-IV options genuinely cost more.
+
+**Your edge:** trade WITH a catalyst when IV is **CHEAP/FAIR** (bullish→call, bearish→put). Avoid **RICH** IV — the move is largely priced in and the premium is inflated. No catalyst = no edge = sit out.
+
+The end screen scores your **edge trades** separately so information visibly beats luck:
 ```
-Edge trades (with catalyst, cheap IV): 3   net P/L +53.10
+Edge trades (with catalyst, cheap/fair IV): 3   net P/L +53.10
 ```
-Real-world parallel: catalyst = news/earnings/supply data; IV tag = **IV Rank**. The Trader Screener's job is to surface these so your decisions have an edge.
+Real-world parallel: sparkline = price chart; realized vol & IV Rank = volatility signals; catalyst = news/earnings/supply data. The Trader Screener's job is to surface all of these so your decisions have an edge.
 
 ```
 python catan_options_signals.py

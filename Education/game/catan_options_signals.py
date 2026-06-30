@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-CATAN OPTIONS — SIGNALS EDITION
+CATAN OPTIONS — SIGNALS EDITION (with real-world-shaped data & history)
 
-The plain game (catan_options_game.py) used a pure random walk: with no
-information, every trade is a coin flip and you just bleed premium. That is
-the point — trading with no edge is gambling.
+Each commodity is modeled after a real-world analog, so its 5-year history has
+a characteristic SHAPE (not real prices — the shape):
+    Grain  ~ agricultural grain : strong annual SEASONALITY, mean-reverting
+    Lumber ~ lumber             : big cyclical BOOM/BUST, momentum, high vol
+    Brick  ~ construction block : steady up-trend, low vol
+    Wool   ~ soft commodity     : mild seasonality, slow trends
+    Ore    ~ industrial metal   : cyclical, trending, high vol, supply shocks
 
-This edition gives you DATA to read. Each season the herald announces market
-news (a catalyst) that biases a commodity's coming move, and each option is
-tagged IV: CHEAP or IV: RICH. Your edge is reading the signal and the IV:
-  - Bullish catalyst + CHEAP IV  -> buy a call (cheap exposure to a likely up-move)
-  - Bearish catalyst + CHEAP IV  -> buy a put
-  - News already priced in (RICH IV) -> the edge is gone; the rich premium
-    usually eats your profit even if direction is right.
+You read each commodity's 5y sparkline, realized volatility, and IV Rank
+(derived from its own history), plus a market-news catalyst, then trade
+calls/puts. Time advances one MONTH per turn with real dates. Pricing uses each
+commodity's realized vol, so IV is genuine — RICH IV options really do cost more.
 
-Skill should now beat luck. The end screen scores how well you traded WITH the
-signal. Pure stdlib. Run:  python catan_options_signals.py
+Pure stdlib. Run:  python catan_options_signals.py
 Educational only — not investment advice.
 """
 import math
@@ -31,43 +31,137 @@ except (AttributeError, ValueError):
 def Ncdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
+# ---- commodity models: real-world-shaped parameters (monthly) ----
+# drift: annual log-trend | seas_amp/phase: annual seasonality | rho: cyclical
+# persistence (momentum vs mean-reversion) | vol_m: base monthly vol | jump_p/size:
+# shock probability/magnitude | analog: the real instrument it mimics.
 COMMODITIES = {
-    "Brick":  {"price": 10.0, "vol": 0.45},
-    "Lumber": {"price": 9.0,  "vol": 0.35},
-    "Wool":   {"price": 8.0,  "vol": 0.30},
-    "Grain":  {"price": 7.0,  "vol": 0.25},
-    "Ore":    {"price": 14.0, "vol": 0.40},
+    "Grain":  dict(start=7.0,  drift=0.015, seas_amp=0.13, phase=1.6, rho=0.70,
+                   vol_m=0.060, jump_p=0.04, jump=0.14, analog="agricultural grain (seasonal)"),
+    "Lumber": dict(start=9.0,  drift=0.020, seas_amp=0.03, phase=0.0, rho=0.93,
+                   vol_m=0.110, jump_p=0.05, jump=0.20, analog="lumber (boom/bust cyclical)"),
+    "Brick":  dict(start=10.0, drift=0.035, seas_amp=0.02, phase=0.0, rho=0.85,
+                   vol_m=0.050, jump_p=0.02, jump=0.10, analog="construction block (steady trend)"),
+    "Wool":   dict(start=8.0,  drift=0.005, seas_amp=0.07, phase=2.4, rho=0.80,
+                   vol_m=0.080, jump_p=0.03, jump=0.12, analog="soft commodity (mild seasonal)"),
+    "Ore":    dict(start=14.0, drift=0.012, seas_amp=0.02, phase=0.0, rho=0.90,
+                   vol_m=0.110, jump_p=0.05, jump=0.22, analog="industrial metal (cyclical)"),
 }
 
-# Catalysts: (headline, commodity, direction, strength). Strength = annualized
-# drift the news adds to that commodity's next move. A few are red herrings
-# (weak/none) so the signal is an EDGE, not a guarantee.
 CATALYSTS = [
     ("Building boom across the island — settlers demand BRICK", "Brick", "bull", 1.0),
-    ("Kilns flooded — BRICK output collapses, scarcity bites",  "Brick", "bull", 0.9),
     ("New brickworks opens — BRICK glut floods the market",     "Brick", "bear", 1.0),
-    ("Wildfire razes the forests — LUMBER scarce",              "Lumber", "bull", 0.9),
-    ("Bumper logging season — LUMBER piles up unsold",          "Lumber", "bear", 0.9),
+    ("Wildfire razes the forests — LUMBER scarce",              "Lumber", "bull", 1.1),
+    ("Bumper logging season — LUMBER piles up unsold",          "Lumber", "bear", 1.0),
     ("Sheep blight spreads — WOOL supply dwindles",             "Wool", "bull", 0.8),
     ("Mild winter — herds thrive, WOOL everywhere",             "Wool", "bear", 0.7),
-    ("Drought ruins the harvest — GRAIN scarce",                "Grain", "bull", 0.8),
-    ("Record harvest — GRAIN silos overflow",                   "Grain", "bear", 0.8),
-    ("Rich vein struck in the hills — ORE floods in",           "Ore", "bear", 1.0),
-    ("Mine cave-in halts digging — ORE supply chokes",          "Ore", "bull", 1.0),
-    ("Traders gossip, but nothing moves the market this season","None", "none", 0.0),
-    ("A quiet season on the island — no clear catalyst",        "None", "none", 0.0),
+    ("Drought ruins the harvest — GRAIN scarce",                "Grain", "bull", 0.9),
+    ("Record harvest — GRAIN silos overflow",                   "Grain", "bear", 0.9),
+    ("Rich vein struck in the hills — ORE floods in",           "Ore", "bear", 1.1),
+    ("Mine cave-in halts digging — ORE supply chokes",          "Ore", "bull", 1.1),
+    ("Traders gossip, but nothing moves the market",            "None", "none", 0.0),
+    ("A quiet month on the island — no clear catalyst",         "None", "none", 0.0),
 ]
 
-T = 0.25
+HIST_MONTHS = 60          # 5 years of history
+PLAY_MONTHS = 12          # play one year forward
+START_YEAR = 2021         # history begins here; play starts at +5y
 UNITS = 10
 START_GOLD = 100.0
-SEASONS = 10
+SPARK = "▁▂▃▄▅▆▇█"
 
 def wrap(s, indent=""):
-    print(textwrap.fill(s, width=78, initial_indent=indent, subsequent_indent=indent))
+    print(textwrap.fill(s, width=80, initial_indent=indent, subsequent_indent=indent))
 
-def bs_premium(kind, S, K, sigma, T, iv_mult=1.0):
-    sigma = sigma * iv_mult
+def month_label(idx):
+    """idx 0 = START_YEAR-01; returns 'YYYY-MM'."""
+    y = START_YEAR + idx // 12
+    m = idx % 12 + 1
+    return f"{y}-{m:02d}"
+
+def sparkline(vals, width=28):
+    if len(vals) > width:                      # downsample
+        step = len(vals) / width
+        vals = [vals[int(i * step)] for i in range(width)]
+    lo, hi = min(vals), max(vals)
+    rng = hi - lo or 1.0
+    return "".join(SPARK[min(7, int((v - lo) / rng * 7.999))] for v in vals)
+
+def annualized_vol(logrets):
+    if len(logrets) < 2:
+        return 0.0
+    m = sum(logrets) / len(logrets)
+    var = sum((r - m) ** 2 for r in logrets) / (len(logrets) - 1)
+    return math.sqrt(var) * math.sqrt(12)
+
+# ---------------------------------------------------------------- simulation
+class Commodity:
+    def __init__(self, name, p):
+        self.name = name; self.p = p
+        self.prices = []         # full price series (history + played)
+        self.logrets = []        # log returns
+        self.c = 0.0; self.h = 0.0; self.t = 0   # cyclical, vol-state, time index
+        self._rng = random.Random(hash(name) & 0xFFFF)  # FIXED -> stable shape
+        self._build_history()
+        self._iv_distribution()
+
+    def _emit(self, rng, catalyst_drift=0.0):
+        pp = self.p
+        self.h = 0.9 * self.h + 0.30 * rng.gauss(0, 1)
+        sigma = pp["vol_m"] * math.exp(0.5 * self.h)
+        jump = 0.0
+        if rng.random() < pp["jump_p"]:
+            jump = pp["jump"] * (1 if rng.random() < 0.5 else -1)
+        self.c = pp["rho"] * self.c + sigma * rng.gauss(0, 1) + jump + catalyst_drift
+        self.t += 1
+        month = self.t % 12
+        seas = pp["seas_amp"] * math.sin(2 * math.pi * month / 12 + pp["phase"])
+        logP = math.log(pp["start"]) + (pp["drift"] / 12) * self.t + seas + self.c
+        price = round(math.exp(logP), 2)
+        if self.prices:
+            self.logrets.append(math.log(price / self.prices[-1]))
+        self.prices.append(price)
+        return price
+
+    def _build_history(self):
+        for _ in range(HIST_MONTHS):
+            self._emit(self._rng)
+
+    def _iv_distribution(self):
+        """Distribution of trailing-3-month realized vol across history (for IV Rank)."""
+        self.iv_hist = []
+        for i in range(3, len(self.logrets) + 1):
+            self.iv_hist.append(annualized_vol(self.logrets[i - 3:i]))
+        self.iv_hist.sort()
+
+    # ---- live readings ----
+    def price(self):           return self.prices[-1]
+    def realized_vol(self):    return annualized_vol(self.logrets[-12:])
+    def current_3m_vol(self):  return annualized_vol(self.logrets[-3:])
+
+    def iv_rank(self):
+        v = self.current_3m_vol()
+        if not self.iv_hist:
+            return 50
+        below = sum(1 for x in self.iv_hist if x <= v)
+        return round(100 * below / len(self.iv_hist))
+
+    def trend(self):
+        if len(self.prices) < 7:
+            return "→"
+        chg = self.prices[-1] / self.prices[-7] - 1
+        return "↑" if chg > 0.04 else ("↓" if chg < -0.04 else "→")
+
+    def lo_hi(self, n):
+        w = self.prices[-n:]
+        return min(w), max(w)
+
+    def advance(self, catalyst_drift):
+        return self._emit(random, catalyst_drift)   # forward uses global RNG
+
+# ---------------------------------------------------------------- pricing
+def bs_premium(kind, S, K, sigma, T):
+    sigma = max(sigma, 0.05)
     if T <= 0:
         return round(max(S - K, 0) if kind == "call" else max(K - S, 0), 2)
     d1 = (math.log(S / K) + 0.5 * sigma**2 * T) / (sigma * math.sqrt(T))
@@ -75,9 +169,8 @@ def bs_premium(kind, S, K, sigma, T, iv_mult=1.0):
     val = (S * Ncdf(d1) - K * Ncdf(d2)) if kind == "call" else (K * Ncdf(-d2) - S * Ncdf(-d1))
     return max(round(val, 2), 0.05)
 
-def step_price(S, sigma, drift):
-    z = random.gauss(0, 1)
-    return round(S * math.exp((drift - 0.5 * sigma**2) * T + sigma * math.sqrt(T) * z), 2)
+def strikes_for(S):
+    return sorted({max(1, round(S * 0.92)), round(S), round(S * 1.08)})
 
 def ask(prompt, options):
     options = {str(k).lower(): v for k, v in options.items()}
@@ -87,63 +180,81 @@ def ask(prompt, options):
             return options[c]
         print("   (type one of: %s)" % ", ".join(options))
 
-def strikes_for(S):
-    return sorted({max(1, round(S * 0.9)), round(S), round(S * 1.1)})
+# ---------------------------------------------------------------- UI
+REF = ("[ CALL = right to BUY @ strike  -> profit if price ends ABOVE strike (bet UP) | "
+       "PUT = right to SELL @ strike -> profit if price ends BELOW strike (bet DOWN) | "
+       "premium = max loss ]")
 
-def intro():
-    print("\n" + "=" * 62)
-    print("     CATAN OPTIONS — SIGNALS EDITION   (read the data, get an edge)")
-    print("=" * 62)
-    wrap("Plain random prices = gambling. Here you get DATA each season:")
-    wrap("1) MARKET NEWS — a catalyst that biases one commodity up or down.", "  ")
-    wrap("2) An IV tag on each option — CHEAP (move not yet priced in) or "
-         "RICH (already priced; premium inflated).", "  ")
+def intro(coms):
+    print("\n" + "=" * 84)
+    print("        CATAN OPTIONS — SIGNALS EDITION  (read the data, get an edge)")
+    print("=" * 84)
+    print(REF)
+    print("-" * 84)
+    wrap("CALL: you pay a premium for the right to buy at the strike. If the price rises "
+         "above strike+premium you profit; the most you can lose is the premium.")
+    wrap("PUT:  you pay a premium for the right to sell at the strike. If the price falls "
+         "below strike-premium you profit; the most you can lose is the premium.")
     print()
-    wrap("Your edge: trade WITH a catalyst when IV is CHEAP. Bullish news -> "
-         "call; bearish news -> put. Avoid RICH IV — the inflated premium "
-         "usually eats the profit even when you're right on direction.")
-    wrap("Some seasons have no real catalyst (a red herring). Sitting out is a "
-         "valid move — no edge, no trade.")
-    print("-" * 62)
+    wrap("Each turn = ONE MONTH (real dates advance). You see 5 years of history per "
+         "commodity (a sparkline), its realized volatility, and its IV RANK (how high its "
+         "vol is vs its own history). CHEAP IV (low rank) = options underpriced; RICH IV "
+         "(high rank) = options expensive and the move is likely already priced in.")
+    wrap("EDGE: trade WITH a catalyst when IV is CHEAP (bullish->call, bearish->put). "
+         "Avoid RICH IV. No catalyst = no edge = sit out.")
+    print("\nThe five commodities (each shaped like a real-world analog):")
+    for n, c in coms.items():
+        print(f"   {n:<7} ~ {c.p['analog']}")
+    print("-" * 84)
 
-def show_board(prices, season, gold):
-    print("\n" + "-" * 62)
-    print(f"SEASON {season}/{SEASONS}     Gold: {gold:.2f}")
-    print("-" * 62)
-    print(f"{'Commodity':<10}{'Price':>8}{'Volatility':>14}")
-    for name, p in prices.items():
-        print(f"{name:<10}{p:>8.2f}{COMMODITIES[name]['vol']*100:>12.0f}%")
+def iv_tag(rank):
+    if rank >= 66: return f"RICH({rank})"
+    if rank <= 40: return f"CHEAP({rank})"
+    return f"FAIR({rank})"
 
-def buy_phase(prices, gold, catalyst, priced_in):
+def show_board(coms, month_idx, turn, gold):
+    print("\n" + "-" * 84)
+    print(f"{month_label(month_idx)}   (month {turn}/{PLAY_MONTHS})        Gold: {gold:.2f}")
+    print(REF)
+    print("-" * 84)
+    print(f"{'Commodity':<9}{'Price':>7}  {'5y history':<30}{'5y range':>14}  "
+          f"{'rVol':>5}  {'IV Rank':<10}{'trend':>5}")
+    for n, c in coms.items():
+        lo, hi = c.lo_hi(HIST_MONTHS)
+        spark = sparkline(c.prices[-HIST_MONTHS:])
+        print(f"{n:<9}{c.price():>7.2f}  {spark:<30}{f'{lo:.1f}-{hi:.1f}':>14}  "
+              f"{c.realized_vol()*100:>4.0f}%  {iv_tag(c.iv_rank()):<10}{c.trend():>5}")
+
+def buy_phase(coms, gold, catalyst, priced_in):
     head, ccom, cdir, _ = catalyst
     print("\n  MARKET NEWS:  " + head)
     if cdir != "none":
-        tag = "RICH (already priced in)" if priced_in else "CHEAP (not yet priced in)"
+        rank = coms[ccom].iv_rank()
+        note = "RICH (likely already priced in)" if priced_in else "CHEAP/FAIR (room to run)"
         hint = "call" if cdir == "bull" else "put"
-        print(f"  -> affects {ccom} ({cdir}ish).  IV on {ccom}: {tag}.")
-        print(f"     Textbook play: {cdir}ish + {'CHEAP' if not priced_in else 'RICH'} IV "
-              f"-> {'buy a ' + hint if not priced_in else 'avoid — premium too rich'}.")
+        print(f"  -> {ccom} ({cdir}ish).  Its IV Rank = {rank} -> {note}.")
+        print(f"     Textbook: {cdir}ish + {'CHEAP' if not priced_in else 'RICH'} IV -> "
+              f"{'buy a ' + hint if not priced_in else 'AVOID (premium too rich, move priced in)'}.")
     else:
-        print("  -> no clear catalyst. No edge this season; sitting out is fine.")
+        print("  -> no clear catalyst; no edge this month. Sitting out is fine.")
 
     if not ask("\nBuy an option? (y/n): ", {"y": True, "n": False}):
         return None, gold
 
-    names = list(prices.keys())
-    menu = {str(i+1): n for i, n in enumerate(names)}
+    names = list(coms.keys()); menu = {str(i+1): n for i, n in enumerate(names)}
     for k, n in menu.items():
         flag = "   <- in the news" if n == ccom and cdir != "none" else ""
-        print(f"   {k}) {n}  @ {prices[n]:.2f}{flag}")
+        print(f"   {k}) {n}  @ {coms[n].price():.2f}   IV {iv_tag(coms[n].iv_rank())}{flag}")
     name = ask("Pick a commodity (number): ", menu)
-    S = prices[name]; sigma = COMMODITIES[name]["vol"]
+    com = coms[name]; S = com.price()
+    sigma = max(com.realized_vol(), 0.10)        # IV proxy = realized vol
     kind = ask("Call (up) or Put (down)? (c/p): ", {"c": "call", "p": "put"})
 
-    iv_mult = 1.5 if (name == ccom and priced_in) else 1.0
+    T = 1 / 12                                   # 1-month option
     ks = strikes_for(S); chain = {}
-    iv_label = "RICH" if iv_mult > 1 else "fair"
-    print(f"\n   {name} @ {S:.2f}   {kind.upper()} premiums   [IV: {iv_label}]")
+    print(f"\n   {name} @ {S:.2f}   {kind.upper()}   IV {iv_tag(com.iv_rank())}  (vol {sigma*100:.0f}%)")
     for i, K in enumerate(ks, 1):
-        prem = bs_premium(kind, S, K, sigma, T, iv_mult)
+        prem = bs_premium(kind, S, K, sigma, T)
         mny = "ITM" if ((kind=="call" and S>K) or (kind=="put" and S<K)) else ("ATM" if K==round(S) else "OTM")
         chain[str(i)] = (K, prem)
         print(f"   {i}) strike {K:<4} premium {prem:>5.2f}/u  contract {prem*UNITS:>6.2f}  [{mny}]")
@@ -151,17 +262,15 @@ def buy_phase(prices, gold, catalyst, priced_in):
 
     cost = prem * UNITS
     if cost > gold:
-        print(f"   Not enough gold for {cost:.2f}. Skipping.")
-        return None, gold
+        print(f"   Not enough gold for {cost:.2f}. Skipping."); return None, gold
     be = K + prem if kind == "call" else K - prem
     gold -= cost
-    # was this a "good" trade (with signal, cheap IV, right direction)?
     aligned = (name == ccom and cdir != "none" and
                ((cdir == "bull" and kind == "call") or (cdir == "bear" and kind == "put")))
-    good = aligned and not priced_in
     print(f"\n   BOUGHT {kind} on {name} @ {K}, paid {cost:.2f}. Breakeven {be:.2f}.")
-    pos = {"name": name, "kind": kind, "K": K, "cost": cost, "be": be,
-           "aligned": aligned, "good": good, "priced_in": priced_in and name == ccom}
+    pos = dict(name=name, kind=kind, K=K, cost=cost, be=be,
+               aligned=aligned, good=aligned and not priced_in,
+               priced=priced_in and name == ccom)
     return pos, gold
 
 def settle(pos, S, gold, scored):
@@ -173,61 +282,60 @@ def settle(pos, S, gold, scored):
         print(f"   Worthless. Lost the {pos['cost']:.2f} premium (max loss).")
     else:
         print(f"   Payoff {payoff:.2f} - premium {pos['cost']:.2f} = P/L {pl:+.2f}.")
-    # teaching feedback tied to the signal
     if pos["good"]:
-        scored["with_signal"] += 1
-        scored["with_signal_pl"] += pl
-        print("   (Traded WITH the catalyst at cheap IV — the edge play.)")
-    elif pos["priced_in"]:
-        print("   (You paid RICH IV — note how the inflated premium hurt the result.)")
+        scored["n"] += 1; scored["pl"] += pl
+        print("   (Edge play: with the catalyst at cheap/fair IV.)")
+    elif pos["priced"]:
+        print("   (Paid RICH IV — premium inflated and the move was largely priced in.)")
     elif not pos["aligned"]:
-        print("   (No signal behind this trade — that's a coin flip.)")
+        print("   (No signal behind this — a coin flip.)")
     return gold
 
+# ---------------------------------------------------------------- main
 def play():
     random.seed()
-    intro()
-    prices = {n: d["price"] for n, d in COMMODITIES.items()}
+    coms = {n: Commodity(n, dict(p)) for n, p in COMMODITIES.items()}
+    intro(coms)
     gold = START_GOLD
-    scored = {"with_signal": 0, "with_signal_pl": 0.0}
+    scored = {"n": 0, "pl": 0.0}
+    month_idx = HIST_MONTHS            # first played month = right after history
 
-    for season in range(1, SEASONS + 1):
-        show_board(prices, season, gold)
+    for turn in range(1, PLAY_MONTHS + 1):
+        show_board(coms, month_idx, turn, gold)
         catalyst = random.choice(CATALYSTS)
-        priced_in = (catalyst[2] != "none" and random.random() < 0.30)  # 30% already priced
-        pos, gold = buy_phase(prices, gold, catalyst, priced_in)
-
-        input("\n(press Enter to let the season pass...)")
         _, ccom, cdir, strength = catalyst
-        drift_map = {}
-        if cdir == "bull":
-            drift_map[ccom] = strength * (0.3 if priced_in else 1.0)
-        elif cdir == "bear":
-            drift_map[ccom] = -strength * (0.3 if priced_in else 1.0)
-        prices = {n: step_price(p, COMMODITIES[n]["vol"], drift_map.get(n, 0.0))
-                  for n, p in prices.items()}
+        priced_in = (cdir != "none" and (coms[ccom].iv_rank() >= 66 or random.random() < 0.25))
+        pos, gold = buy_phase(coms, gold, catalyst, priced_in)
+
+        input("\n(press Enter to advance one month...)")
+        # forward step: catalyst adds monthly log-drift to its commodity (damped if priced in)
+        for n, c in coms.items():
+            d = 0.0
+            if n == ccom and cdir != "none":
+                sign = 1 if cdir == "bull" else -1
+                d = sign * (strength / 12) * (0.3 if priced_in else 1.0)
+            c.advance(d)
+        month_idx += 1
         if pos:
-            gold = settle(pos, prices[pos["name"]], gold, scored)
+            gold = settle(pos, coms[pos["name"]].price(), gold, scored)
         print(f"\n   Gold now: {gold:.2f}")
         if gold < 1:
             print("\n   Out of gold. Game over."); break
 
-    print("\n" + "=" * 62)
+    print("\n" + "=" * 84)
     net = gold - START_GOLD
     print(f"FINAL GOLD: {gold:.2f}   (started {START_GOLD:.0f}, net {net:+.2f})")
-    if scored["with_signal"]:
-        print(f"Edge trades (with catalyst, cheap IV): {scored['with_signal']}  "
-              f"net P/L {scored['with_signal_pl']:+.2f}")
-        wrap("Compare that to your coin-flip / rich-IV trades. The lesson: an "
-             "information edge — reading the catalyst and the IV — is what "
-             "separates trading from gambling.")
+    if scored["n"]:
+        print(f"Edge trades (with catalyst, cheap/fair IV): {scored['n']}   net P/L {scored['pl']:+.2f}")
+        wrap("That edge P/L is your skill; the rest is noise. Information — reading the "
+             "history, the IV Rank, and the catalyst — is what separates trading from gambling.")
     else:
-        wrap("You made no edge trades. With no signal behind a position, this "
-             "is the same coin flip as the plain game — that's the point.")
-    print("=" * 62)
-    print("\nReal-world parallel: the catalyst = news/earnings/supply data; the IV "
-          "tag = IV Rank. The Trader Screener's job is to surface exactly these "
-          "signals so your decisions have an edge.")
+        wrap("No edge trades made. With no signal behind a position it's a coin flip — "
+             "exactly the plain game's point.")
+    print("=" * 84)
+    print("Real parallel: history/sparkline = price chart; rVol & IV Rank = volatility "
+          "signals; catalyst = news/earnings/supply data. The Trader Screener surfaces all "
+          "of these so your decisions carry an edge.")
 
 if __name__ == "__main__":
     try:
