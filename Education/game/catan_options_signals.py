@@ -80,13 +80,49 @@ def month_label(idx):
     m = idx % 12 + 1
     return f"{y}-{m:02d}"
 
-def sparkline(vals, width=28):
-    if len(vals) > width:                      # downsample
-        step = len(vals) / width
-        vals = [vals[int(i * step)] for i in range(width)]
+def _downsample(vals, width):
+    if len(vals) <= width:
+        return vals
+    step = len(vals) / width
+    return [vals[min(len(vals) - 1, int(i * step))] for i in range(width)]
+
+def sparkline(vals, width=32):
+    vals = _downsample(vals, width)
     lo, hi = min(vals), max(vals)
     rng = hi - lo or 1.0
     return "".join(SPARK[min(7, int((v - lo) / rng * 7.999))] for v in vals)
+
+def area_chart(vals, width=56, height=11):
+    """Tall filled ASCII chart of a price series — far easier to read than the
+    one-line sparkline (trend, seasonality, swings all visible)."""
+    vals = _downsample(vals, width)
+    lo, hi = min(vals), max(vals)
+    rng = hi - lo or 1.0
+    levels = [int(round((v - lo) / rng * (height - 1))) for v in vals]
+    lines = []
+    for row in range(height - 1, -1, -1):
+        cells = "".join("█" if levels[c] >= row else " " for c in range(len(levels)))
+        if row == height - 1:
+            label = f"{hi:7.2f} ┤"
+        elif row == 0:
+            label = f"{lo:7.2f} ┤"
+        else:
+            label = "        │"
+        lines.append(label + cells)
+    lines.append("        └" + "─" * len(levels))
+    return "\n".join(lines)
+
+def show_charts(coms):
+    print("\n" + "=" * 72)
+    print("  5-YEAR HISTORY (trailing 60 months) — full charts")
+    print("=" * 72)
+    for n, c in coms.items():
+        lo, hi = c.lo_hi(HIST_MONTHS)
+        print(f"\n{n}  ~ {c.p['analog']}")
+        print(f"  now {c.price():.2f}   5y range {lo:.2f}-{hi:.2f}   rVol {c.realized_vol()*100:.0f}%   "
+              f"IV {iv_tag(c.iv_rank())}   trend {c.trend()}")
+        print(area_chart(c.prices[-HIST_MONTHS:]))
+    print("=" * 72)
 
 def annualized_vol(logrets):
     if len(logrets) < 2:
@@ -259,13 +295,14 @@ def show_board(coms, month_idx, turn, gold):
     print(f"{month_label(month_idx)}   (month {turn}/{PLAY_MONTHS})        Gold: {gold:.2f}")
     print(REF)
     print("-" * 84)
-    print(f"{'Commodity':<9}{'Price':>7}  {'5y history':<30}{'5y range':>14}  "
-          f"{'rVol':>5}  {'IV Rank':<10}{'trend':>5}")
+    print(f"{'Commodity':<9}{'Price':>7}  {'5y history':<34}{'5y range':>13}  "
+          f"{'rVol':>5}  {'IV Rank':<10}{'trend':>4}")
     for n, c in coms.items():
         lo, hi = c.lo_hi(HIST_MONTHS)
         spark = sparkline(c.prices[-HIST_MONTHS:])
-        print(f"{n:<9}{c.price():>7.2f}  {spark:<30}{f'{lo:.1f}-{hi:.1f}':>14}  "
-              f"{c.realized_vol()*100:>4.0f}%  {iv_tag(c.iv_rank()):<10}{c.trend():>5}")
+        print(f"{n:<9}{c.price():>7.2f}  {spark:<34}{f'{lo:.1f}-{hi:.1f}':>13}  "
+              f"{c.realized_vol()*100:>4.0f}%  {iv_tag(c.iv_rank()):<10}{c.trend():>4}")
+    print("   tip: choose 'c' at the prompt to study full-size 5-year charts.")
 
 def intrinsic(kind, K, S):
     return max(S - K, 0) if kind == "call" else max(K - S, 0)
@@ -362,8 +399,14 @@ def trade_phase(coms, gold, catalyst, priced_in):
     else:
         print("  -> no clear catalyst; no directional edge. Selling premium in RICH IV is still valid.")
 
-    action = ask("\nAction: (b)uy option, (s)ell premium, or (n)othing? ",
-                 {"b": "buy", "s": "sell", "n": "none"})
+    while True:
+        action = ask("\nAction: (b)uy option, (s)ell premium, (c)harts to study, or (n)othing? ",
+                     {"b": "buy", "s": "sell", "c": "charts", "n": "none"})
+        if action == "charts":
+            show_charts(coms)
+            input("\n(press Enter to return...)")
+            continue
+        break
     if action == "none":
         return None, gold
 
