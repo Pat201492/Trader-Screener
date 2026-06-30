@@ -17,6 +17,14 @@ powershell -ExecutionPolicy Bypass -File create_desktop_shortcut.ps1
 
 **Scorecard:** every game ends with a scorecard — net P/L & ROI, win rate, best/worst trade, your **edge trades vs coin-flip trades**, and a letter grade with tailored feedback.
 
+**Multi-period positions & the Greeks (signals edition):** when you open a trade you pick an **expiry (1–3 months)**, and positions **carry across turns** — you don't auto-settle next month. Each turn your **open positions** are shown marked to current prices with:
+- **P/L now** — what you'd get if you closed today,
+- **delta** — $ change per +1 in price (your directional exposure),
+- **theta/mo** — the time value you bleed each month just by holding,
+- **vega** — $ change per +1% in implied vol.
+
+You can **(k) close** any position early to lock a win or cut a loss, or hold to expiry (auto-settles at intrinsic). Watching theta erode a held option — and deciding when to close — is the core real-trading muscle this adds.
+
 **Start menu & pages:** the signals game opens on a menu — **1) Play · 2) History · 3) Information · 4) Quit**.
 - **History** — full 5-year price chart for each commodity plus its real-world **top exporters/importers** and price drivers (where catalysts come from).
 - **Information** — every metric (price, range, rVol, IV Rank, implied vol, trend, catalyst, forward, moneyness, intrinsic/time value, premium, breakeven) with a **definition + impact**.

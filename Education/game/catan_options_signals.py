@@ -508,9 +508,51 @@ def show_board(coms, month_idx, turn, gold):
 def intrinsic(kind, K, S):
     return max(S - K, 0) if kind == "call" else max(K - S, 0)
 
-def _build_long(com, F, sigma, gold, cdir, name, cheap, rich):
+def _npdf(x):
+    return math.exp(-x * x / 2) / math.sqrt(2 * math.pi)
+
+def black_greeks(kind, F, K, sigma, T):
+    """Per-unit delta, vega(per 1% IV), theta(per day) under Black (r=0)."""
+    sigma = max(sigma, 0.05)
+    if T <= 1e-9 or F <= 0:
+        d = (1.0 if F > K else 0.0) if kind == "call" else (-1.0 if F < K else 0.0)
+        return d, 0.0, 0.0
+    d1 = (math.log(F / K) + 0.5 * sigma**2 * T) / (sigma * math.sqrt(T))
+    delta = Ncdf(d1) if kind == "call" else Ncdf(d1) - 1
+    vega = F * _npdf(d1) * math.sqrt(T) / 100
+    theta_day = (-F * _npdf(d1) * sigma / (2 * math.sqrt(T))) / 365   # ~same call/put at r=0
+    return delta, vega, theta_day
+
+def _pos_market(pos, coms, month_idx, sims=60):
+    """Returns (sigma, T_remaining, F, S) used to mark/greek a position now."""
+    com = coms[pos["name"]]
+    F, sig_true = forward_stats(com, sims=sims)
+    sigma = sig_true * iv_markup(com.iv_rank())
+    T = max((pos["expiry_idx"] - month_idx) / 12, 0.0)
+    return sigma, T, F, com.price()
+
+def mark_value(pos, coms, month_idx, sims=60):
+    """Cash you'd receive to CLOSE the position right now (legs + stock)."""
+    sigma, T, F, S = _pos_market(pos, coms, month_idx, sims)
+    val = sum(sign * black_premium(k, F, K, sigma, T) * UNITS for k, K, sign, _ in pos["legs"])
+    if pos.get("stock"):
+        qty, _ = pos["stock"]; val += qty * S
+    return val
+
+def pos_greeks(pos, coms, month_idx, sims=60):
+    """Aggregated (delta, theta_per_month, vega) for the whole position."""
+    sigma, T, F, S = _pos_market(pos, coms, month_idx, sims)
+    d = v = th = 0.0
+    for k, K, sign, _ in pos["legs"]:
+        gd, gv, gt = black_greeks(k, F, K, sigma, T)
+        d += sign * gd * UNITS; v += sign * gv * UNITS; th += sign * gt * UNITS
+    if pos.get("stock"):
+        qty, _ = pos["stock"]; d += qty
+    return d, th * 30, v   # theta scaled to ~per-month
+
+def _build_long(com, F, sigma, gold, cdir, name, cheap, rich, T, expiry_idx):
     """Buy a single call or put (long premium). Returns pos or None."""
-    S = com.price(); T = 1 / 12
+    S = com.price()
     kind = ask("Call (up) or Put (down)? (c/p): ", {"c": "call", "p": "put"})
     ks = strikes_for(S); chain = {}
     print(f"\n   {name} @ {S:.2f}   LONG {kind.upper()}   IV {iv_tag(com.iv_rank())}  (implied vol {sigma*100:.0f}%)")
@@ -548,15 +590,17 @@ def _build_long(com, F, sigma, gold, cdir, name, cheap, rich):
     aligned = (name == cdir[0] and cdir[1] != "none" and
                ((cdir[1] == "bull" and kind == "call") or (cdir[1] == "bear" and kind == "put")))
     be = K + prem if kind == "call" else K - prem
-    print(f"\n   BOUGHT long {kind} on {name} @ {K}, paid {cost:.2f} (max loss). Breakeven {be:.2f}.")
+    months = max(1, round(T * 12))
+    print(f"\n   BOUGHT long {kind} on {name} @ {K}, paid {cost:.2f} (max loss). "
+          f"Breakeven {be:.2f}. Expires in {months} month(s).")
     return dict(name=name, label=f"long {kind} @ {K}",
                 legs=[(kind, K, +1, prem)], stock=None, entry=-cost,
-                max_profit=None, max_loss=cost, be=(K + prem if kind == "call" else K - prem),
-                bias=bias, vol="long", good=aligned and cheap)
+                max_profit=None, max_loss=cost, be=be,
+                bias=bias, vol="long", good=aligned and cheap, expiry_idx=expiry_idx)
 
-def _build_sell(com, F, sigma, gold, cdir, name, cheap, rich, choice):
+def _build_sell(com, F, sigma, gold, cdir, name, cheap, rich, choice, T, expiry_idx):
     """Build a premium-SELLING structure. choice in 1..4. Returns pos or None."""
-    S = com.price(); T = 1 / 12
+    S = com.price()
     def P(kind, K): return black_premium(kind, F, K, sigma, T)
 
     if choice == "1":   # cash-secured put (income, bullish/neutral)
@@ -571,7 +615,8 @@ def _build_sell(com, F, sigma, gold, cdir, name, cheap, rich, choice):
         max_profit = (Kc - S) * UNITS + c * UNITS; max_loss = S * UNITS - c * UNITS; be = S - c
         label = f"covered call @ {Kc} (own stock @ {S:.2f})"; bias = "neutral"
         pos = dict(name=name, label=label, legs=legs, stock=stock, entry=entry,
-                   max_profit=max_profit, max_loss=max_loss, be=be, bias=bias, vol="short")
+                   max_profit=max_profit, max_loss=max_loss, be=be, bias=bias, vol="short",
+                   expiry_idx=expiry_idx)
         return _finish_sell(pos, gold, cdir, name, rich)
     elif choice == "3": # bull put credit spread (defined risk, bullish/neutral)
         Kh = round(S * 0.97); Kl = round(S * 0.90)
@@ -591,7 +636,8 @@ def _build_sell(com, F, sigma, gold, cdir, name, cheap, rich, choice):
         label = f"bear call spread {Kl}/{Kh}"; bias = "bear"
 
     pos = dict(name=name, label=label, legs=legs, stock=None, entry=entry,
-               max_profit=max_profit, max_loss=max_loss, be=be, bias=bias, vol="short")
+               max_profit=max_profit, max_loss=max_loss, be=be, bias=bias, vol="short",
+               expiry_idx=expiry_idx)
     return _finish_sell(pos, gold, cdir, name, rich)
 
 def _finish_sell(pos, gold, cdir, name, rich):
@@ -607,43 +653,22 @@ def _finish_sell(pos, gold, cdir, name, rich):
           f"Max profit {pos['max_profit']:.2f}, max loss {pos['max_loss']:.2f}, breakeven {pos['be']:.2f}.")
     return pos
 
-def trade_phase(coms, gold, catalyst, priced_in):
+MAX_POSITIONS = 6
+
+def _ask_expiry():
+    m = ask("   Expiry in months? (1/2/3, Enter=3): ", {"1": 1, "2": 2, "3": 3, "": 3})
+    return m / 12.0, m
+
+def open_position(coms, gold, catalyst, month_idx, action):
+    """Open a BUY or SELL position with a chosen expiry. Returns pos or None
+    (entry NOT yet applied to gold; caller applies it)."""
     head, ccom, cdir, _ = catalyst
-    print("\n  MARKET NEWS:  " + head)
-    if cdir != "none":
-        rank = coms[ccom].iv_rank()
-        if rank >= 66:
-            stance = "RICH -> options pricey; favor SELLING premium (move may be priced in)"
-        elif rank <= 40:
-            hint = "calls" if cdir == "bull" else "puts"
-            stance = f"CHEAP -> options cheap; favor BUYING {hint} on this {cdir}ish news"
-        else:
-            stance = "FAIR -> only a small edge; spreads or sitting out are reasonable"
-        print(f"  -> {ccom} ({cdir}ish).  Its IV Rank = {rank} -> {stance}.")
-    else:
-        print("  -> no clear catalyst; no directional edge. Selling premium when IV is RICH is still valid.")
-    print("  SUGGESTED MOVE: " + recommend(catalyst, coms) + "   (follow it while learning, or ignore)")
+    T, months = _ask_expiry()
+    cd = (ccom, cdir)
 
-    while True:
-        action = ask("\nAction: (b)uy, (s)ell, (g)uide, (i)nfo, (c)harts, (h)istory, or (n)othing? ",
-                     {"b": "buy", "s": "sell", "g": "guide", "c": "charts", "i": "info",
-                      "h": "history", "n": "none"})
-        if action == "guide":
-            show_guide(); input("\n(press Enter to return...)"); continue
-        if action == "charts":
-            show_charts(coms); input("\n(press Enter to return...)"); continue
-        if action == "info":
-            show_information(); input("\n(press Enter to return...)"); continue
-        if action == "history":
-            show_history(coms); input("\n(press Enter to return...)"); continue
-        break
-    if action == "none":
-        return None, gold
-
-    # (c) One-tap recommended SELL — skip the commodity + structure prompts.
+    # (c) One-tap recommended SELL.
     if action == "sell":
-        mode = ask("\n   (r) take the RECOMMENDED structure (one-tap), or (m) choose manually? ",
-                   {"r": "rec", "m": "man"})
+        mode = ask("   (r) RECOMMENDED structure (one-tap) or (m) manual? ", {"r": "rec", "m": "man"})
         if mode == "rec":
             if cdir == "bull":
                 name, choice, lbl = ccom, "3", "bull put spread"
@@ -651,66 +676,111 @@ def trade_phase(coms, gold, catalyst, priced_in):
                 name, choice, lbl = ccom, "4", "bear call spread"
             else:
                 name = max(coms, key=lambda n: coms[n].iv_rank()); choice, lbl = "1", "cash-secured put"
-            com = coms[name]; F, sigma_true = forward_stats(com)
-            rank = com.iv_rank(); rich = rank >= 66; cheap = rank <= 40
-            sigma = sigma_true * iv_markup(rank); cd = (ccom, cdir)
-            print(f"\n   Recommended: {lbl} on {name} (IV {iv_tag(rank)}).")
-            pos = _build_sell(com, F, sigma, gold, cd, name, cheap, rich, choice)
-            if pos is None:
-                return None, gold
-            gold += pos["entry"]
-            return pos, gold
-        # else fall through to manual selection below
+            com = coms[name]; F, st = forward_stats(com)
+            rank = com.iv_rank(); sigma = st * iv_markup(rank)
+            expiry_idx = month_idx + months
+            print(f"\n   Recommended: {lbl} on {name} (IV {iv_tag(rank)}), {months}-month.")
+            return _build_sell(com, F, sigma, gold, cd, name, rank <= 40, rank >= 66, choice, T, expiry_idx)
 
-    names = list(coms.keys()); menu = {str(i+1): n for i, n in enumerate(names)}
+    names = list(coms.keys()); menu = {str(i + 1): n for i, n in enumerate(names)}
     for k, n in menu.items():
         flag = "   <- in the news" if n == ccom and cdir != "none" else ""
         print(f"   {k}) {n}  @ {coms[n].price():.2f}   IV {iv_tag(coms[n].iv_rank())}{flag}")
     name = ask("Pick a commodity (number): ", menu)
-    com = coms[name]
-    F, sigma_true = forward_stats(com)
-    rank = com.iv_rank(); rich = rank >= 66; cheap = rank <= 40
-    sigma = sigma_true * iv_markup(rank)         # implied vol = fair dispersion + rank-based premium
-    cd = (ccom, cdir)
+    com = coms[name]; F, st = forward_stats(com)
+    rank = com.iv_rank(); cheap = rank <= 40; rich = rank >= 66
+    sigma = st * iv_markup(rank)
+    expiry_idx = month_idx + months
 
     if action == "buy":
-        pos = _build_long(com, F, sigma, gold, cd, name, cheap, rich)
-    else:
-        print("\n   SELL premium — pick a structure:")
-        print("   1) Cash-secured put   (income; bullish/neutral; profit if price stays up)")
-        print("   2) Covered call       (own stock + sell call; neutral/mild-bull; capped upside)")
-        print("   3) Bull put spread    (defined-risk credit; bullish/neutral)")
-        print("   4) Bear call spread   (defined-risk credit; bearish/neutral)")
-        choice = ask("Structure (1-4): ", {"1": 1, "2": 2, "3": 3, "4": 4})
-        pos = _build_sell(com, F, sigma, gold, cd, name, cheap, rich, str(choice))
+        return _build_long(com, F, sigma, gold, cd, name, cheap, rich, T, expiry_idx)
+    print("\n   SELL premium — pick a structure:")
+    print("   1) Cash-secured put   (income; bullish/neutral)")
+    print("   2) Covered call       (own stock + sell call; neutral/mild-bull)")
+    print("   3) Bull put spread    (defined-risk credit; bullish/neutral)")
+    print("   4) Bear call spread   (defined-risk credit; bearish/neutral)")
+    choice = ask("Structure (1-4): ", {"1": 1, "2": 2, "3": 3, "4": 4})
+    return _build_sell(com, F, sigma, gold, cd, name, cheap, rich, str(choice), T, expiry_idx)
 
-    if pos is None:
-        return None, gold
-    gold += pos["entry"]
-    return pos, gold
-
-def settle(pos, S, gold, scored):
-    add = 0.0
-    if pos["stock"]:
-        qty, _ = pos["stock"]; add += qty * S
-    for kind, K, sign, _ in pos["legs"]:
-        add += sign * intrinsic(kind, K, S) * UNITS
-    gold += add
-    pl = pos["entry"] + add
-    print(f"\n   SETTLE {pos['label']} on {pos['name']}: price -> {S:.2f}.  P/L {pl:+.2f}.")
-    if pos["vol"] == "long" and pl <= -pos["max_loss"] + 0.01:
-        print(f"   Expired worthless — lost the premium ({pos['max_loss']:.2f}, the max loss).")
+def _record(scored, pos, pl):
     scored["trades"].append(dict(label=pos["label"], name=pos["name"], pl=pl,
                                  good=bool(pos.get("good")), vol=pos["vol"]))
     if pos.get("good"):
         scored["n"] += 1; scored["pl"] += pl
-        side = "bought CHEAP IV with the catalyst" if pos["vol"] == "long" else "sold RICH IV (collected premium)"
-        print(f"   (Edge play: {side}.)")
-    elif pos["vol"] == "long":
-        print("   (No cheap-IV + catalyst edge here — closer to a coin flip.)")
-    else:
-        print("   (Sold premium without a RICH-IV edge — thin reward for the risk.)")
+
+def realize(pos, coms, month_idx, gold, scored, reason):
+    """Close (or expire) a position at its current mark; bank it; record it."""
+    val = mark_value(pos, coms, month_idx)
+    gold += val
+    pl = pos["entry"] + val
+    _record(scored, pos, pl)
+    col = GREEN if pl > 0 else (RED if pl < 0 else YELLOW)
+    print(f"   {reason}: {pos['label']} on {pos['name']}  ->  {col}P/L {pl:+.2f}{RESET}")
     return gold
+
+def show_portfolio(portfolio, coms, month_idx):
+    if not portfolio:
+        print("\n   Open positions: none."); return
+    print("\n   OPEN POSITIONS (marked to current prices):")
+    print(f"   {'id':<3}{'position':<30}{'left':>5}{'P/L now':>10}{'delta':>7}{'theta/mo':>9}{'vega':>6}")
+    for i, pos in enumerate(portfolio, 1):
+        pl = pos["entry"] + mark_value(pos, coms, month_idx)
+        d, th, v = pos_greeks(pos, coms, month_idx)
+        left = pos["expiry_idx"] - month_idx
+        col = GREEN if pl > 0 else (RED if pl < 0 else YELLOW)
+        label = pos["label"][:28]
+        print(f"   {i:<3}{label:<30}{left:>4}m{col}{pl:>+9.2f}{RESET}{d:>+7.1f}{th:>+9.2f}{v:>+6.2f}")
+    print("   (delta=$/+1 price · theta/mo=time value you bleed per month · vega=$/+1% IV)")
+
+def manage_turn(coms, gold, portfolio, catalyst, month_idx, scored):
+    head, ccom, cdir, _ = catalyst
+    print("\n  MARKET NEWS:  " + head)
+    if cdir != "none":
+        rank = coms[ccom].iv_rank()
+        if rank >= 66:
+            stance = "RICH -> pricey; favor SELLING premium (move may be priced in)"
+        elif rank <= 40:
+            stance = f"CHEAP -> cheap; favor BUYING {'calls' if cdir=='bull' else 'puts'} on this {cdir}ish news"
+        else:
+            stance = "FAIR -> small edge; spreads or sitting out are reasonable"
+        print(f"  -> {ccom} ({cdir}ish).  IV Rank = {rank} -> {stance}.")
+    else:
+        print("  -> no clear catalyst. Selling premium when IV is RICH is still valid.")
+    print("  SUGGESTED MOVE: " + recommend(catalyst, coms) + "   (follow it while learning, or ignore)")
+
+    opened = []
+    while True:
+        show_portfolio(portfolio, coms, month_idx)
+        opts = {"b": "buy", "s": "sell", "g": "guide", "i": "info", "c": "charts",
+                "h": "history", "d": "done"}
+        prompt = "\n   Action: (b)uy, (s)ell, "
+        if portfolio:
+            opts["k"] = "close"; prompt += "(k) close a position, "
+        prompt += "(g)uide/(i)nfo/(c)harts/(h)istory, or (d)one->advance? "
+        action = ask(prompt, opts)
+        if action == "guide":
+            show_guide(); input("\n(press Enter...)"); continue
+        if action == "info":
+            show_information(); input("\n(press Enter...)"); continue
+        if action == "charts":
+            show_charts(coms); input("\n(press Enter...)"); continue
+        if action == "history":
+            show_history(coms); input("\n(press Enter...)"); continue
+        if action == "done":
+            break
+        if action == "close":
+            sel = {str(i): i - 1 for i in range(1, len(portfolio) + 1)}
+            idx = ask("   Close which id? ", sel)
+            pos = portfolio.pop(idx)
+            gold = realize(pos, coms, month_idx, gold, scored, "CLOSED")
+            continue
+        # buy / sell
+        if len(portfolio) >= MAX_POSITIONS:
+            print(f"   Position limit ({MAX_POSITIONS}) reached — close one first."); continue
+        pos = open_position(coms, gold, catalyst, month_idx, action)
+        if pos is not None:
+            portfolio.append(pos); gold += pos["entry"]; opened.append(pos["label"])
+    return gold, opened
 
 # ---------------------------------------------------------------- main
 def recommend(catalyst, coms):
@@ -855,26 +925,16 @@ def coach_setup(catalyst, coms, reco):
             wrap("Why: only a small edge at fair IV -> a spread or sitting out is reasonable.", "  | ")
     print("  +----------------------------------------------------------------+")
 
-def coach_debrief(pos, scored):
+def coach_debrief(opened, expired_pls):
     print("\n  +--- TUTORIAL: what happened -----------------------------------+")
-    if not pos:
-        wrap("You sat out — no gold at risk. Correct when there's no edge.", "  | ")
-    else:
-        t = scored["trades"][-1]
-        if t["pl"] > 0:
-            wrap(f"Profit {t['pl']:+.2f}. The move went your way and beat your breakeven "
-                 f"(after the fee). That's the goal.", "  | ")
-        elif t["pl"] < 0:
-            if t["vol"] == "long":
-                wrap(f"Loss {t['pl']:+.2f}. Either the move didn't come or it didn't clear "
-                     f"your breakeven. Note: the premium was the MOST you could lose.", "  | ")
-            else:
-                wrap(f"Loss {t['pl']:+.2f}. You sold premium and the move went against you — "
-                     f"selling can lose more than the fee collected (that's the risk).", "  | ")
-        else:
-            wrap("Broke even.", "  | ")
-        if t["good"]:
-            wrap("This was an EDGE play (signal + right IV). Over many turns these win.", "  | ")
+    if not opened and not expired_pls:
+        wrap("No open positions changed. Holding/sitting out costs nothing.", "  | ")
+    for pl in expired_pls:
+        verb = "profit" if pl > 0 else ("loss" if pl < 0 else "break-even")
+        wrap(f"A position EXPIRED for {verb} {pl:+.2f}.", "  | ")
+    wrap("Note: any option you HOLD loses time value each month (theta) — watch each "
+         "position's 'P/L now' and 'theta/mo'. You can CLOSE early to lock a win or cut a "
+         "loss before expiry, instead of always waiting it out.", "  | ")
     print("  +----------------------------------------------------------------+")
 
 def play(months=PLAY_MONTHS, tutorial=False, seed=None):
@@ -884,6 +944,7 @@ def play(months=PLAY_MONTHS, tutorial=False, seed=None):
     gold = START_GOLD
     scored = {"n": 0, "pl": 0.0, "trades": [], "plan": []}
     month_idx = HIST_MONTHS            # first played month = right after history
+    portfolio = []                     # open positions carried across turns
 
     for turn in range(1, months + 1):
         show_board(coms, month_idx, turn, gold)
@@ -893,11 +954,11 @@ def play(months=PLAY_MONTHS, tutorial=False, seed=None):
         reco = recommend(catalyst, coms)              # baseline (uses IV the player can see)
         if tutorial:
             coach_setup(catalyst, coms, reco)
-        pos, gold = trade_phase(coms, gold, catalyst, priced_in)
+        gold, opened = manage_turn(coms, gold, portfolio, catalyst, month_idx, scored)
         scored["plan"].append(dict(month=month_label(month_idx),
                                    news=catalyst[0],
                                    reco=reco,
-                                   you=(pos["label"] if pos else "sat out")))
+                                   you=("; ".join(opened) if opened else "held/none")))
 
         input("\n(press Enter to advance one month...)")
         # forward step: one shared MACRO shock drives co-movement; catalyst adds monthly
@@ -910,13 +971,26 @@ def play(months=PLAY_MONTHS, tutorial=False, seed=None):
                 d = sign * (strength / 12) * (0.3 if priced_in else 1.0)
             c.advance(d, market=market)
         month_idx += 1
-        if pos:
-            gold = settle(pos, coms[pos["name"]].price(), gold, scored)
+        # expire matured positions at intrinsic value
+        n_expired = 0
+        for pos in list(portfolio):
+            if pos["expiry_idx"] <= month_idx:
+                gold = realize(pos, coms, month_idx, gold, scored, "EXPIRED")
+                portfolio.remove(pos)
+                n_expired += 1
+        expired_pls = [t["pl"] for t in scored["trades"][-n_expired:]] if n_expired else []
         if tutorial:
-            coach_debrief(pos, scored)
-        print(f"\n   Gold now: {gold:.2f}")
+            coach_debrief(opened, expired_pls)
+        print(f"\n   Gold now: {gold:.2f}   (open positions: {len(portfolio)})")
         if gold < 1:
             print("\n   Out of gold. Game over."); break
+
+    # game end: close out anything still open at its current mark
+    if portfolio:
+        print("\n   Closing remaining open positions at market:")
+        for pos in list(portfolio):
+            gold = realize(pos, coms, month_idx, gold, scored, "FINAL CLOSE")
+            portfolio.remove(pos)
 
     scorecard(START_GOLD, gold, scored)
     if tutorial:
