@@ -412,6 +412,11 @@ def forward_stats(com, T, sims=160):
     sigma = math.sqrt(var) / math.sqrt(max(T, 1e-6))     # annualized over the option's life
     return F, max(sigma, 0.05)
 
+def half_spread(mid):
+    """Half the bid/ask spread per unit: ~4% of the option's mid price, floored.
+    The floor makes cheap OTM options costly in % terms — like real markets."""
+    return max(0.02, 0.04 * mid)
+
 def iv_markup(rank):
     """Implied vol carries a rank-based premium over true dispersion (the variance
     risk premium). RICH IV (high rank) -> options priced ABOVE fair (selling harvests
@@ -547,6 +552,17 @@ def mark_value(pos, coms, month_idx, sims=60):
         qty, _ = pos["stock"]; val += qty * S
     return val
 
+def _close_spread(pos, coms, month_idx, sims=60):
+    """Spread cost to UNWIND the position now (crossing the spread on each leg)."""
+    sigma, T, F, S = _pos_market(pos, coms, month_idx, sims)
+    if T <= 0:
+        return 0.0                                   # expiry settles at intrinsic, no spread
+    return sum(half_spread(black_premium(k, F, K, sigma, T)) * UNITS for k, K, _s, _ in pos["legs"])
+
+def close_value(pos, coms, month_idx, sims=60):
+    """What you'd NET by closing now = mark-to-mid minus the spread to unwind."""
+    return mark_value(pos, coms, month_idx, sims) - _close_spread(pos, coms, month_idx, sims)
+
 def pos_greeks(pos, coms, month_idx, sims=60):
     """Aggregated (delta, theta_per_month, vega) for the whole position."""
     sigma, T, F, S = _pos_market(pos, coms, month_idx, sims)
@@ -591,16 +607,18 @@ def _build_long(com, F, sigma, gold, cdir, name, cheap, rich, T, expiry_idx):
         print(f"   {i}) strike {K:<4} premium {prem:>5.2f}/u  contract {prem*UNITS:>6.2f}  "
               f"[{mny}: {note}]  {col}~{odds:.0f}% profit odds{RESET}{tag}")
     K, prem = ask("Pick a strike (number): ", chain)
-    cost = prem * UNITS
+    hs = half_spread(prem)                         # pay the ASK when buying
+    exec_prem = prem + hs
+    cost = exec_prem * UNITS
     if cost > gold:
         print(f"   Not enough gold for {cost:.2f}."); return None
     bias = "bull" if kind == "call" else "bear"
     aligned = (name == cdir[0] and cdir[1] != "none" and
                ((cdir[1] == "bull" and kind == "call") or (cdir[1] == "bear" and kind == "put")))
-    be = K + prem if kind == "call" else K - prem
+    be = K + exec_prem if kind == "call" else K - exec_prem
     wks = max(1, round(T * SPY))
-    print(f"\n   BOUGHT long {kind} on {name} @ {K}, paid {cost:.2f} (max loss). "
-          f"Breakeven {be:.2f}. Expires in {wks} week(s).")
+    print(f"\n   BOUGHT long {kind} on {name} @ {K}, paid {cost:.2f} (incl. {hs*UNITS:.2f} spread; "
+          f"max loss). Breakeven {be:.2f}. Expires in {wks} week(s).")
     return dict(name=name, label=f"long {kind} @ {K}",
                 legs=[(kind, K, +1, prem)], stock=None, entry=-cost,
                 max_profit=None, max_loss=cost, be=be,
@@ -649,6 +667,11 @@ def _build_sell(com, F, sigma, gold, cdir, name, cheap, rich, choice, T, expiry_
     return _finish_sell(pos, gold, cdir, name, rich)
 
 def _finish_sell(pos, gold, cdir, name, rich):
+    # bid/ask spread cost to open every leg (you cross the spread on each)
+    so = sum(half_spread(p) * UNITS for _k, _K, _s, p in pos["legs"])
+    pos["entry"] -= so
+    pos["max_profit"] -= so
+    pos["max_loss"] += so
     if pos["max_loss"] > gold:
         print(f"   Need {pos['max_loss']:.2f} gold as collateral to sell this; you have "
               f"{gold:.2f}. (Selling premium requires capital to back the risk.)")
@@ -657,8 +680,9 @@ def _finish_sell(pos, gold, cdir, name, rich):
     not_against = (cd == "none") or not ((pos["bias"] == "bull" and cd == "bear") or
                                          (pos["bias"] == "bear" and cd == "bull"))
     pos["good"] = rich and not_against
-    print(f"\n   SOLD {pos['label']} on {name}: collected {pos['entry']:+.2f} now. "
-          f"Max profit {pos['max_profit']:.2f}, max loss {pos['max_loss']:.2f}, breakeven {pos['be']:.2f}.")
+    print(f"\n   SOLD {pos['label']} on {name}: collected {pos['entry']:+.2f} now "
+          f"(after {so:.2f} spread). Max profit {pos['max_profit']:.2f}, "
+          f"max loss {pos['max_loss']:.2f}, breakeven {pos['be']:.2f}.")
     return pos
 
 MAX_POSITIONS = 6
@@ -717,8 +741,12 @@ def _record(scored, pos, pl):
         scored["n"] += 1; scored["pl"] += pl
 
 def realize(pos, coms, month_idx, gold, scored, reason):
-    """Close (or expire) a position at its current mark; bank it; record it."""
-    val = mark_value(pos, coms, month_idx)
+    """Bank a position. EXPIRED settles at intrinsic (no spread); an early CLOSE
+    crosses the bid/ask (pays the spread to unwind)."""
+    if reason == "EXPIRED":
+        val = mark_value(pos, coms, month_idx)           # intrinsic, no spread
+    else:
+        val = close_value(pos, coms, month_idx)          # mark minus unwind spread
     gold += val
     pl = pos["entry"] + val
     _record(scored, pos, pl)
@@ -732,13 +760,14 @@ def show_portfolio(portfolio, coms, month_idx):
     print("\n   OPEN POSITIONS (marked to current prices):")
     print(f"   {'id':<3}{'position':<30}{'left':>6}{'P/L now':>10}{'delta':>7}{'theta/wk':>9}{'vega':>6}")
     for i, pos in enumerate(portfolio, 1):
-        pl = pos["entry"] + mark_value(pos, coms, month_idx)
+        pl = pos["entry"] + close_value(pos, coms, month_idx)   # net if closed now (incl. spread)
         d, th, v = pos_greeks(pos, coms, month_idx)
         left = pos["expiry_idx"] - month_idx
         col = GREEN if pl > 0 else (RED if pl < 0 else YELLOW)
         label = pos["label"][:28]
         print(f"   {i:<3}{label:<30}{left:>4}wk{col}{pl:>+9.2f}{RESET}{d:>+7.1f}{th:>+9.2f}{v:>+6.2f}")
-    print("   (delta=$/+1 price · theta/wk=time value you bleed per week · vega=$/+1% IV)")
+    print("   (P/L now = net if you CLOSE today, after the bid/ask spread; hold to expiry to avoid it.")
+    print("    delta=$/+1 price · theta/wk=time bleed per week · vega=$/+1% IV)")
 
 def manage_turn(coms, gold, portfolio, catalyst, month_idx, scored):
     head, ccom, cdir, _ = catalyst

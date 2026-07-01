@@ -25,6 +25,8 @@ powershell -ExecutionPolicy Bypass -File create_desktop_shortcut.ps1
 
 You can **(k) close** any position early to lock a win or cut a loss, or hold to expiry (settles at intrinsic). Watching theta bleed a held option week by week — and deciding when to close — is the core real-trading muscle this adds. A full run is ~20 weeks.
 
+**Bid/ask spread (cost of trading):** you buy at the ask and sell at the bid, so every trade crosses the spread — and closing early crosses it *again*. The "P/L now" already nets this out. Holding to **expiry avoids the closing spread** (options settle at intrinsic). Multi-leg sells (spreads) pay the spread on each leg, so they cost more to put on. This is the constant tax real traders pay — following the signal is still net-profitable, just less than the raw edge.
+
 **Start menu & pages:** the signals game opens on a menu — **1) Play · 2) History · 3) Information · 4) Quit**.
 - **History** — full 5-year price chart for each commodity plus its real-world **top exporters/importers** and price drivers (where catalysts come from).
 - **Information** — every metric (price, range, rVol, IV Rank, implied vol, trend, catalyst, forward, moneyness, intrinsic/time value, premium, breakeven) with a **definition + impact**.
