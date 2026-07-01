@@ -12,7 +12,7 @@ a characteristic SHAPE (not real prices — the shape):
 
 You read each commodity's 5y sparkline, realized volatility, and IV Rank
 (derived from its own history), plus a market-news catalyst, then trade
-calls/puts. Time advances one MONTH per turn with real dates. Pricing uses each
+calls/puts. Time advances one WEEK per turn. Pricing uses each
 commodity's realized vol, so IV is genuine — RICH IV options really do cost more.
 
 Pure stdlib. Run:  python catan_options_signals.py
@@ -99,21 +99,24 @@ CATALYSTS = [
     ("A quiet month on the island — no clear catalyst",         "None", "none", 0.0),
 ]
 
-HIST_MONTHS = 60          # 5 years of history
-PLAY_MONTHS = 12          # play one year forward
+SPY = 52                  # steps per year (WEEKLY stepping -> smooth theta decay)
+HIST_STEPS = 260          # 5 years of weekly history
+PLAY_STEPS = 20           # play ~20 weeks forward
 START_YEAR = 2021         # history begins here; play starts at +5y
 UNITS = 10
 START_GOLD = 1000.0
 SPARK = "▁▂▃▄▅▆▇█"
+_WK = math.sqrt(12.0 / SPY)   # monthly-vol -> weekly-vol scale factor
+_MPS = 12.0 / SPY             # fraction of a month per step (for rho/jump conversion)
 
 def wrap(s, indent=""):
     print(textwrap.fill(s, width=80, initial_indent=indent, subsequent_indent=indent))
 
 def month_label(idx):
-    """idx 0 = START_YEAR-01; returns 'YYYY-MM'."""
-    y = START_YEAR + idx // 12
-    m = idx % 12 + 1
-    return f"{y}-{m:02d}"
+    """idx = week index; returns 'YYYY wNN'."""
+    y = START_YEAR + idx // SPY
+    w = idx % SPY + 1
+    return f"{y} w{w:02d}"
 
 def _downsample(vals, width):
     if len(vals) <= width:
@@ -149,14 +152,14 @@ def area_chart(vals, width=56, height=11):
 
 def show_charts(coms):
     print("\n" + "=" * 72)
-    print("  5-YEAR HISTORY (trailing 60 months) — full charts")
+    print("  5-YEAR HISTORY (trailing 260 weeks) — full charts")
     print("=" * 72)
     for n, c in coms.items():
-        lo, hi = c.lo_hi(HIST_MONTHS)
+        lo, hi = c.lo_hi(HIST_STEPS)
         print(f"\n{n}  ~ {c.p['analog']}")
         print(f"  now {c.price():.2f}   5y range {lo:.2f}-{hi:.2f}   rVol {c.realized_vol()*100:.0f}%   "
               f"IV {iv_tag(c.iv_rank())}   trend {c.trend()}")
-        print(area_chart(c.prices[-HIST_MONTHS:]))
+        print(area_chart(c.prices[-HIST_STEPS:]))
     print("=" * 72)
 
 # ============================== PAGE: HISTORY ==============================
@@ -166,12 +169,12 @@ def show_history(coms):
     print("#" * 72)
     for n, c in coms.items():
         p = c.p
-        lo, hi = c.lo_hi(HIST_MONTHS)
+        lo, hi = c.lo_hi(HIST_STEPS)
         print(f"\n{'='*72}\n{n}  ~ {p['analog']}")
         print(f"  now {c.price():.2f}   5y range {lo:.2f}-{hi:.2f}   "
               f"rVol {c.realized_vol()*100:.0f}%   IV {iv_tag(c.iv_rank())}   trend {c.trend()}")
         print()
-        print(area_chart(c.prices[-HIST_MONTHS:]))
+        print(area_chart(c.prices[-HIST_STEPS:]))
         print(f"\n  Top EXPORTERS:  {p['exporters']}")
         print(f"  Top IMPORTERS:  {p['importers']}")
         print(f"  Price drivers:  {p['drivers']}")
@@ -227,7 +230,7 @@ def show_guide():
 INFO = [
     ("Price", "Latest market price of the commodity.",
      "The reference for strikes, moneyness, and breakevens. Meaningless alone — read it vs the range, trend, and catalyst."),
-    ("5y history / sparkline", "The price path over the trailing 60 months (a mini chart).",
+    ("5y history / sparkline", "The price path over the trailing 260 weeks / 5 years (a mini chart).",
      "Shows trend, seasonality, and regime. Buy dips in uptrends; respect seasonal cycles; don't chase vertical spikes."),
     ("5y range (lo-hi)", "Min and max price over the last 5 years.",
      "Context for cheap vs expensive. Near the high = strength/overextended; near the low = value or a falling knife."),
@@ -303,7 +306,7 @@ def annualized_vol(logrets):
         return 0.0
     m = sum(logrets) / len(logrets)
     var = sum((r - m) ** 2 for r in logrets) / (len(logrets) - 1)
-    return math.sqrt(var) * math.sqrt(12)
+    return math.sqrt(var) * math.sqrt(SPY)
 
 # ---------------------------------------------------------------- simulation
 class Commodity:
@@ -319,8 +322,8 @@ class Commodity:
     def _emit(self, rng, catalyst_drift=0.0, market=None):
         pp = self.p
         # stochastic volatility (clustering)
-        self.h = 0.9 * self.h + 0.30 * rng.gauss(0, 1)
-        sigma = pp["vol_m"] * math.exp(0.5 * self.h)
+        self.h = 0.92 * self.h + 0.28 * rng.gauss(0, 1)
+        sigma = pp["vol_m"] * _WK * math.exp(0.5 * self.h)      # weekly vol
         # shock: blend a shared MACRO factor (co-movement) with idiosyncratic noise.
         idio = rng.gauss(0, 1)
         if market is None:
@@ -328,22 +331,24 @@ class Commodity:
         else:
             b = pp["beta"]
             shock = b * market + math.sqrt(max(0.0, 1 - b * b)) * idio
-        # asymmetric jumps (supply shocks skew up)
+        # asymmetric jumps (supply shocks skew up) — weekly probability
         jump = 0.0
-        if rng.random() < pp["jump_p"]:
+        if rng.random() < pp["jump_p"] * _MPS:
             jump = pp["jump"] * (1 if rng.random() < pp["jbias"] else -1)
-        # short-term momentum from the recent 3-month return (clipped; decays via rho)
+        # short-term momentum from the recent ~13-week (3-month) return (clipped;
+        # scaled to per-week so it doesn't over-compound at weekly cadence)
         mom = 0.0
-        if len(self.prices) >= 4:
-            rr = self.prices[-1] / self.prices[-4] - 1
+        if len(self.prices) >= 14:
+            rr = self.prices[-1] / self.prices[-14] - 1
             rr = max(-0.4, min(0.4, rr))               # clip to avoid runaway feedback
-            mom = pp["mom_k"] * rr
-        self.c = pp["rho"] * self.c + sigma * shock + jump + catalyst_drift + mom
+            mom = pp["mom_k"] * _MPS * rr
+        rho_w = pp["rho"] ** _MPS                       # weekly persistence
+        self.c = rho_w * self.c + sigma * shock + jump + catalyst_drift + mom
         self.c = max(-1.5, min(1.5, self.c))           # bound deviation (price in ~0.2x..4.5x trend)
         self.t += 1
-        month = self.t % 12
-        seas = pp["seas_amp"] * math.sin(2 * math.pi * month / 12 + pp["phase"])
-        logP = math.log(pp["start"]) + (pp["drift"] / 12) * self.t + seas + self.c
+        wk = self.t % SPY
+        seas = pp["seas_amp"] * math.sin(2 * math.pi * wk / SPY + pp["phase"])
+        logP = math.log(pp["start"]) + (pp["drift"] / SPY) * self.t + seas + self.c
         price = round(math.exp(logP), 2)
         if self.prices:
             self.logrets.append(math.log(price / self.prices[-1]))
@@ -351,20 +356,20 @@ class Commodity:
         return price
 
     def _build_history(self):
-        for _ in range(HIST_MONTHS):
+        for _ in range(HIST_STEPS):
             self._emit(self._rng)
 
     def _iv_distribution(self):
-        """Distribution of trailing-3-month realized vol across history (for IV Rank)."""
+        """Distribution of trailing 13-week (~3-month) realized vol across history."""
         self.iv_hist = []
-        for i in range(3, len(self.logrets) + 1):
-            self.iv_hist.append(annualized_vol(self.logrets[i - 3:i]))
+        for i in range(13, len(self.logrets) + 1):
+            self.iv_hist.append(annualized_vol(self.logrets[i - 13:i]))
         self.iv_hist.sort()
 
     # ---- live readings ----
     def price(self):           return self.prices[-1]
-    def realized_vol(self):    return annualized_vol(self.logrets[-12:])
-    def current_3m_vol(self):  return annualized_vol(self.logrets[-3:])
+    def realized_vol(self):    return annualized_vol(self.logrets[-52:])   # trailing 1y
+    def current_3m_vol(self):  return annualized_vol(self.logrets[-13:])   # trailing 13 weeks
 
     def iv_rank(self):
         v = self.current_3m_vol()
@@ -374,9 +379,9 @@ class Commodity:
         return round(100 * below / len(self.iv_hist))
 
     def trend(self):
-        if len(self.prices) < 7:
+        if len(self.prices) < 27:
             return "→"
-        chg = self.prices[-1] / self.prices[-7] - 1
+        chg = self.prices[-1] / self.prices[-27] - 1     # ~6-month change
         return "↑" if chg > 0.04 else ("↓" if chg < -0.04 else "→")
 
     def lo_hi(self, n):
@@ -387,23 +392,24 @@ class Commodity:
         return self._emit(random, catalyst_drift, market)   # forward uses global RNG
 
 # ---------------------------------------------------------------- pricing
-def forward_stats(com, sims=500):
-    """Simulate next month with NO catalyst -> fair forward F (mean) AND the true
-    one-step dispersion as an annualized sigma. Pricing off BOTH (mean and the real
-    spread, which includes jumps/vol-clustering) makes a no-edge trade ~zero-EV, so
-    only the catalyst (unknown to the pricer) is an edge."""
+def forward_stats(com, T, sims=160):
+    """Simulate the price to EXPIRY (T years, weekly steps) with NO catalyst ->
+    fair forward F = E[S_T] and the annualized dispersion of log(S_T/S0). Pricing
+    off both makes a no-edge trade ~zero-EV; only the catalyst is an edge."""
+    steps = max(1, round(T * SPY))
     base = com.price()
     prices, rets = [], []
     for _ in range(sims):
         c = copy.deepcopy(com)
-        c.advance(0.0)
+        for _s in range(steps):
+            c.advance(0.0)
         p = c.price()
         prices.append(p)
         rets.append(math.log(p / base))
     F = sum(prices) / sims
     m = sum(rets) / sims
     var = sum((r - m) ** 2 for r in rets) / (sims - 1)
-    sigma = math.sqrt(var) * math.sqrt(12)
+    sigma = math.sqrt(var) / math.sqrt(max(T, 1e-6))     # annualized over the option's life
     return F, max(sigma, 0.05)
 
 def iv_markup(rank):
@@ -493,14 +499,14 @@ def iv_tag(rank):
 
 def show_board(coms, month_idx, turn, gold):
     print("\n" + "-" * 84)
-    print(f"{month_label(month_idx)}   (month {turn}/{PLAY_MONTHS})        Gold: {gold:.2f}")
+    print(f"{month_label(month_idx)}   (week {turn}/{PLAY_STEPS})        Gold: {gold:.2f}")
     print(REF)
     print("-" * 84)
     print(f"{'Commodity':<9}{'Price':>7}  {'5y history':<34}{'5y range':>13}  "
           f"{'rVol':>5}  {'IV Rank':<10}{'trend':>4}")
     for n, c in coms.items():
-        lo, hi = c.lo_hi(HIST_MONTHS)
-        spark = sparkline(c.prices[-HIST_MONTHS:])
+        lo, hi = c.lo_hi(HIST_STEPS)
+        spark = sparkline(c.prices[-HIST_STEPS:])
         print(f"{n:<9}{c.price():>7.2f}  {spark:<34}{f'{lo:.1f}-{hi:.1f}':>13}  "
               f"{c.realized_vol()*100:>4.0f}%  {iv_tag(c.iv_rank()):<10}{c.trend():>4}")
     print("   tip: choose 'c' at the prompt to study full-size 5-year charts.")
@@ -525,11 +531,13 @@ def black_greeks(kind, F, K, sigma, T):
 
 def _pos_market(pos, coms, month_idx, sims=60):
     """Returns (sigma, T_remaining, F, S) used to mark/greek a position now."""
-    com = coms[pos["name"]]
-    F, sig_true = forward_stats(com, sims=sims)
-    sigma = sig_true * iv_markup(com.iv_rank())
-    T = max((pos["expiry_idx"] - month_idx) / 12, 0.0)
-    return sigma, T, F, com.price()
+    com = coms[pos["name"]]; S = com.price()
+    rem = pos["expiry_idx"] - month_idx
+    if rem <= 0:                                   # expired -> settle at intrinsic on spot
+        return 0.05, 0.0, S, S
+    T = rem / SPY
+    F, sig_true = forward_stats(com, T, sims=sims)
+    return sig_true * iv_markup(com.iv_rank()), T, F, S
 
 def mark_value(pos, coms, month_idx, sims=60):
     """Cash you'd receive to CLOSE the position right now (legs + stock)."""
@@ -548,7 +556,7 @@ def pos_greeks(pos, coms, month_idx, sims=60):
         d += sign * gd * UNITS; v += sign * gv * UNITS; th += sign * gt * UNITS
     if pos.get("stock"):
         qty, _ = pos["stock"]; d += qty
-    return d, th * 30, v   # theta scaled to ~per-month
+    return d, th * 7, v   # theta scaled to ~per-week
 
 def _build_long(com, F, sigma, gold, cdir, name, cheap, rich, T, expiry_idx):
     """Buy a single call or put (long premium). Returns pos or None."""
@@ -590,9 +598,9 @@ def _build_long(com, F, sigma, gold, cdir, name, cheap, rich, T, expiry_idx):
     aligned = (name == cdir[0] and cdir[1] != "none" and
                ((cdir[1] == "bull" and kind == "call") or (cdir[1] == "bear" and kind == "put")))
     be = K + prem if kind == "call" else K - prem
-    months = max(1, round(T * 12))
+    wks = max(1, round(T * SPY))
     print(f"\n   BOUGHT long {kind} on {name} @ {K}, paid {cost:.2f} (max loss). "
-          f"Breakeven {be:.2f}. Expires in {months} month(s).")
+          f"Breakeven {be:.2f}. Expires in {wks} week(s).")
     return dict(name=name, label=f"long {kind} @ {K}",
                 legs=[(kind, K, +1, prem)], stock=None, entry=-cost,
                 max_profit=None, max_loss=cost, be=be,
@@ -656,14 +664,14 @@ def _finish_sell(pos, gold, cdir, name, rich):
 MAX_POSITIONS = 6
 
 def _ask_expiry():
-    m = ask("   Expiry in months? (1/2/3, Enter=3): ", {"1": 1, "2": 2, "3": 3, "": 3})
-    return m / 12.0, m
+    w = ask("   Expiry in weeks? (4/8/12, Enter=8): ", {"4": 4, "8": 8, "12": 12, "": 8})
+    return w / float(SPY), w
 
 def open_position(coms, gold, catalyst, month_idx, action):
     """Open a BUY or SELL position with a chosen expiry. Returns pos or None
     (entry NOT yet applied to gold; caller applies it)."""
     head, ccom, cdir, _ = catalyst
-    T, months = _ask_expiry()
+    T, weeks = _ask_expiry()
     cd = (ccom, cdir)
 
     # (c) One-tap recommended SELL.
@@ -676,10 +684,10 @@ def open_position(coms, gold, catalyst, month_idx, action):
                 name, choice, lbl = ccom, "4", "bear call spread"
             else:
                 name = max(coms, key=lambda n: coms[n].iv_rank()); choice, lbl = "1", "cash-secured put"
-            com = coms[name]; F, st = forward_stats(com)
+            com = coms[name]; F, st = forward_stats(com, T)
             rank = com.iv_rank(); sigma = st * iv_markup(rank)
-            expiry_idx = month_idx + months
-            print(f"\n   Recommended: {lbl} on {name} (IV {iv_tag(rank)}), {months}-month.")
+            expiry_idx = month_idx + weeks
+            print(f"\n   Recommended: {lbl} on {name} (IV {iv_tag(rank)}), {weeks}-week.")
             return _build_sell(com, F, sigma, gold, cd, name, rank <= 40, rank >= 66, choice, T, expiry_idx)
 
     names = list(coms.keys()); menu = {str(i + 1): n for i, n in enumerate(names)}
@@ -687,10 +695,10 @@ def open_position(coms, gold, catalyst, month_idx, action):
         flag = "   <- in the news" if n == ccom and cdir != "none" else ""
         print(f"   {k}) {n}  @ {coms[n].price():.2f}   IV {iv_tag(coms[n].iv_rank())}{flag}")
     name = ask("Pick a commodity (number): ", menu)
-    com = coms[name]; F, st = forward_stats(com)
+    com = coms[name]; F, st = forward_stats(com, T)
     rank = com.iv_rank(); cheap = rank <= 40; rich = rank >= 66
     sigma = st * iv_markup(rank)
-    expiry_idx = month_idx + months
+    expiry_idx = month_idx + weeks
 
     if action == "buy":
         return _build_long(com, F, sigma, gold, cd, name, cheap, rich, T, expiry_idx)
@@ -722,15 +730,15 @@ def show_portfolio(portfolio, coms, month_idx):
     if not portfolio:
         print("\n   Open positions: none."); return
     print("\n   OPEN POSITIONS (marked to current prices):")
-    print(f"   {'id':<3}{'position':<30}{'left':>5}{'P/L now':>10}{'delta':>7}{'theta/mo':>9}{'vega':>6}")
+    print(f"   {'id':<3}{'position':<30}{'left':>6}{'P/L now':>10}{'delta':>7}{'theta/wk':>9}{'vega':>6}")
     for i, pos in enumerate(portfolio, 1):
         pl = pos["entry"] + mark_value(pos, coms, month_idx)
         d, th, v = pos_greeks(pos, coms, month_idx)
         left = pos["expiry_idx"] - month_idx
         col = GREEN if pl > 0 else (RED if pl < 0 else YELLOW)
         label = pos["label"][:28]
-        print(f"   {i:<3}{label:<30}{left:>4}m{col}{pl:>+9.2f}{RESET}{d:>+7.1f}{th:>+9.2f}{v:>+6.2f}")
-    print("   (delta=$/+1 price · theta/mo=time value you bleed per month · vega=$/+1% IV)")
+        print(f"   {i:<3}{label:<30}{left:>4}wk{col}{pl:>+9.2f}{RESET}{d:>+7.1f}{th:>+9.2f}{v:>+6.2f}")
+    print("   (delta=$/+1 price · theta/wk=time value you bleed per week · vega=$/+1% IV)")
 
 def manage_turn(coms, gold, portfolio, catalyst, month_idx, scored):
     head, ccom, cdir, _ = catalyst
@@ -885,7 +893,7 @@ def scorecard(start, final, scored):
 
 def tutorial_intro():
     print("\n" + "=" * 72)
-    print("        TUTORIAL — a short, guided 5-month walkthrough")
+    print("        TUTORIAL — a short, guided 8-week walkthrough")
     print("=" * 72)
     wrap("I'll walk you through each turn: read the news, check the IV, and I'll tell you the "
          "best move and WHY. You make the move yourself (so you learn the keys). After it "
@@ -937,16 +945,16 @@ def coach_debrief(opened, expired_pls):
          "loss before expiry, instead of always waiting it out.", "  | ")
     print("  +----------------------------------------------------------------+")
 
-def play(months=PLAY_MONTHS, tutorial=False, seed=None):
+def play(weeks=PLAY_STEPS, tutorial=False, seed=None):
     random.seed(seed) if seed is not None else random.seed()
     coms = {n: Commodity(n, dict(p)) for n, p in COMMODITIES.items()}
     tutorial_intro() if tutorial else intro(coms)
     gold = START_GOLD
     scored = {"n": 0, "pl": 0.0, "trades": [], "plan": []}
-    month_idx = HIST_MONTHS            # first played month = right after history
+    month_idx = HIST_STEPS            # first played month = right after history
     portfolio = []                     # open positions carried across turns
 
-    for turn in range(1, months + 1):
+    for turn in range(1, weeks + 1):
         show_board(coms, month_idx, turn, gold)
         catalyst = random.choice(CATALYSTS)
         _, ccom, cdir, strength = catalyst
@@ -960,9 +968,9 @@ def play(months=PLAY_MONTHS, tutorial=False, seed=None):
                                    reco=reco,
                                    you=("; ".join(opened) if opened else "held/none")))
 
-        input("\n(press Enter to advance one month...)")
-        # forward step: one shared MACRO shock drives co-movement; catalyst adds monthly
-        # log-drift to its commodity (damped if priced in).
+        input("\n(press Enter to advance one week...)")
+        # forward step: one shared MACRO shock drives co-movement; the catalyst injects a
+        # one-time news bump (~monthly magnitude) into its commodity that then decays.
         market = random.gauss(0, 1)
         for n, c in coms.items():
             d = 0.0
@@ -995,7 +1003,7 @@ def play(months=PLAY_MONTHS, tutorial=False, seed=None):
     scorecard(START_GOLD, gold, scored)
     if tutorial:
         wrap("Tutorial done. You've seen the full loop. Now try menu option 1 (Play) for a "
-             "real 12-month run — follow the SUGGESTED MOVE while you build confidence.")
+             "full ~20-week run — follow the SUGGESTED MOVE while you build confidence.")
     else:
         print("Real parallel: history/sparkline = price chart; rVol & IV Rank = volatility "
               "signals; catalyst = news/earnings/supply data. The Trader Screener surfaces all "
@@ -1008,9 +1016,9 @@ def main():
         print("\n" + "=" * 60)
         print("            CATAN OPTIONS — MAIN MENU")
         print("=" * 60)
-        print("   1) Play          — full 12-month trading run")
+        print("   1) Play          — full ~20-week trading run")
         print("   2) Guide         — START HERE: plain-English how-to + example")
-        print("   3) Tutorial      — guided 5-month walkthrough (coached each turn)")
+        print("   3) Tutorial      — guided 8-week walkthrough (coached each turn)")
         print("   4) History       — price charts + who exports/imports each")
         print("   5) Information    — every metric & action: definition & impact")
         print("   6) Quit")
@@ -1022,7 +1030,7 @@ def main():
         elif choice == "guide":
             show_guide(); input("\n(press Enter to return to menu...)")
         elif choice == "tutorial":
-            play(months=5, tutorial=True, seed=7)
+            play(weeks=8, tutorial=True, seed=7)
         elif choice == "history":
             show_history(menu_coms); input("\n(press Enter to return to menu...)")
         elif choice == "info":

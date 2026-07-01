@@ -117,36 +117,45 @@ def check6_correlation():
                       else "weak co-movement"))
     return ok
 
+_T = 8 / 52.0                      # validate on an 8-week option
+_STEPS = max(1, round(_T * g.SPY))
+
+def _advance_weeks(base, first_bump):
+    c = copy.deepcopy(base)
+    c.advance(first_bump)                      # week 1: news bump (if any)
+    for _s in range(_STEPS - 1):
+        c.advance(0.0)
+    return c.price()
+
 def check4_forward():
-    print("\n[4] FORWARD UNBIASED  |F - true_mean| / price  (expect tiny)")
+    print("\n[4] FORWARD UNBIASED  |F - true_mean| / price over the option's life (expect tiny)")
     ok = True
     for name in g.COMMODITIES:
         base = g.Commodity(name, dict(g.COMMODITIES[name]))
-        F, _ = g.forward_stats(base, sims=500)
+        F, _ = g.forward_stats(base, _T, sims=300)
         random.seed(99)
-        big = st.mean([(lambda c: (c.advance(0.0) or c.price()))(copy.deepcopy(base))
-                       for _ in range(8000)])
-        rel = abs(F - big)/base.price()
-        ok = ok and rel < 0.02
+        big = st.mean([_advance_weeks(base, 0.0) for _ in range(3000)])
+        rel = abs(F - big) / base.price()
+        ok = ok and rel < 0.03
         print(f"   {name:7} F={F:.2f}  true_mean={big:.2f}  rel_err={rel*100:.2f}%  "
-              f"{'OK' if rel < 0.02 else 'high'}")
+              f"{'OK' if rel < 0.03 else 'high'}")
     print("   => " + ("PASS: priced forward matches the true expected price (honest pricing)."
                       if ok else "CHECK"))
     return ok
 
 def check5_edge_ev():
-    print("\n[5] EDGE EV ORDERING  ATM call  (expect aligned > none > against)")
+    print("\n[5] EDGE EV ORDERING  8-week ATM call  (expect aligned > none > against)")
     ok = True
     for name in g.COMMODITIES:
         base = g.Commodity(name, dict(g.COMMODITIES[name]))
         S = base.price(); K = round(S)
-        F, sig_true = g.forward_stats(base, sims=400)
+        F, sig_true = g.forward_stats(base, _T, sims=300)
         sig = sig_true * g.iv_markup(base.iv_rank())
-        cost = g.black_premium("call", F, K, sig, 1/12) * U
-        def ev(drift):
+        cost = g.black_premium("call", F, K, sig, _T) * U
+        def ev(bump):
             random.seed(5)
-            return st.mean([max((lambda c: (c.advance(drift) or c.price()))(copy.deepcopy(base)) - K, 0)*U - cost
-                            for _ in range(2500)])
+            return st.mean([max(_advance_weeks(base, bump) - K, 0) * U - cost
+                            for _ in range(1200)])
         a = ev(1/12); n = ev(0.0); ag = ev(-1/12)
         mono = a > n > ag
         ok = ok and mono
