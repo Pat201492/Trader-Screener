@@ -32,25 +32,33 @@ def decide(catalyst, com):
         return ("bear_call", com)
 
 def build(action, com):
+    """Return (entry_cashflow_incl_open_spread, legs)."""
     S = com.price()
     F, sig_true = g.forward_stats(com, T, sims=100)
     sig = sig_true * g.iv_markup(com.iv_rank())
     P = lambda k, K: g.black_premium(k, F, K, sig, T)
     if action == "buy_call":
-        K = round(S); return (-P("call", K) * U, [("call", K, +1)])
-    if action == "buy_put":
-        K = round(S); return (-P("put", K) * U, [("put", K, +1)])
-    if action == "sell_csp":
-        K = max(1, round(S * 0.95)); return (+P("put", K) * U, [("put", K, -1)])
-    if action == "bull_put":
+        K = round(S); p = P("call", K); legs = [("call", K, +1)]
+        entry = -(p + g.half_spread(p)) * U
+    elif action == "buy_put":
+        K = round(S); p = P("put", K); legs = [("put", K, +1)]
+        entry = -(p + g.half_spread(p)) * U
+    elif action == "sell_csp":
+        K = max(1, round(S * 0.95)); p = P("put", K); legs = [("put", K, -1)]
+        entry = (p - g.half_spread(p)) * U
+    elif action == "bull_put":
         Kh, Kl = round(S * 0.97), round(S * 0.90)
         if Kl >= Kh: Kl = Kh - 1
-        c = max(P("put", Kh) - P("put", Kl), 0.05)
-        return (+c * U, [("put", Kh, -1), ("put", Kl, +1)])
-    Kl, Kh = round(S * 1.03), round(S * 1.10)
-    if Kh <= Kl: Kh = Kl + 1
-    c = max(P("call", Kl) - P("call", Kh), 0.05)
-    return (+c * U, [("call", Kl, -1), ("call", Kh, +1)])
+        ph, pl = P("put", Kh), P("put", Kl)
+        legs = [("put", Kh, -1), ("put", Kl, +1)]
+        entry = max(ph - pl, 0.05) * U - (g.half_spread(ph) + g.half_spread(pl)) * U
+    else:
+        Kl, Kh = round(S * 1.03), round(S * 1.10)
+        if Kh <= Kl: Kh = Kl + 1
+        cl, ch = P("call", Kl), P("call", Kh)
+        legs = [("call", Kl, -1), ("call", Kh, +1)]
+        entry = max(cl - ch, 0.05) * U - (g.half_spread(cl) + g.half_spread(ch)) * U
+    return (entry, legs)
 
 def settle_pl(entry, legs, S):
     add = sum(sign * (max(S - K, 0) if k == "call" else max(K - S, 0)) * U for k, K, sign in legs)
