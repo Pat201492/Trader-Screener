@@ -27,6 +27,8 @@ You can **(k) close** any position early to lock a win or cut a loss, or hold to
 
 **Bid/ask spread (cost of trading):** you buy at the ask and sell at the bid, so every trade crosses the spread — and closing early crosses it *again*. The "P/L now" already nets this out. Holding to **expiry avoids the closing spread** (options settle at intrinsic). Multi-leg sells (spreads) pay the spread on each leg, so they cost more to put on. This is the constant tax real traders pay — following the signal is still net-profitable, just less than the raw edge.
 
+**Intermediate mode (volatility surface):** menu option **2) Intermediate** plays with a live **vol surface** — IV varies by **strike** (skew: low-strike puts carry the richest IV) and by **expiry** (term: longer-dated a bit richer, "contango"). Premiums, Greeks, and profit-odds all reflect it. Press **`v`** to view the surface. The lesson: trade *where* vol is expensive (e.g. sell rich low-strike puts), not just *whether* it is.
+
 **Start menu & pages:** the signals game opens on a menu — **1) Play · 2) History · 3) Information · 4) Quit**.
 - **History** — full 5-year price chart for each commodity plus its real-world **top exporters/importers** and price drivers (where catalysts come from).
 - **Information** — every metric (price, range, rVol, IV Rank, implied vol, trend, catalyst, forward, moneyness, intrinsic/time value, premium, breakeven) with a **definition + impact**.

@@ -412,6 +412,21 @@ def forward_stats(com, T, sims=160):
     sigma = math.sqrt(var) / math.sqrt(max(T, 1e-6))     # annualized over the option's life
     return F, max(sigma, 0.05)
 
+_SURFACE = {"on": False}      # Intermediate mode toggles a strike/expiry vol surface
+
+def surface_iv(sigma, F, K, T):
+    """Adjust base (ATM) vol by a volatility SURFACE:
+      - SKEW: lower strikes (puts) carry higher IV than higher strikes (calls)
+              — persistent crash-protection demand.
+      - TERM: mild contango — longer-dated IV a touch higher than short-dated.
+    Only active in Intermediate mode."""
+    if not _SURFACE["on"]:
+        return sigma
+    m = math.log(max(K, 1e-6) / max(F, 1e-6))     # moneyness (<0 = low strikes)
+    skew = max(0.60, min(1.70, 1 - 1.6 * m))      # low strike -> richer
+    term = max(0.80, min(1.35, 1 + 0.35 * (T - 8 / 52)))
+    return sigma * skew * term
+
 def half_spread(mid):
     """Half the bid/ask spread per unit: ~4% of the option's mid price, floored.
     The floor makes cheap OTM options costly in % terms — like real markets."""
@@ -437,7 +452,7 @@ def prob_profit(kind, F, breakeven, sigma, T):
 
 def black_premium(kind, F, K, sigma, T):
     """Black model: option priced on the forward F (r=0). No-drift-edge baked out."""
-    sigma = max(sigma, 0.05)
+    sigma = surface_iv(max(sigma, 0.05), F, K, T)      # apply vol surface (Intermediate)
     if T <= 0 or F <= 0:
         return round(max(F - K, 0) if kind == "call" else max(K - F, 0), 2)
     d1 = (math.log(F / K) + 0.5 * sigma**2 * T) / (sigma * math.sqrt(T))
@@ -516,6 +531,34 @@ def show_board(coms, month_idx, turn, gold):
               f"{c.realized_vol()*100:>4.0f}%  {iv_tag(c.iv_rank()):<10}{c.trend():>4}")
     print("   tip: choose 'c' at the prompt to study full-size 5-year charts.")
 
+def show_surface(coms):
+    """Intermediate: show the vol surface — IV by strike (skew) and by expiry (term)."""
+    print("\n" + "#" * 72)
+    print("#  VOLATILITY SURFACE — IV by strike (skew) and by expiry (term)")
+    print("#" * 72)
+    if not _SURFACE["on"]:
+        wrap("(Surface is only active in Intermediate mode; shown here for reference.)")
+    for n, c in coms.items():
+        S = c.price(); rank = c.iv_rank()
+        F, st = forward_stats(c, 8 / 52, sims=60)
+        base = st * iv_markup(rank)
+        # skew: IV at low / ATM / high strike for an 8-week option
+        def iv_at(K, T):
+            return surface_iv(base, F, K, T) * 100 if _SURFACE["on"] else base * 100
+        kl, ka, kh = round(S * 0.90), round(S), round(S * 1.10)
+        # term: ATM IV at 4 / 8 / 12 weeks
+        t4, t8, t12 = (surface_iv(base, F, ka, w / 52) * 100 if _SURFACE["on"] else base * 100
+                       for w in (4, 8, 12))
+        print(f"\n{n}  @ {S:.2f}   base IV {base*100:.0f}%  (IV Rank {rank})")
+        print(f"   SKEW  (8-wk):  put {kl} = {iv_at(kl,8/52):.0f}%   "
+              f"ATM {ka} = {iv_at(ka,8/52):.0f}%   call {kh} = {iv_at(kh,8/52):.0f}%")
+        print(f"   TERM  (ATM):   4wk = {t4:.0f}%   8wk = {t8:.0f}%   12wk = {t12:.0f}%")
+    print("#" * 72)
+    wrap("How to use it: low-strike PUTS carry the richest IV (skew) — great to SELL "
+         "(cash-secured put / bull put spread) when you're not bearish. Longer expiries "
+         "carry a bit more IV (contango). Trade WHERE the vol is expensive, not just "
+         "whether it is.")
+
 def intrinsic(kind, K, S):
     return max(S - K, 0) if kind == "call" else max(K - S, 0)
 
@@ -524,7 +567,7 @@ def _npdf(x):
 
 def black_greeks(kind, F, K, sigma, T):
     """Per-unit delta, vega(per 1% IV), theta(per day) under Black (r=0)."""
-    sigma = max(sigma, 0.05)
+    sigma = surface_iv(max(sigma, 0.05), F, K, T)      # surface-consistent greeks
     if T <= 1e-9 or F <= 0:
         d = (1.0 if F > K else 0.0) if kind == "call" else (-1.0 if F < K else 0.0)
         return d, 0.0, 0.0
@@ -793,12 +836,16 @@ def manage_turn(coms, gold, portfolio, catalyst, month_idx, scored):
         prompt = "\n   Action: (b)uy, (s)ell, "
         if portfolio:
             opts["k"] = "close"; prompt += "(k) close a position, "
-        prompt += "(g)uide/(i)nfo/(c)harts/(h)istory, or (d)one->advance? "
+        surf = "/(v)ol-surface" if _SURFACE["on"] else ""
+        opts["v"] = "surface"
+        prompt += f"(g)uide/(i)nfo/(c)harts/(h)istory{surf}, or (d)one->advance? "
         action = ask(prompt, opts)
         if action == "guide":
             show_guide(); input("\n(press Enter...)"); continue
         if action == "info":
             show_information(); input("\n(press Enter...)"); continue
+        if action == "surface":
+            show_surface(coms); input("\n(press Enter...)"); continue
         if action == "charts":
             show_charts(coms); input("\n(press Enter...)"); continue
         if action == "history":
@@ -974,10 +1021,15 @@ def coach_debrief(opened, expired_pls):
          "loss before expiry, instead of always waiting it out.", "  | ")
     print("  +----------------------------------------------------------------+")
 
-def play(weeks=PLAY_STEPS, tutorial=False, seed=None):
+def play(weeks=PLAY_STEPS, tutorial=False, seed=None, surface=False):
     random.seed(seed) if seed is not None else random.seed()
+    _SURFACE["on"] = bool(surface)
     coms = {n: Commodity(n, dict(p)) for n, p in COMMODITIES.items()}
     tutorial_intro() if tutorial else intro(coms)
+    if surface:
+        print("\n  INTERMEDIATE MODE: a volatility SURFACE is active — IV varies by strike")
+        print("  (skew: low-strike puts are richer) and by expiry (term: longer = a bit richer).")
+        print("  Press 'v' at the action prompt to view the surface. Trade WHERE vol is rich.")
     gold = START_GOLD
     scored = {"n": 0, "pl": 0.0, "trades": [], "plan": []}
     month_idx = HIST_STEPS            # first played month = right after history
@@ -1037,6 +1089,7 @@ def play(weeks=PLAY_STEPS, tutorial=False, seed=None):
         print("Real parallel: history/sparkline = price chart; rVol & IV Rank = volatility "
               "signals; catalyst = news/earnings/supply data. The Trader Screener surfaces all "
               "of these so your decisions carry an edge.")
+    _SURFACE["on"] = False       # don't leak the surface into other menu pages
 
 def main():
     """Start menu — toggle into History or Information pages before playing."""
@@ -1046,16 +1099,19 @@ def main():
         print("            CATAN OPTIONS — MAIN MENU")
         print("=" * 60)
         print("   1) Play          — full ~20-week trading run")
-        print("   2) Guide         — START HERE: plain-English how-to + example")
-        print("   3) Tutorial      — guided 8-week walkthrough (coached each turn)")
-        print("   4) History       — price charts + who exports/imports each")
-        print("   5) Information    — every metric & action: definition & impact")
-        print("   6) Quit")
-        choice = ask("Choose (1-6): ",
-                     {"1": "play", "2": "guide", "3": "tutorial", "4": "history",
-                      "5": "info", "6": "quit"})
+        print("   2) Intermediate  — Play with a VOLATILITY SURFACE (skew + term)")
+        print("   3) Guide         — START HERE: plain-English how-to + example")
+        print("   4) Tutorial      — guided 8-week walkthrough (coached each turn)")
+        print("   5) History       — price charts + who exports/imports each")
+        print("   6) Information    — every metric & action: definition & impact")
+        print("   7) Quit")
+        choice = ask("Choose (1-7): ",
+                     {"1": "play", "2": "inter", "3": "guide", "4": "tutorial",
+                      "5": "history", "6": "info", "7": "quit"})
         if choice == "play":
             play()
+        elif choice == "inter":
+            play(surface=True)
         elif choice == "guide":
             show_guide(); input("\n(press Enter to return to menu...)")
         elif choice == "tutorial":
