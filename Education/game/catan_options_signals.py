@@ -23,6 +23,7 @@ import math
 import random
 import sys
 import textwrap
+import zlib
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -310,12 +311,20 @@ def annualized_vol(logrets):
 
 # ---------------------------------------------------------------- simulation
 class Commodity:
-    def __init__(self, name, p):
+    def __init__(self, name, p, seed=None):
         self.name = name; self.p = p
         self.prices = []         # full price series (history + played)
         self.logrets = []        # log returns
         self.c = 0.0; self.h = 0.0; self.t = 0   # cyclical, vol-state, time index
-        self._rng = random.Random(hash(name) & 0xFFFF)  # FIXED -> stable shape
+        # Per-commodity RNG for the 5y history. crc32(name) is STABLE across
+        # processes (unlike hash(), which Python randomizes per run), so a given
+        # seed reproduces the same board on every launch. seed=None -> a fixed,
+        # deterministic history (used by validators and the menu reference pages);
+        # play() passes a RANDOM seed for variety, or a FIXED one for the tutorial.
+        base = zlib.crc32(name.encode())
+        if seed is not None:
+            base = (base * 2654435761 + int(seed)) & 0xFFFFFFFF
+        self._rng = random.Random(base)
         self._build_history()
         self._iv_distribution()
 
@@ -723,7 +732,7 @@ def _finish_sell(pos, gold, cdir, name, rich):
     not_against = (cd == "none") or not ((pos["bias"] == "bull" and cd == "bear") or
                                          (pos["bias"] == "bear" and cd == "bull"))
     pos["good"] = rich and not_against
-    print(f"\n   SOLD {pos['label']} on {name}: collected {pos['entry']:+.2f} now "
+    print(f"\n   SOLD {pos['label']} on {name}: net cash {pos['entry']:+.2f} now "
           f"(after {so:.2f} spread). Max profit {pos['max_profit']:.2f}, "
           f"max loss {pos['max_loss']:.2f}, breakeven {pos['be']:.2f}.")
     return pos
@@ -1016,15 +1025,18 @@ def coach_debrief(opened, expired_pls):
     for pl in expired_pls:
         verb = "profit" if pl > 0 else ("loss" if pl < 0 else "break-even")
         wrap(f"A position EXPIRED for {verb} {pl:+.2f}.", "  | ")
-    wrap("Note: any option you HOLD loses time value each month (theta) — watch each "
-         "position's 'P/L now' and 'theta/mo'. You can CLOSE early to lock a win or cut a "
+    wrap("Note: any option you HOLD loses time value each week (theta) — watch each "
+         "position's 'P/L now' and 'theta/wk'. You can CLOSE early to lock a win or cut a "
          "loss before expiry, instead of always waiting it out.", "  | ")
     print("  +----------------------------------------------------------------+")
 
 def play(weeks=PLAY_STEPS, tutorial=False, seed=None, surface=False):
-    random.seed(seed) if seed is not None else random.seed()
+    if seed is not None:
+        random.seed(seed); hist_seed = seed                     # reproducible board (tutorial)
+    else:
+        random.seed(); hist_seed = random.randrange(1, 2**31)   # fresh 5y history each game
     _SURFACE["on"] = bool(surface)
-    coms = {n: Commodity(n, dict(p)) for n, p in COMMODITIES.items()}
+    coms = {n: Commodity(n, dict(p), seed=hist_seed) for n, p in COMMODITIES.items()}
     tutorial_intro() if tutorial else intro(coms)
     if surface:
         print("\n  INTERMEDIATE MODE: a volatility SURFACE is active — IV varies by strike")
