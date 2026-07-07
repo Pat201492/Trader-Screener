@@ -19,7 +19,7 @@ Harris tells you the plan explicitly: "The book is organized into seven parts" (
 - **Part IV — Liquidity Suppliers** (Ch. 13–18): dealers, bid/ask spreads, block traders, value traders, arbitrageurs, and public order-submission strategies.
 - **Part V — Origins of Liquidity and Volatility** (Ch. 19–20): the two synthesizing chapters.
 - **Part VI — Evaluation and Prediction** (Ch. 21–22): transaction-cost measurement and performance evaluation.
-- **Part VII — Market Structure** (Ch. 23–29): market-maker/specialist systems, competition among markets, bubbles and crashes, and insider trading.
+- **Part VII — Market Structures** (Ch. 23–29): market-maker/specialist systems, competition among markets, bubbles and crashes, and insider trading.
 
 ## Core concepts (deep)
 
@@ -48,7 +48,7 @@ Harris tells you the plan explicitly: "The book is organized into seven parts" (
 **Market efficiency (Ch. 10).** "A price is informative when it is near its corresponding fundamental value." "Changes in fundamental values are completely unpredictable," so efficient-market price changes approximate a random walk. Fischer Black's cited yardstick: prices are "informative if they are between one-half and twice their fundamental values." Markets out-forecast individuals because "markets aggregate data from many sources."
 
 ## Key frameworks, metrics & formulas
-- **The 2×2 trader map:** {profit-motivated | utilitarian | futile} × {informed | uninformed} (Ch. 8). This is the lens for reading *who is on the other side of your trade*.
+- **The 3×2 trader map:** {profit-motivated | utilitarian | futile} × {informed | uninformed} (Ch. 8). This is the lens for reading *who is on the other side of your trade*.
 - **Three execution systems:** quote-driven (dealers) · order-driven (precedence rules) · brokered (search) — most real venues are hybrids (Ch. 5).
 - **Order-precedence stack:** price priority (primary) → time precedence / public-order precedence (secondary), governed by tick size (Ch. 6).
 - **Two spread components:** total spread = transaction-cost/transitory component (normal costs + monopoly profit + inventory-risk premium; drives bid/ask bounce) + adverse-selection component (Ch. 14). "To actually estimate the two spread components, analysts must use econometric methods."
