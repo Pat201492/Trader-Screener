@@ -121,10 +121,10 @@ What trading *is*: the continuous price-discovery and risk-transfer machine. Som
 
 ## 7. Digested Summaries (repo)
 
-Claude-digested one-pagers for the highest-value resources — each maps the resource to specific `Project folder/SCREENER_SHORTLIST.md` metrics. Filed from issues #20–#31; full files in [`summaries/`](summaries/).
+Claude-digested one-pagers for the highest-value resources — each maps the resource to specific `Project folder/SCREENER_SHORTLIST.md` metrics. Filed from issues #20–#31; full files in [`summaries/`](summaries/). The 4 books also have long **Detailed »** companions (chapter walkthroughs, quotes, formulas).
 
 **Business of trading & microstructure**
-- [Trading and Exchanges — Harris](summaries/trading-and-exchanges-harris.md) — liquidity's 4 dimensions, the 3 spread components, why dollar-volume is the right free tradeability proxy (#20).
+- [Trading and Exchanges — Harris](summaries/trading-and-exchanges-harris.md) — liquidity's 4 dimensions, the 2 spread components, why dollar-volume is the right free tradeability proxy (#20). [**Detailed »**](summaries/trading-and-exchanges-harris-detailed.md)
 
 **Options & volatility**
 - [IV Rank & IV Percentile — OIC/OCC](summaries/iv-rank-iv-percentile-oic.md) — the cross-name IV normalizer + skew/put-call, with formulas and the history-accrual caveat (#21).
@@ -135,19 +135,19 @@ Claude-digested one-pagers for the highest-value resources — each maps the res
 - [CFA Institute — Guide to ETFs](summaries/cfa-etf-guide.md) — creation/redemption, why ETF liquidity = underlying basket not screen ADV (#23).
 
 **Quant & backtesting**
-- [Quantitative Trading — Chan](summaries/quantitative-trading-chan.md) — ranked factors judged by Sharpe + max drawdown; look-ahead/survivorship guardrails; Kelly sizing (#24).
+- [Quantitative Trading — Chan](summaries/quantitative-trading-chan.md) — ranked factors judged by Sharpe + max drawdown; look-ahead/survivorship guardrails; Kelly sizing (#24). [**Detailed »**](summaries/quantitative-trading-chan-detailed.md)
 - [Backtest Overfitting — Bailey/Borwein/López de Prado/Zhu](summaries/backtest-overfitting-pseudo-mathematics.md) — a Sharpe without its trial count is meaningless; gate factors before they become defaults (#25).
 
 **Risk management & psychology**
 - [Risk Management in Trading — QuantInsti](summaries/risk-management-quantinsti.md) — fixed-fractional 1–2%, size backwards from an ATR stop, 50-losses-to-ruin (#26).
-- [Trading in the Zone — Douglas](summaries/trading-in-the-zone-douglas.md) — the discipline layer: think in probabilities so the risk columns get obeyed (#27).
+- [Trading in the Zone — Douglas](summaries/trading-in-the-zone-douglas.md) — the discipline layer: think in probabilities so the risk columns get obeyed (#27). [**Detailed »**](summaries/trading-in-the-zone-douglas-detailed.md)
 
 **Macro & regime**
 - [The Yield Curve as a Leading Indicator — NY Fed](summaries/yield-curve-leading-indicator-nyfed.md) — 10Y–3M spread → 12-month recession-probability regime flag from FRED (#28).
 
 **Screener-factor / ranking methodology**
 - [Fama-French / French Data Library](summaries/fama-french-data-library.md) — the cross-sectional recipe: rank → NYSE-breakpoint buckets; momentum's skip-a-month rule (#30).
-- [The Magic Formula — Greenblatt](summaries/greenblatt-magic-formula.md) — the two-factor rank-and-combine composite; the closest analog to model.json (#31).
+- [The Magic Formula — Greenblatt](summaries/greenblatt-magic-formula.md) — the two-factor rank-and-combine composite; the closest analog to model.json (#31). [**Detailed »**](summaries/greenblatt-magic-formula-detailed.md)
 
 ---
 
