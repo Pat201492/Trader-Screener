@@ -1,0 +1,232 @@
+%PDF-1.4
+%“Œ‹ž ReportLab Generated PDF document (opensource)
+1 0 obj
+<<
+/F1 2 0 R /F2 3 0 R /F3 4 0 R /F4 5 0 R /F5 6 0 R
+>>
+endobj
+2 0 obj
+<<
+/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font
+>>
+endobj
+3 0 obj
+<<
+/BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding /Name /F2 /Subtype /Type1 /Type /Font
+>>
+endobj
+4 0 obj
+<<
+/BaseFont /Helvetica-Oblique /Encoding /WinAnsiEncoding /Name /F3 /Subtype /Type1 /Type /Font
+>>
+endobj
+5 0 obj
+<<
+/BaseFont /Symbol /Name /F4 /Subtype /Type1 /Type /Font
+>>
+endobj
+6 0 obj
+<<
+/BaseFont /ZapfDingbats /Name /F5 /Subtype /Type1 /Type /Font
+>>
+endobj
+7 0 obj
+<<
+/Contents 28 0 R /MediaBox [ 0 0 612 792 ] /Parent 27 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 /Trans <<
+
+>> 
+  /Type /Page
+>>
+endobj
+8 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.cboe.com/tradable_products/vix/)
+>> /Border [ 0 0 0 ] /Rect [ 67.66791 115.1863 175.0619 130.4113 ] /Subtype /Link /Type /Annot
+>>
+endobj
+9 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://cdn.cboe.com/resources/vix/SandP%20A%20Practitioners%20Guide%20to%20Reading%20VIX.pdf)
+>> /Border [ 0 0 0 ] /Rect [ 67.66791 96.4613 359.7044 111.6863 ] /Subtype /Link /Type /Annot
+>>
+endobj
+10 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://cdn.cboe.com/resources/indices/Volatility_Index_Methodology_Cboe_Volatility_Index.pdf)
+>> /Border [ 0 0 0 ] /Rect [ 67.66791 77.7363 270.7379 92.9613 ] /Subtype /Link /Type /Annot
+>>
+endobj
+11 0 obj
+<<
+/Annots [ 8 0 R 9 0 R 10 0 R ] /Contents 29 0 R /MediaBox [ 0 0 612 792 ] /Parent 27 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+12 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.simtrade.fr/blog_simtrade/cboe-volatility-index/)
+>> /Border [ 0 0 0 ] /Rect [ 67.66791 719.7863 374.0264 735.0113 ] /Subtype /Link /Type /Annot
+>>
+endobj
+13 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://flashalpha.com/concepts/vix-term-structure)
+>> /Border [ 0 0 0 ] /Rect [ 67.66791 701.0613 226.3859 716.2863 ] /Subtype /Link /Type /Annot
+>>
+endobj
+14 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://fred.stlouisfed.org/series/VIXCLS)
+>> /Border [ 0 0 0 ] /Rect [ 67.66791 682.3363 282.9809 697.5613 ] /Subtype /Link /Type /Annot
+>>
+endobj
+15 0 obj
+<<
+/Annots [ 12 0 R 13 0 R 14 0 R ] /Contents 30 0 R /MediaBox [ 0 0 612 792 ] /Parent 27 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+16 0 obj
+<<
+/Outlines 18 0 R /PageMode /UseNone /Pages 27 0 R /Type /Catalog
+>>
+endobj
+17 0 obj
+<<
+/Author () /CreationDate (D:20260707120911-07'00') /Creator (\(unspecified\)) /Keywords () /ModDate (D:20260707120911-07'00') /Producer (xhtml2pdf <https://github.com/xhtml2pdf/xhtml2pdf/>) 
+  /Subject () /Title () /Trapped /False
+>>
+endobj
+18 0 obj
+<<
+/Count 2 /First 19 0 R /Last 19 0 R /Type /Outlines
+>>
+endobj
+19 0 obj
+<<
+/Count -7 /Dest [ 7 0 R /Fit ] /First 20 0 R /Last 26 0 R /Parent 18 0 R /Title (Cboe VIX Index \204 methodology & term structure)
+>>
+endobj
+20 0 obj
+<<
+/Dest [ 7 0 R /Fit ] /Next 21 0 R /Parent 19 0 R /Title (What it is)
+>>
+endobj
+21 0 obj
+<<
+/Dest [ 7 0 R /Fit ] /Next 22 0 R /Parent 19 0 R /Prev 20 0 R /Title (Core concepts)
+>>
+endobj
+22 0 obj
+<<
+/Dest [ 7 0 R /Fit ] /Next 23 0 R /Parent 19 0 R /Prev 21 0 R /Title (Key metrics/signals it defines + how to read/compute them)
+>>
+endobj
+23 0 obj
+<<
+/Dest [ 11 0 R /Fit ] /Next 24 0 R /Parent 19 0 R /Prev 22 0 R /Title (How it maps to the Trader Screener)
+>>
+endobj
+24 0 obj
+<<
+/Dest [ 11 0 R /Fit ] /Next 25 0 R /Parent 19 0 R /Prev 23 0 R /Title (Actionable takeaways)
+>>
+endobj
+25 0 obj
+<<
+/Dest [ 11 0 R /Fit ] /Next 26 0 R /Parent 19 0 R /Prev 24 0 R /Title (Open questions)
+>>
+endobj
+26 0 obj
+<<
+/Dest [ 11 0 R /Fit ] /Parent 19 0 R /Prev 25 0 R /Title (Sources)
+>>
+endobj
+27 0 obj
+<<
+/Count 3 /Kids [ 7 0 R 11 0 R 15 0 R ] /Type /Pages
+>>
+endobj
+28 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 2645
+>>
+stream
+Gb"/(>BAQ1&UsJXfZD?/AOh>sd>^_]LH(W?;l@aBReT1t%RdHfe0)O,TOaTgo@l>7d]siSNd0!ZSY!Pd'LcC_q"EGM6O4fbd!qnr_"0#I?\K%\0O6q'?iueq&RJ3C4rq:#piK=s(W(.07S/ht0M4fN3#PL7/U%+'TbfV2fQ\#u6WbEmT/KU21JHFDR)$(ZBZu2uP0nao6(!a5((B1V*Wq>[,RR&W#%97o-=E.d3M(#>%k$OZU,'B7=VQjh5aUe19>0,r6Z?]GYg-4IWsg&doPZEH+q*7S$bj(Fc`[jG7X?PfA-%<n_FEK,JcI'd261ZM58^[[rjr%ZR1/(0m<a8(_\:FJ-"0?9#_ssgY$DXDiO>=sVCRki@rJ,,[&Z&m&141Aei0]3n%mURcae^-DD';hg5Y1D]UF%_piDu6LF"V$1p64_>miu1,/nm$Q(L.KF/=<?n#t>YQHh@n<#9sqGfJnZs&p>3<N3>'Q+62<3h*>K3(Uc7Z1or-`GCXc&.;UQFmIsi:ApQ$#Ju%r\$7`\9VQb;Csjl(,ii(E%NDmtc7k&Ve.Ok??JTS>AB6+,0t&01VE*4hq4K$X64134MS7;jPOmHN#R`7T-p3fEB46fMc06#qH*p&e$YU*_+0+@oQgkOCAVmD($s(u3on#SKZ$,953Y1P[G;'GW<jC#*9NW[<`!dDN(NB*9S5>334^C+B'pOFacJXBF!1t`8$4-l@WJX@=$YE508PqL^6n#H>'MTTY9BP:!kuQCa!)\tYTEPgtUYr'+4fmZnj!KBe=+Ye@HJu7dkUN?D(Q>M_\_OtO)MLO:q$H[#NH]cM$_`k_B]\g<+koUO2H;6:PacP"kB<brZtm]4Ue5L_QUf'G#-:WoM,:hWEMF(`Vc'3EPeDc:Co<]W.$p\D[_^:Te9JU<K?=LAHeT%$_:G:h-ISCl`Sa-E:M)I,KX6b@`h7@Vd&*I_;%UZ"X&ISQ\/\gjR2&uC),G<841mTj;X$J]YRkKV_WKY;!Z`1W>,W0>V[Za+Zp<`a%q$tEPT)<t1Z2WYhu^Hg_iO3.Z@gP\NW*cGH`RZ"=/B$1+&91q@*!pRqPn6g//eXBN(7F+/eZ$WNQA\XJCa;]c7BseC%LGn%@LShQ`t!_KE.n&YG`I:\&!/Ve?X5u7QH(QcEh)CYL)bb>$.P%k!YTJE]q,"\K#sM<k+j%lCYaOrs32t/9$k[+eZ;S;^^[)>2ZC-QFMP9:5,5e.4"-:!c8`u`_/f)kQBbsWYIIEWtag42P,_r)rVd:hB0*k$P22J<c^+@SZ&$#U*'_RLSU-kcsS:k>#V`V99IXd0@35O63'()P/445-:osSAFNX;F32mhhH?:_8RuaV<Rer1/1AFFZb9j(*eu9`m0VS69(G1TgokDa?#VsXMNXcfVE--8X3@b4l<7+p+cJW_$Zj57$hWqF"3C7lZF</<HG5C6I9g!o6.Q3nQ`e("CjVM!Ent6\!&*n"-\>QrTb)/]p_K#uJsL/<r1kICj9C9XBM&V3bZ\Uld_TTGCNI02F)AiK>4%BlGg+$QWUtZYOf-88(gNc>ilZh!+2pu0D+ikCd#'4\M<P`)JLP$TkquIp*2HWYSuED\j@Uuq3D=`r^gNT=>;*K"Lm\i*XNL^8o?o:7%:Ln>C?4^t4nJY\#\"SKT:V@qH&G>``/7/*A!"u:X1IFTH["<Z)lMKQ=E#W9s)%&0S6Jf.11;l5Xgs+qi3j$bb4hp$Xo,Lp=J'VWbLRV?=SS+AlUYi2KSp#2%N[pXPt3>G6\YbG)3q*'^EBNf%QNO:/[6\B"a5aRSFKhg<\+uPHQsk0L2>?^k3`ID_7fd;YH:.Ki.e*L7\mJ">@P_.$l=LFKL_-i2:3c$f_nbcA`\;&;>fX82,#?5E6i4U[ofn5+:rGP<T5!'/&0oA1Q.!_>D[LcIk\AH"i@pH`8<=,J$('JQ#'IE@Eqkb+1Fo'.@8ep+rn%]<jZ]$9u/-'%Yq_GplU/)ieiU*RVMKS+"F;9OEWJ7[OD$8ni]S<;^5tCcq#.`P6enAQp?N+Jp]H_Qu<sN?93]B9iF.H^0?5%LQDo/rgSR;)GDmW49T`4Ibs#+"T24*[k.YBc04B5(2biX,[X^n(mU8^W7&rI`#T=#(@@UVIj9Vglk;^Vl\2'6[WSIFED86"]UJUYU<enFUs+"UPa-qeZSMeaKA9L>!uleHo6K3%W5;kG:W:&,$c<uK!PS_o+)g#sdJ^.peM=@"[=p<c_4RU&9tT7Wig])piE\RKmNME)Q)%Tq7+5r$o7`0k=*8S/?^c7[b8WNm^?ND#7AFN3NQ1a[^ROIPkj&,Jo4E2/qr)9RZ"Gu,;pt*0p$)E:`R2@\brSq^l0JsnEAWD(#kk-Naad+ZAV]6+`M<Hf7c9auENSJLn\k&hG?)C:8R?dO'gosepMLP7IeOVQe(J0QpQ(UVGiKM`GE?ni%_@b?>mMg1Ae%2s,l+"$[KH@2SdT9)^-_Od*PWS0jg\LZ[e[Nb4d0'K9C.fXOr(@\Ap+GUJZ%!Ae9/nIc[eSV+&:,Y[CcCi$(ci%3',b+6(O6S`:#&[>rXlk(:#VR3eF8k+dOhFkllq9WMZ9o.s4"<A8k4s?SAS>WY@9p2^ejCF+pJrWV`0e<0q[f;,jFp0"'EJnK3fp]^=_:i1EoJ"7Q~>endstream
+endobj
+29 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 2236
+>>
+stream
+Gb"/(>BAOW(4Q"]32;70hHCIV;A?[4fhQ"sX`oqBC25u#=mZ;Z*f4!O!!@b7Q!`DL8GTQR]jfH4]4kVCNHdH"I,B^#%OhMl!;4CF!dH_XnMpak_JBN8-8E_N_lMJ<qkKdDhB00";4&USahj"R1e:0!:/f67#F?luB_N$oBK1RfdE>[*`#WP[i[fdd"^sY?B460/!f`aF'#YBAVEi!H$Y]YfVHFP-TN<iF6#D-VW*!oP.^1599X=dX>icl$U-==b^L?gPkOD@)@kpd-0U_u5]@Wl^5dLSG^HWo@kEtmJ<=idl8SB)1!!9=7Va$%t#r=o?M>'l7P6m'YlGE0B%EQI82'e"dR8E&PrTL=aI;^4Ql#c28Il0;3=W0doZKH^#iFtcekl_'T'gO,l$n$8"e+rUjqTQj%)D5H;IIV1ToALXSCB_83(2rRHr,\hLrrqSPYKfVJ&d!-4`Vc*JcQ@o>>c;Tb=(n[b$Q.A5%<O6_bfB%-GGhXJqUqAL$c^.$EhNo55fo!cHFq)KkX!LKL<CQfAm$fP"ss^+;"HOGlfY+a'sA0h-(7I"F*=gB7?cW%j`9H3,&iMCk/3^GC+PXQQl)U627$DDNR_^d\7Uoeo4%k%0Y!$Va:'a^kJEsJq%1Z*J8+<&4TH*R+I$+KfT[fCqViOnbs+1HG*/D:;[^#S.Hsa^U&Ys&9%3uU,r`W!F7@I]a]Bc,4'FGfi!FcrX[]iVT("V(/+O:aT4$n/%7ib%_cRf^KLX)PMPX,DpZ^Ha4Z?dXQ)EbJ$-1L:CWhu"@h2ROq&0\Z^620WhXm>'#_l@C&97RC$C6JOe>dBhZfm_p<,6A)I4STMD4j8rZ@cI#:AogB`Z4KV(-Lb\CdBQF8oA'F8uC"CU<nX,fn'Xj2-R>m2c?*>Zrl[(K>g"G<fRTK3Yg+&BLa"JTM#f3\1L]jJ]TLnN#0+8q7mIF,b:%X:dG"7[uD")(Y<%l=(&+IEnb8LU8=YsEi$b`QJZMG/so<3r0RohiUTrJF^odaE8Ke9NZ;G7.G1Ymc)"I+=2qXfVs)B3aNoW:/?^_`AS9hY:-Y<AelpmI@Au(SA:!=>/t!aq*ile?BgHf]dh7=b`W?@*daY8ni8/[5ola8JFkb;9]6b^Qaqus#8MI#p"p@[oA2S,+-'QUne0F4Fh(f!$P&Ue4[#hWJX]EV_8,bSKhX@ii/Xc$/G;*UfP`d:PO>:6<1AZ?jbS+=].TP#q=3r[<3Jml#1'd:Xprb1KKX'JXme4bT@JWlp/H"3^XEN=`FO1!MXc:!$h)-ge!k&oh\Z0CU\A_3t>7(<F9[3e7UY^p^j_2Jhh`_JCO>He:p5@0mX-Zgr<=K*jQH?e;X[6m#,Hg3/QUR_[8oluUV_OkckkEsG\Lo3+NV]an\P#"g#R&=gODWY$I-qIpb/1b)I&XbC$rAU7iq'W;>oPBkWcTPPYFt/M#gXL'Xd/^hh?CWEs3u_1"mFWjq(6KfjLh<:i&XN`E-X.bU.Ito6OU1Q)J)uNl(6&aCR+F<7FM?T$;:gedg^+9B5MA5cNRAtNpc4$0%[$2=8c=a'4@uo<-%*ud+l-['SZ#kcX*]\XY^\`io*]A@hSbiBIaqF1c"BT%+]K5j15681hUiVV_3FicuZmsZ@:%uIaaQ/Ig,/6%t/HV-78-(VK+%KO3l2%RerXp0.+2N+@9SPKp(].)c"(bR,E,qY$CB!,_!N1o3j^*\Jpfm@Q,m<ONEX)2/7J_XUrm59V8@#_N[6bEPHCnn7.FjhD]*h2><`D8dM3e0).XhWQs"2n<#N/\*uYQh(a1r!_Pi1(^mco]6UR7BZ7BVV[J4=m?1+DlhWfo.J%%`h$\M+fA@U+dkD%uqWCnkK&Nb7QJ5\\?qZKV<2)'`EO4`8D?@df@9fSR5V""J+SFQZ?)+!dZs<7i?eWm]s59fg2:G5)'[F>HFCm0A/t'?ihjYV0Nt4\a9uCU.*^*\ZN$RZfDG%OuPtrpC9%Aa+n*V=WL614f>r>ZpIE@])&(!2B4`o<D5O++(VWBHF&#sK1.uiHR>I=FA0[lC_\qSge6^3]UqQ2sY?)^<Vpt>BU)GCYXWrH-[:=:s%&g_6):4Z*u/-rp0[hlD<j<WeQ(3g3uZhPj18[C(BePE$HmCn?_[AUKQp@jJ'X"WD5B"@T)7K'WFmi2"X_()r_<]HXoH(PU+-+@!g\a01gQR%&!OQb'&kR5D7'$PB'K==[+K=4a5&o+h.q=*e)q#T0&URqS4H0],~>endstream
+endobj
+30 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 396
+>>
+stream
+Gb!lY:M[g4&B4,6'^o#.ctR+:mUggH2M*'9e3uL\&ko;SM:$FAp"L8r%mp:]]m?)tR:4t4a(+o6_/3IY^sM(ib[:JK$4\J7SKbArcATB,fA/0W,%ZF9BGM;d#dLJVer2]Y-:<.VIB80&W*lZ$_'doN#Z=/%@\8Y>DnT<PpUlisepZ2[UMhnr0[LFS^K<4$["JsZJL(UGO3c,UM1$7r!]3`I&fN"tj,6rN<`HM!ZQ+f5)Pc84KR$k#Xsa[%^grYjT1F9.macM]QhBWo)\a6X2qo['W@R7.dVjQf>MPbeM6%N&\Ds3T.l/:_lKa*e0%9RfA%>mC*VT;>!Ll"_B!0f?h7gua6E1,Cl:Q+[IYjZqaRDR?39e[8MpZWi@:YY#i5@SJi-bVQ8Gho~>endstream
+endobj
+xref
+0 31
+0000000000 65535 f 
+0000000061 00000 n 
+0000000132 00000 n 
+0000000239 00000 n 
+0000000351 00000 n 
+0000000466 00000 n 
+0000000543 00000 n 
+0000000626 00000 n 
+0000000821 00000 n 
+0000001016 00000 n 
+0000001260 00000 n 
+0000001504 00000 n 
+0000001731 00000 n 
+0000001944 00000 n 
+0000002147 00000 n 
+0000002341 00000 n 
+0000002570 00000 n 
+0000002657 00000 n 
+0000002910 00000 n 
+0000002984 00000 n 
+0000003137 00000 n 
+0000003228 00000 n 
+0000003335 00000 n 
+0000003486 00000 n 
+0000003615 00000 n 
+0000003730 00000 n 
+0000003839 00000 n 
+0000003928 00000 n 
+0000004002 00000 n 
+0000006739 00000 n 
+0000009067 00000 n 
+trailer
+<<
+/ID 
+[<2de6dc0f359214309ff941184ca214df><2de6dc0f359214309ff941184ca214df>]
+% ReportLab generated PDF document -- digest (opensource)
+
+/Info 17 0 R
+/Root 16 0 R
+/Size 31
+>>
+startxref
+9554
+%%EOF
