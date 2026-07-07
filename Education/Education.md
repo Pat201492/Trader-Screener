@@ -38,15 +38,15 @@ What trading *is*: the continuous price-discovery and risk-transfer machine. Som
 
 > **Before opening any leveraged account:** CFTC — [Learn to Trade Futures and Options Without Getting Scammed](https://www.cftc.gov/LearnAndProtect/AdvisoriesAndArticles/learn_to_trade_without_scam.htm) and SEC [investor.gov](https://www.investor.gov).
 
-> **Deep-dive:** [Derivatives — Types & The Signals People Trade Off Them](Derivatives_Types_and_Trading_Signals.md) ([PDF](Text%20PDFS/Derivatives_Types_and_Trading_Signals.pdf)) — full taxonomy (forwards/futures/options/swaps) plus the options/volatility signal set (IV, IV Rank, skew, put/call, open interest, unusual activity, the Greeks, term structure, VIX).
+> **Deep-dive:** [Derivatives — Types & The Signals People Trade Off Them](Derivatives_Types_and_Trading_Signals.md) ([PDF](Derivatives_Types_and_Trading_Signals.pdf)) — full taxonomy (forwards/futures/options/swaps) plus the options/volatility signal set (IV, IV Rank, skew, put/call, open interest, unusual activity, the Greeks, term structure, VIX).
 >
-> **Examples gallery:** [Derivatives Examples Gallery](Derivatives_Examples_Gallery.md) ([PDF](Text%20PDFS/Derivatives_Examples_Gallery.pdf)) — visual catalog of ~14 strategies (single legs, spreads, straddle/strangle/condor/butterfly, covered call/collar) with payoff charts + key metrics, and the **Greeks** (delta/gamma/vega/theta) profiles professionals watch.
+> **Examples gallery:** [Derivatives Examples Gallery](Derivatives_Examples_Gallery.md) ([PDF](Derivatives_Examples_Gallery.pdf)) — visual catalog of ~14 strategies (single legs, spreads, straddle/strangle/condor/butterfly, covered call/collar) with payoff charts + key metrics, and the **Greeks** (delta/gamma/vega/theta) profiles professionals watch.
 >
-> **Tear sheet (firm-style):** [Instrument Information Sheet / Tear Sheet](Information_Sheet_Tearsheet.md) ([PDF](Text%20PDFS/Information_Sheet_Tearsheet.pdf)) — the one-page desk brief format + **6 worked examples** (bull/bear spreads, producer collar, iron condor, long straddle, protective put), each ending in a specific **derivative recommendation** with payoff. Illustrative/educational. Doubles as the screener's per-instrument output spec.
+> **Tear sheet (firm-style):** [Instrument Information Sheet / Tear Sheet](Information_Sheet_Tearsheet.md) ([PDF](Information_Sheet_Tearsheet.pdf)) — the one-page desk brief format + **6 worked examples** (bull/bear spreads, producer collar, iron condor, long straddle, protective put), each ending in a specific **derivative recommendation** with payoff. Illustrative/educational. Doubles as the screener's per-instrument output spec.
 >
-> **How to read it:** [How to Read a Tear Sheet](How_to_Read_a_Tear_Sheet.md) ([PDF](Text%20PDFS/How_to_Read_a_Tear_Sheet.pdf)) — line-by-line guide explaining what each block means and **why it matters** (why dollar-volume, beta, ATR, IV Rank, skew, positioning each earn their place), plus the 60-second pro scan.
+> **How to read it:** [How to Read a Tear Sheet](How_to_Read_a_Tear_Sheet.md) ([PDF](How_to_Read_a_Tear_Sheet.pdf)) — line-by-line guide explaining what each block means and **why it matters** (why dollar-volume, beta, ATR, IV Rank, skew, positioning each earn their place), plus the 60-second pro scan.
 >
-> **Metrics field guide:** [Metrics Field Guide](Metrics_Field_Guide.md) ([PDF](Text%20PDFS/Metrics_Field_Guide.pdf)) — every readout (price, history/sparkline, range, realized vol, IV Rank, trend, catalyst, moneyness/intrinsic, premium, breakeven, forward/fair-vol) with **what it means + how to trade off it**, and a step-by-step decision recipe combining them.
+> **Metrics field guide:** [Metrics Field Guide](Metrics_Field_Guide.md) ([PDF](Metrics_Field_Guide.pdf)) — every readout (price, history/sparkline, range, realized vol, IV Rank, trend, catalyst, moneyness/intrinsic, premium, breakeven, forward/fair-vol) with **what it means + how to trade off it**, and a step-by-step decision recipe combining them.
 >
 > **Play it:** Catan Options terminal game — trade calls/puts on the five Catan commodities (Brick/Lumber/Wool/Grain/Ore). [how to play](game/HOW_TO_PLAY.md).
 > - [Plain edition](game/catan_options_game.py) — random walk; teaches mechanics (call/put, strike/moneyness, premium-as-max-loss, breakeven, IV pricing) **and** that trading with no edge is gambling.
@@ -107,7 +107,7 @@ What trading *is*: the continuous price-discovery and risk-transfer machine. Som
 5. **Advanced/quant** — QuantStart event-driven series; Ernie Chan's books; arXiv microstructure. Paper-trade, then go live small.
 
 **Books (reputable canon):**
-- *Trading and Exchanges: Market Microstructure for Practitioners* — Larry Harris (Oxford, 2003) — **start here for the business of trading**; how/who/why markets work. Detailed summary: [Trading_and_Exchanges_Harris_Summary.md](Trading_and_Exchanges_Harris_Summary.md) · full chapter breakdown PDF: [Trading_and_Exchanges_Harris_Detailed.pdf](Text%20PDFS/Trading_and_Exchanges_Harris_Detailed.pdf)
+- *Trading and Exchanges: Market Microstructure for Practitioners* — Larry Harris (Oxford, 2003) — **start here for the business of trading**; how/who/why markets work. Detailed summary: [Trading_and_Exchanges_Harris_Summary.md](Trading_and_Exchanges_Harris_Summary.md) · full chapter breakdown PDF: [Trading_and_Exchanges_Harris_Detailed.pdf](Trading_and_Exchanges_Harris_Detailed.pdf)
 - *Trading in the Zone* — Mark Douglas (psychology; read first)
 - *Reminiscences of a Stock Operator* — Edwin Lefèvre (behavioral lessons)
 - *Quantitative Trading* / *Algorithmic Trading* — Ernest Chan (systematic)
