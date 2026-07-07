@@ -20,3 +20,14 @@ Index (grouped by domain) lives in [`../Education.md`](../Education.md#7-digeste
 | [yield-curve-leading-indicator-nyfed.md](yield-curve-leading-indicator-nyfed.md) | NY Fed, Yield Curve Indicator | Macro |
 | [fama-french-data-library.md](fama-french-data-library.md) | French Data Library | Factor methodology |
 | [greenblatt-magic-formula.md](greenblatt-magic-formula.md) | Greenblatt, Magic Formula | Factor methodology |
+
+## Detailed companions (the 4 books)
+
+Long-form deep reads of the four book resources — chapter/thematic walkthroughs, direct quotes, full formulas/back-test numbers, and expanded screener mappings. Built from the full book texts.
+
+| Detailed file | Book |
+|---|---|
+| [trading-and-exchanges-harris-detailed.md](trading-and-exchanges-harris-detailed.md) | Harris, *Trading and Exchanges* |
+| [quantitative-trading-chan-detailed.md](quantitative-trading-chan-detailed.md) | Chan, *Quantitative Trading* |
+| [trading-in-the-zone-douglas-detailed.md](trading-in-the-zone-douglas-detailed.md) | Douglas, *Trading in the Zone* |
+| [greenblatt-magic-formula-detailed.md](greenblatt-magic-formula-detailed.md) | Greenblatt, *The Little Book That Still Beats the Market* |
