@@ -1,40 +1,43 @@
 # Trading in the Zone (Mark Douglas)
 
-**Source:** *Trading in the Zone: Master the Market with Confidence, Discipline, and a Winning Attitude* by Mark Douglas (Penguin Random House) — https://www.penguinrandomhouse.com/books/350665/trading-in-the-zone-by-mark-douglas/
+**Source:** *Trading in the Zone: Master the Market with Confidence, Discipline, and a Winning Attitude* by Mark Douglas — read from the full text (Prentice Hall / New York Institute of Finance, 2000).
 
 ## What it is
 
-A trading-psychology classic — not a strategy, indicator, or data source. Douglas's thesis: most traders fail not from bad analysis but from the mental habits that stop them from executing a sound plan consistently. This is the **discipline layer** of the risk domain: it explains *why* traders break their own risk rules and how to rebuild the beliefs that let them follow those rules under pressure. It defines no computable metric — it defines the behavior that decides whether the screener's risk columns actually get obeyed instead of overridden.
+A trading-psychology book, not a strategy, indicator, or data source. Douglas's thesis (Ch. 1, "The Road to Success: Fundamental, Technical, or Mental Analysis?") is that after a point, added market analysis stops helping; what separates consistent winners is a *mental* skill — the ability to execute a probabilistic edge without fear, hesitation, or self-sabotage. This is the discipline layer of the screener's risk domain: it explains *why* traders break their own rules and how to rebuild the beliefs that let them follow those rules under pressure. It defines no computable metric — it defines the behavior that decides whether the screener's risk columns get obeyed or overridden.
 
 ## Core concepts
 
-- **Think in probabilities, not certainties.** Trading is a probabilistic environment. An edge only means one outcome is *more likely* than another across a large sample; any single trade's outcome is essentially random.
-- **The five fundamental truths:** (1) anything can happen; (2) you don't need to know what happens next to make money; (3) wins and losses are randomly distributed across any set of variables that define an edge; (4) an edge is just a higher probability of one thing over another; (5) every market moment is unique.
-- **The casino model.** A casino can't predict any single hand but profits over thousands of hands by letting a small edge play out with disciplined sizing. The trader's job is identical.
-- **Fear and self-sabotage cause rule-breaking.** When self-worth attaches to being right, traders hesitate, skip valid setups, move stops, or oversize — the errors no system can fix.
-- **The seven principles of consistency:** objectively identify edges; predefine risk on every trade; completely accept that risk (or pass the trade); act on edges without hesitation; pay yourself as the market allows; continually monitor susceptibility to error; never violate these principles.
+- **Think in probabilities (Ch. 7, "The Trader's Edge: Thinking in Probabilities").** An edge only means one outcome is *more likely* over a large sample; any single trade is effectively random. Douglas: "The best traders... are not trying to be right or trying to avoid being wrong."
+- **The casino / blackjack model (Ch. 7).** A casino can't predict one hand but nets ~4.5% over a large enough sample by letting a small edge play out with disciplined sizing. The trader treats trading "like a numbers game" the same way.
+- **The carefree state of mind (Ch. 1, Ch. 7).** Genuinely accepting risk removes fear; "The idea is to create a carefree state of mind that completely accepts the fact that there are always unknown forces operating in the market."
+- **Beliefs drive behavior (Ch. 8, "Working with Your Beliefs").** Trading errors — hesitating, jumping the gun, moving stops, refusing to take a loss, oversizing — come from beliefs out of alignment with market reality, not from bad analysis.
+
+**The five fundamental truths (Ch. 7), verbatim:** "1. Anything can happen. 2. You don't need to know what is going to happen next in order to make money. 3. There is a random distribution between wins and losses for any given set of variables that define an edge. 4. An edge is nothing more than an indication of a higher probability of one thing happening over another. 5. Every moment in the market is unique."
+
+**The seven principles of consistency (Ch. 11, "Thinking Like a Trader"), verbatim** — framed as the affirmation "I am a consistent winner because:" "1. I objectively identify my edges. 2. I predefine the risk of every trade. 3. I completely accept risk or I am willing to let go of the trade. 4. I act on my edges without reservation or hesitation. 5. I pay myself as the market makes money available to me. 6. I continually monitor my susceptibility for making errors. 7. I understand the absolute necessity of these principles of consistent success and, therefore, I never violate them."
 
 ## Key metrics/signals it defines + how to read/compute them
 
-None that are computable — and that honesty matters. Douglas defines **behavioral principles, not screener columns.** There is no "Douglas number" to plot or filter on. What it defines is a *decision discipline*: predefine risk, accept it before entry, execute mechanically, and judge yourself over a *series* of trades rather than by any single result. These principles are read as rules of conduct that wrap around the quantitative metrics other resources supply — they govern whether those metrics get respected, not what they compute.
+None that are computable, and that honesty matters. Douglas defines **behavioral principles, not screener columns.** There is no "Douglas number" to plot, filter, or sort on. What it supplies is a *decision discipline*: predefine risk, completely accept it before entry (or pass the trade), execute mechanically, and judge yourself over a *series* of trades rather than any single result. These principles are read as rules of conduct that wrap around the quantitative metrics the other resources supply — they govern whether those metrics get respected, not what they compute.
 
 ## How it maps to the Trader Screener
 
-It maps to *behavior around* the screener's risk columns, never to a single computable field:
+It maps to *behavior around* the screener's columns, never to a single computable field:
 
-- **§2g "Suggested position size (ATR-based)" and §2g "Stop distance (ATR multiple)".** These guardrails only work if obeyed. Douglas's "predefine and completely accept the risk" principle is exactly what makes a trader keep the ATR stop and the suggested size *after* a drawdown, instead of widening the stop or doubling up to "make it back" — the classic fear/revenge override.
-- **§2f "VIX".** Under pressure, traders rationalize away tail-risk warnings. The "anything can happen" truth reframes a VIX spike as a genuine, non-negotiable probability shift, so the signal drives de-risking and smaller size rather than getting dismissed.
-- **§2h "Put/Call ratio" and §2e "News sentiment".** Sentiment extremes are probabilities, not certainties. Douglas's probabilistic mindset stops a contrarian Put/Call or sentiment reading from being treated as a guaranteed reversal — and stops one losing trade from breaking the process.
-- **§2g "Max drawdown (historical)" and §2d "Composite score (model.json)".** Both are inputs to a *sample-level* edge; the discipline is to trust them across many trades rather than abandon the screen after a few losers.
+- **§2g "Suggested position size (ATR-based)" + §2g "Stop distance (ATR multiple)".** Guardrails only work if obeyed. Principle 2/3 — predefine the risk and *completely accept it* — is exactly what makes a trader keep the ATR stop and suggested size *after* a drawdown, instead of widening the stop or doubling up to "make it back." Maps to behavior, not a column.
+- **§2f "VIX".** Truth 1, "Anything can happen," reframes a VIX spike as a non-negotiable probability shift, so the tail-risk gauge drives de-risking rather than getting rationalized away under pressure.
+- **§2h "Put/Call ratio" + §2e "News sentiment".** Truths 3–4 (random win/loss distribution; an edge is only higher probability) stop a contrarian sentiment extreme from being treated as a guaranteed reversal, and stop one loss from breaking the process.
+- **§2d "Composite score (model.json)" + §2g "Max drawdown (historical)".** Sample-level edge inputs; the discipline (Ch. 7 casino model) is to trust them across many trades, not abandon the screen after a few losers.
 
 Bottom line: this resource informs the *usage policy* of the risk tab, not a new column.
 
 ## Actionable takeaways
 
-- Treat §2g size/stop outputs as pre-commitments made *before* entry; accept the loss up front so no in-trade fear can override them.
-- Judge the screener over a series of trades, not one — its edge is statistical.
-- Let §2f VIX and §2h Put/Call act as automatic de-risk triggers, not debatable ones.
-- Log every rule violation; per Douglas, monitoring your susceptibility to error is itself a principle.
+- Treat §2g size/stop outputs as pre-commitments made *before* entry; accept the loss up front (Principle 3) so no in-trade fear can override them.
+- Judge the screener over a series of trades — its edge is statistical (Truth 4; casino model).
+- Let §2f VIX and §2h Put/Call act as automatic de-risk triggers, not debatable ones (Truth 1).
+- Log every rule violation; Principle 6 — "continually monitor my susceptibility for making errors" — is itself a rule.
 
 ## Open questions
 
@@ -44,9 +47,4 @@ Bottom line: this resource informs the *usage policy* of the risk tab, not a new
 
 ## Sources
 
-- [Trading in the Zone — publisher page, Penguin Random House](https://www.penguinrandomhouse.com/books/350665/trading-in-the-zone-by-mark-douglas/)
-- [Mark Douglas and the 5 Fundamental Truths of Trading — Trading SOS](https://tradingsossos.com/mark-douglas-and-his-5-fundamental-truths-of-trading/)
-- [Key Takeaways from 'Trading in the Zone' — Trade That Swing](https://tradethatswing.com/key-takeaways-from-trading-in-the-zone-by-mark-douglas/)
-- [Think Like a Trader: 7 Principles of Consistency — Eminimind](https://eminimind.com/think-like-a-trader-7-principles-of-consistency/)
-- [Book Summary: Trading in the Zone — Readingraphics](https://readingraphics.com/book-summary-trading-in-the-zone/)
-- [Trading in the Zone: Chapter-by-Chapter Summary — TradeSummaries](https://www.tradesummaries.com/2025/03/trading-in-zone-by-mark-douglas.html)
+- **Primary:** Mark Douglas, *Trading in the Zone: Master the Market with Confidence, Discipline, and a Winning Attitude* (Prentice Hall / New York Institute of Finance, 2000) — summarized from the full text. Chapters referenced: Ch. 1 "The Road to Success: Fundamental, Technical, or Mental Analysis?"; Ch. 6 "The Market's Perspective"; Ch. 7 "The Trader's Edge: Thinking in Probabilities" (five fundamental truths; casino/blackjack model; carefree state of mind); Ch. 8 "Working with Your Beliefs"; Ch. 11 "Thinking Like a Trader" (seven principles of consistency).
