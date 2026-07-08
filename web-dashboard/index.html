@@ -105,6 +105,23 @@ const FEED_TIERS={
   paid:     {label:'Paid',      cls:'t-paid'},
   macro:    {label:'Macro',     cls:'t-macro'},
 };
+// ETF detection — upstream field name not finalized (pipeline is a separate repo);
+// check the plausible candidates defensively rather than block on one.
+function isETF(r){ return r.is_etf===true || r.asset_type==='ETF' || r.security_type==='ETF' || r.instrument_type==='ETF'; }
+function dqBadge(r){
+  if(r.etf_dq_flag==null) return '<span class="muted">–</span>';
+  return r.etf_dq_flag ? '<span class="neg" title="Persistent NAV premium/discount or tracking-difference drift">⚠ flag</span>' : '<span class="pos">ok</span>';
+}
+// Magic-Formula composite (Greenblatt): rank(ROIC desc) + rank(EBIT/EV desc), ascending = best.
+// Summed ordinal ranks, not blended raw values — sidesteps the % vs yield unit mismatch. 2 params (<=5).
+// ETFs and rows missing either factor are excluded from ranking (accounting doesn't fit the EBIT/tangible-capital math).
+function computeMagicRanks(rows){
+  const elig=rows.filter(r=>!isETF(r)&&r.roic!=null&&r.ebit_ev_yield!=null);
+  const eligSet=new Set(elig);
+  const roicRank=new Map([...elig].sort((a,b)=>b.roic-a.roic).map((r,i)=>[r,i+1]));
+  const yieldRank=new Map([...elig].sort((a,b)=>b.ebit_ev_yield-a.ebit_ev_yield).map((r,i)=>[r,i+1]));
+  rows.forEach(r=>{ r.magic_rank=eligSet.has(r)?roicRank.get(r)+yieldRank.get(r):null; });
+}
 // Central column registry — the ONE place columns are defined. Adding a metric
 // = adding one entry here (no <th>/<td> markup edits). Each entry:
 //   {key,label,num?,cls?,fmt?,tier}  where
@@ -119,20 +136,44 @@ const SCREENER_COLS=[
   {key:'ticker', label:'Ticker',                          tier:'collected', fmt:r=>`<b style="color:var(--accent)">${r.ticker}</b>`},
   {key:'name',   label:'Name',              cls:'muted',  tier:'collected', fmt:r=>(r.name||'').slice(0,38)},
   {key:'sector', label:'Sector',            cls:'muted',  tier:'collected', fmt:r=>r.sector||'–'},
+  {key:'mkt_cap',label:'Mkt Cap', num:true, cls:'muted',  tier:'collected', fmt:r=>r.mkt_cap!=null?`$${fmt(r.mkt_cap)}B${r.cap_size?` <span class="muted">(${r.cap_size})</span>`:''}`:'–'},
   {key:'price',  label:'Price',    num:true,               tier:'ohlcv',     fmt:r=>r.price!=null?'$'+fmt(r.price):'–'},
   {key:'score',  label:'Score',    num:true,               tier:'collected', fmt:r=>fmt(r.score,0)},
-  {key:'pe',     label:'P/E',      num:true,               tier:'collected', fmt:r=>fmt(r.pe,1)},
-  {key:'upside', label:'Upside %', num:true,               tier:'collected', fmt:r=>r.upside!=null?pct(r.upside):'–'},
+  {key:'pe',     label:'P/E',      num:true,               tier:'collected', fmt:r=>isETF(r)?'–':fmt(r.pe,1)},
+  {key:'ebit_ev_yield', label:'EBIT/EV', num:true,         tier:'collected', fmt:r=>(isETF(r)||r.ebit_ev_yield==null)?'–':pct(r.ebit_ev_yield)},
+  {key:'roic',   label:'ROIC',     num:true,               tier:'collected', fmt:r=>(isETF(r)||r.roic==null)?'–':pct(r.roic)},
+  {key:'magic_rank', label:'Magic Rank', num:true,          tier:'collected', fmt:r=>r.magic_rank??'–'},
+  {key:'upside', label:'Upside %', num:true,               tier:'collected', fmt:r=>(isETF(r)||r.upside==null)?'–':pct(r.upside)},
+  {key:'expense_ratio', label:'Expense', num:true,         tier:'collected', fmt:r=>(isETF(r)&&r.expense_ratio!=null)?pct(r.expense_ratio):'–'},
+  {key:'tco',    label:'TCO',      num:true,               tier:'collected', fmt:r=>(isETF(r)&&r.tco!=null)?pct(r.tco):'–'},
+  {key:'etf_dq_flag', label:'ETF DQ', cls:'muted',         tier:'collected', fmt:r=>isETF(r)?dqBadge(r):'–'},
 ];
 // per-column visibility (column picker) — default all shown.
 const colVisible=Object.fromEntries(SCREENER_COLS.map(c=>[c.key,true]));
 const tierBadge=t=>{const m=FEED_TIERS[t];return `<span class="tier ${m?m.cls:''}">${m?m.label:t}</span>`;};
+// pre-rank filters (Greenblatt universe hygiene) — NOT columns; remove rows before ranking/display.
+function isExcludedSector(r,flags){
+  const sec=(r.sector||'').toLowerCase();
+  if(flags.fin && sec.includes('financ')) return true;
+  if(flags.util && sec.includes('util')) return true;
+  if(flags.adr && (r.is_adr===true || /\bADR\b/i.test(r.name||''))) return true;
+  return false;
+}
 
 async function renderScreener(){
   const v=document.getElementById('view');
   v.innerHTML=`<div class="controls">
     <input type="text" id="q" placeholder="Search ticker / name…" />
     <select id="sector"><option value="">All sectors</option></select>
+    <select id="capFloor" title="Greenblatt cap-floor pre-rank filter">
+      <option value="0">Cap floor: none</option>
+      <option value="0.05">Cap floor: $50M+</option>
+      <option value="0.2">Cap floor: $200M+</option>
+      <option value="1">Cap floor: $1B+</option>
+    </select>
+    <label class="colitem" style="display:inline-flex;border:1px solid var(--border);border-radius:6px"><input type="checkbox" id="exclFin"> Excl. financials</label>
+    <label class="colitem" style="display:inline-flex;border:1px solid var(--border);border-radius:6px"><input type="checkbox" id="exclUtil"> Excl. utilities</label>
+    <label class="colitem" style="display:inline-flex;border:1px solid var(--border);border-radius:6px"><input type="checkbox" id="exclAdr"> Excl. ADRs</label>
     <details class="colpick"><summary>Columns ▾</summary><div class="colmenu" id="colmenu"></div></details>
     <span class="muted" id="count"></span></div>
     <div id="tbl"><div class="loading">Loading stocks…</div></div>`;
@@ -144,6 +185,10 @@ async function renderScreener(){
     secs.forEach(s=>{const o=document.createElement('option');o.value=o.textContent=s;sel.appendChild(o);});
     document.getElementById('q').oninput=drawScreener;
     sel.onchange=drawScreener;
+    document.getElementById('capFloor').onchange=drawScreener;
+    document.getElementById('exclFin').onchange=drawScreener;
+    document.getElementById('exclUtil').onchange=drawScreener;
+    document.getElementById('exclAdr').onchange=drawScreener;
     renderColMenu();
     drawScreener();
   }catch(e){ v.querySelector('#tbl').innerHTML=`<div class="err">${e.message}<br>Is the API running? (uvicorn api:app)</div>`; }
@@ -158,7 +203,14 @@ function toggleCol(k,on){ colVisible[k]=on; drawScreener(); }
 function drawScreener(){
   const q=(document.getElementById('q').value||'').toLowerCase();
   const sec=document.getElementById('sector').value;
-  let rows=screenerRows.filter(r=>
+  const capFloor=Number(document.getElementById('capFloor').value||0);
+  const exclFlags={fin:document.getElementById('exclFin').checked,util:document.getElementById('exclUtil').checked,adr:document.getElementById('exclAdr').checked};
+  // pre-rank filters (not columns) — apply before ranking so excluded names never enter the composite
+  const universe=screenerRows.filter(r=>
+    (!capFloor || (r.mkt_cap!=null && r.mkt_cap>=capFloor)) &&
+    !isExcludedSector(r,exclFlags));
+  computeMagicRanks(universe);
+  let rows=universe.filter(r=>
     (!sec||r.sector===sec) &&
     (!q || (r.ticker||'').toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q)));
   rows.sort((a,b)=>{ let x=a[sortKey],y=b[sortKey];
