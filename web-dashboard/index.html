@@ -55,6 +55,10 @@
   .colitem{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:6px;cursor:pointer;white-space:nowrap}
   .colitem:hover{background:#21262d}
   .colitem .tier{margin-left:auto}
+  .t-v1{color:#f0883e;background:#f0883e1a;border-color:#f0883e55}
+  /* liquidity disclosure note — makes the un-measured dimensions explicit */
+  .lqnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #e3b341;border-radius:6px;background:#e3b3410d;color:var(--muted);font-size:12px;line-height:1.55}
+  .lqnote b{color:var(--txt)}
 </style>
 </head>
 <body>
@@ -90,6 +94,14 @@ async function jget(path){
 }
 function fmt(v,d=2){ return v==null?'–':Number(v).toLocaleString(undefined,{maximumFractionDigits:d}); }
 function pct(v){ if(v==null) return '<span class="muted">–</span>'; const c=v>=0?'pos':'neg'; const s=v>=0?'+':''; return `<span class="${c}">${s}${v.toFixed(2)}%</span>`; }
+// compact magnitude (1.2M, 3.4B) for volume / dollar-volume columns
+function compact(v){ if(v==null||isNaN(v)) return '–'; const a=Math.abs(v);
+  if(a>=1e12) return (v/1e12).toFixed(2)+'T';
+  if(a>=1e9)  return (v/1e9).toFixed(2)+'B';
+  if(a>=1e6)  return (v/1e6).toFixed(2)+'M';
+  if(a>=1e3)  return (v/1e3).toFixed(1)+'K';
+  return String(Math.round(v)); }
+const money=v=>v==null?'–':'$'+compact(v);
 
 async function ping(){
   try{ const h=await jget('/health'); document.getElementById('dot').classList.toggle('ok',!!h.ok); return h; }
@@ -105,6 +117,73 @@ const FEED_TIERS={
   paid:     {label:'Paid',      cls:'t-paid'},
   macro:    {label:'Macro',     cls:'t-macro'},
 };
+// ── Liquidity layer (issue #37) ───────────────────────────
+// Tradeability is the FIRST-CLASS gate every surfaced name must pass. Dollar
+// volume (ADV × price) is Harris's honest free stand-in for the missing quote
+// feed — it proxies ONLY the *depth* dimension of his four (width/spread, depth,
+// immediacy, resiliency); the other three need a paid quote feed (see naV1).
+// ETF branch: an ETF's real tradeability is its underlying BASKET, not its
+// screen ADV (CFA ETF Guide) — screen ADV is a floor, never a ceiling.
+let LIQ_FLOOR=0;   // dollar-volume hard floor (0 = off); set by the control below
+const isETF=r=>r.is_etf===true||r.instrument_type==='etf'||(r.asset_type||r.quote_type||'').toString().toUpperCase()==='ETF';
+// screen (on-exchange) dollar volume for a row: prefer upstream field, else ADV × price
+function screenDollarVol(r){
+  if(r.dollar_volume!=null) return r.dollar_volume;
+  if(r.adv!=null && r.price!=null) return r.adv*r.price;
+  return null;
+}
+// ETF basket (underlying / implied) liquidity: Σ constituent dollar-ADV × weight.
+// Prefer an upstream-precomputed field; else derive from already-collected holdings.
+function basketDollarVol(r){
+  if(r.basket_dollar_volume!=null) return r.basket_dollar_volume;
+  if(Array.isArray(r.holdings)){
+    let sum=0, any=false;
+    for(const h of r.holdings){
+      const dv = h.dollar_volume!=null ? h.dollar_volume
+               : (h.adv!=null && h.price!=null ? h.adv*h.price : null);
+      const w = h.weight!=null ? h.weight : null;
+      if(dv!=null && w!=null){ sum+=dv*w; any=true; }
+    }
+    return any ? sum : null;
+  }
+  return null;
+}
+// Effective tradeable dollar volume used by the gate + sort. For ETFs the basket
+// is the capacity measure; screen ADV can only RAISE it (a floor), never cap it.
+function effDollarVol(r){
+  const screen=screenDollarVol(r);
+  if(isETF(r)){
+    const basket=basketDollarVol(r);
+    if(basket!=null) return screen!=null ? Math.max(basket,screen) : basket;
+  }
+  return screen;
+}
+// THE hard liquidity gate. Later momentum / value / smart-money views must call
+// this so every surfaced name passes the same tradeability floor.
+function passesLiquidityFloor(r){
+  if(!LIQ_FLOOR) return true;
+  if(isETF(r)){
+    // ETFs gate on BASKET liquidity; screen ADV is a floor, never a ceiling — so
+    // never hard-reject an ETF on its own screen ADV. Unknown basket ⇒ pass.
+    const basket=basketDollarVol(r);
+    if(basket==null) return true;
+    return Math.max(basket, screenDollarVol(r)??0) >= LIQ_FLOOR;
+  }
+  const liq=screenDollarVol(r);
+  return liq!=null && liq>=LIQ_FLOOR;
+}
+// dollar-volume cell — ETFs show basket liquidity (the real capacity), tagged so
+// the screen-ADV rejection is explicitly BLANKED for ETF rows.
+function dvolCell(r){
+  if(isETF(r)){
+    const basket=basketDollarVol(r);
+    if(basket!=null) return `${money(basket)} <span class="tier t-ohlcv" title="ETF gated on basket liquidity (Σ constituent $ADV × weight), not screen ADV">basket</span>`;
+    return `${money(screenDollarVol(r))} <span class="muted" title="ETF — no basket holdings collected; screen $vol shown but never used to hard-reject an ETF">etf</span>`;
+  }
+  return money(screenDollarVol(r));
+}
+// not-in-v1 cell (spread / depth / resiliency — need a paid quote feed)
+const naV1=()=>'<span class="muted" title="Order-book liquidity dimension — needs a paid quote feed. Not in v1.">n/a · v1</span>';
 // Central column registry — the ONE place columns are defined. Adding a metric
 // = adding one entry here (no <th>/<td> markup edits). Each entry:
 //   {key,label,num?,cls?,fmt?,tier}  where
@@ -120,21 +199,42 @@ const SCREENER_COLS=[
   {key:'name',   label:'Name',              cls:'muted',  tier:'collected', fmt:r=>(r.name||'').slice(0,38)},
   {key:'sector', label:'Sector',            cls:'muted',  tier:'collected', fmt:r=>r.sector||'–'},
   {key:'price',  label:'Price',    num:true,               tier:'ohlcv',     fmt:r=>r.price!=null?'$'+fmt(r.price):'–'},
+  // ── liquidity layer (default columns) — the tradeability gate every view passes
+  {key:'adv',           label:'ADV',   num:true,           tier:'ohlcv',     fmt:r=>r.adv!=null?compact(r.adv):'–'},
+  {key:'dollar_volume', label:'$ Vol', num:true,           tier:'ohlcv',     sortVal:r=>effDollarVol(r), fmt:r=>dvolCell(r)},
   {key:'score',  label:'Score',    num:true,               tier:'collected', fmt:r=>fmt(r.score,0)},
   {key:'pe',     label:'P/E',      num:true,               tier:'collected', fmt:r=>fmt(r.pe,1)},
   {key:'upside', label:'Upside %', num:true,               tier:'collected', fmt:r=>r.upside!=null?pct(r.upside):'–'},
+  // ── un-measured liquidity dimensions — PRESENT but explicitly NOT in v1 (need a
+  // paid quote feed). Harris's width(spread)/immediacy/resiliency + true order-book
+  // depth. Default hidden; discoverable & flagged in the column picker.
+  {key:'spread',     label:'Spread',     num:true,         tier:'paid', notInV1:true, fmt:naV1},
+  {key:'depth',      label:'Depth',      num:true,         tier:'paid', notInV1:true, fmt:naV1},
+  {key:'resiliency', label:'Resiliency', num:true,         tier:'paid', notInV1:true, fmt:naV1},
 ];
-// per-column visibility (column picker) — default all shown.
-const colVisible=Object.fromEntries(SCREENER_COLS.map(c=>[c.key,true]));
+// per-column visibility (column picker) — all shown except not-in-v1 columns.
+const colVisible=Object.fromEntries(SCREENER_COLS.map(c=>[c.key,!c.notInV1]));
 const tierBadge=t=>{const m=FEED_TIERS[t];return `<span class="tier ${m?m.cls:''}">${m?m.label:t}</span>`;};
+const v1Badge=c=>c.notInV1?'<span class="tier t-v1" title="not in v1 — needs a paid quote feed">v1✗</span>':'';
 
 async function renderScreener(){
   const v=document.getElementById('view');
   v.innerHTML=`<div class="controls">
     <input type="text" id="q" placeholder="Search ticker / name…" />
     <select id="sector"><option value="">All sectors</option></select>
+    <select id="dvolFloor" title="Hard liquidity gate — hide names below this daily dollar-volume floor (ETFs judged on basket liquidity)">
+      <option value="0">$ vol floor: any</option>
+      <option value="100000">≥ $100K/day</option>
+      <option value="1000000">≥ $1M/day</option>
+      <option value="5000000">≥ $5M/day</option>
+      <option value="20000000">≥ $20M/day</option>
+      <option value="100000000">≥ $100M/day</option>
+    </select>
     <details class="colpick"><summary>Columns ▾</summary><div class="colmenu" id="colmenu"></div></details>
     <span class="muted" id="count"></span></div>
+    <div class="lqnote">
+      <b>Liquidity = the first-class gate.</b> Dollar volume (ADV × price) is a free stand-in for a quote feed, proxying only <b>1 of Harris's 4 liquidity dimensions — depth</b>. Spread (width), immediacy &amp; resiliency need a paid quote feed → <b>not in v1</b> (see the flagged columns). <b>ETFs</b> gate on <b>basket liquidity</b> (Σ constituent $ADV × weight), not screen ADV — a low-volume ETF on a liquid basket is not rejected.
+    </div>
     <div id="tbl"><div class="loading">Loading stocks…</div></div>`;
   try{
     const d=await jget('/api/stocks?limit=1000');
@@ -144,6 +244,9 @@ async function renderScreener(){
     secs.forEach(s=>{const o=document.createElement('option');o.value=o.textContent=s;sel.appendChild(o);});
     document.getElementById('q').oninput=drawScreener;
     sel.onchange=drawScreener;
+    const df=document.getElementById('dvolFloor');
+    df.value=String(LIQ_FLOOR);
+    df.onchange=()=>{ LIQ_FLOOR=Number(df.value)||0; drawScreener(); };
     renderColMenu();
     drawScreener();
   }catch(e){ v.querySelector('#tbl').innerHTML=`<div class="err">${e.message}<br>Is the API running? (uvicorn api:app)</div>`; }
@@ -152,24 +255,29 @@ async function renderScreener(){
 function renderColMenu(){
   const m=document.getElementById('colmenu'); if(!m) return;
   m.innerHTML=SCREENER_COLS.map(c=>
-    `<label class="colitem"><input type="checkbox" ${colVisible[c.key]?'checked':''} onchange="toggleCol('${c.key}',this.checked)"> ${c.label} ${tierBadge(c.tier)}</label>`).join('');
+    `<label class="colitem"><input type="checkbox" ${colVisible[c.key]?'checked':''} onchange="toggleCol('${c.key}',this.checked)"> ${c.label} ${tierBadge(c.tier)}${v1Badge(c)}</label>`).join('');
 }
 function toggleCol(k,on){ colVisible[k]=on; drawScreener(); }
 function drawScreener(){
   const q=(document.getElementById('q').value||'').toLowerCase();
   const sec=document.getElementById('sector').value;
-  let rows=screenerRows.filter(r=>
+  const searched=screenerRows.filter(r=>
     (!sec||r.sector===sec) &&
     (!q || (r.ticker||'').toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q)));
-  rows.sort((a,b)=>{ let x=a[sortKey],y=b[sortKey];
+  // hard liquidity gate — ETF rows judged on basket liquidity, not screen ADV
+  let rows=searched.filter(passesLiquidityFloor);
+  const gated=searched.length-rows.length;
+  const scol=SCREENER_COLS.find(c=>c.key===sortKey);
+  rows.sort((a,b)=>{ let x=scol&&scol.sortVal?scol.sortVal(a):a[sortKey], y=scol&&scol.sortVal?scol.sortVal(b):b[sortKey];
     if(x==null)return 1; if(y==null)return -1;
     if(typeof x==='string')return sortAsc?x.localeCompare(y):y.localeCompare(x);
     return sortAsc?x-y:y-x; });
-  document.getElementById('count').textContent=`${rows.length} stocks`;
+  document.getElementById('count').textContent=
+    `${rows.length} stocks`+(LIQ_FLOOR?` · ${gated} below $${compact(LIQ_FLOOR)}/day $vol floor`:'');
   const cols=SCREENER_COLS.filter(c=>colVisible[c.key]);
   const th=cols.map(c=>{
     const arrow=sortKey===c.key?(sortAsc?' ▲':' ▼'):'';
-    return `<th class="${c.num?'num':''}" onclick="setSort('${c.key}')" title="${c.label} · ${FEED_TIERS[c.tier]?FEED_TIERS[c.tier].label:c.tier} feed">${c.label}${arrow} ${tierBadge(c.tier)}</th>`;
+    return `<th class="${c.num?'num':''}" onclick="setSort('${c.key}')" title="${c.label} · ${FEED_TIERS[c.tier]?FEED_TIERS[c.tier].label:c.tier} feed">${c.label}${arrow} ${tierBadge(c.tier)}${v1Badge(c)}</th>`;
   }).join('');
   const body=rows.slice(0,300).map(r=>`<tr style="cursor:pointer" onclick="openStock('${r.ticker}')" title="Open ${r.ticker} detail">`+
     cols.map(c=>`<td class="${c.num?'num':''}${c.cls?' '+c.cls:''}">${c.fmt?c.fmt(r):(r[c.key]??'–')}</td>`).join('')+
@@ -404,6 +512,19 @@ async function openStock(tk){
       html+=`<div class="muted" style="font-size:12px">52w range $${fmt(s.low52)} – $${fmt(s.high52)}</div>
         <div class="rangebar" style="max-width:320px;margin:6px 0 14px"><i style="left:${pos}%"></i></div>`;
     }
+    // liquidity strip — tradeability first, with the un-measured dimensions disclosed
+    {
+      const etf=isETF(s), basket=etf?basketDollarVol(s):null, screen=screenDollarVol(s);
+      html+=`<div style="margin:0 0 8px">
+        <span class="pill">ADV ${s.adv!=null?compact(s.adv):'–'}</span>
+        <span class="pill">$ vol ${money(screen)}</span>
+        ${etf&&basket!=null?`<span class="pill" title="ETF capacity = Σ constituent $ADV × weight; screen ADV is a floor, never a ceiling">basket liq ${money(basket)}</span>`:''}
+        ${etf?'<span class="pill muted" title="ETF gated on basket liquidity, not screen ADV">ETF · basket-gated</span>':''}
+      </div>
+      <div class="lqnote" style="max-width:760px">
+        <b>Liquidity (v1 = depth only).</b> Dollar volume proxies just <b>1 of Harris's 4 liquidity dimensions — depth</b>. <b>Spread</b> (width), <b>immediacy</b> &amp; <b>resiliency</b> need a paid quote feed and are <b>not in v1</b>.${etf?' This ETF is gated on <b>basket liquidity</b> (underlying holdings), not its screen ADV.':''}
+      </div>`;
+    }
     // metric blocks
     const blocks=[
       ['Valuation',[['P/E',s.pe],['Fwd P/E',s.fwd_pe],['P/B',s.pb],['P/S',s.ps],['EV/EBITDA',s.ev_ebitda],['PEG',s.peg],['Div yield',s.div_yield,'%'],['Beta',s.beta]]],
@@ -508,6 +629,24 @@ async function renderEducation(){
   // each entry: metric, feedTier, significance, sources[], multiSource, exampleSignal
   // content issues (#37…) append their section groups here.
   const GROUPS=[
+    ['Liquidity — the first-class gate (issue #37)', [
+      {metric:'Dollar volume (ADV × price)', feedTier:'ohlcv', multiSource:true,
+        sources:['Harris — Trading &amp; Exchanges','How to Read a Tear Sheet','Chan — Quantitative Trading','Greenblatt — Magic Formula','Fama-French'],
+        significance:'Tradeability is the gate every other signal passes through. Dollar volume is Harris’s honest free stand-in for a missing quote feed, proxying only <b>1 of his 4 liquidity dimensions — depth</b>. Ship it as a P1 default column <b>and</b> a hard floor (the Tear Sheet calls ADV “the most underrated line and a HARD FILTER”). Greenblatt’s cap-floor only handles liquidity implicitly — this makes it explicit; Chan treats capacity as a first-class filter; Fama-French sets factor breakpoints from liquid names only.',
+        exampleSignal:'dollar_volume = adv * price\nsurface(name) only if dollar_volume >= FLOOR   # hard gate, every view'},
+      {metric:'Average daily volume (ADV)', feedTier:'ohlcv', multiSource:true,
+        sources:['How to Read a Tear Sheet','Chan — Quantitative Trading'],
+        significance:'Avg daily share volume from nightly OHLCV — the raw capacity measure behind dollar volume. Chan: the independent edge lives at <b>low capacity</b>, so ADV is a sizing input, not just a reject. For ETFs it is a <b>floor, never a ceiling</b> (basket rules below).',
+        exampleSignal:'adv = mean(volume, 20d)   # shares/day'},
+      {metric:'ETF basket liquidity (Σ constituent $ADV × weight)', feedTier:'ohlcv', multiSource:false,
+        sources:['CFA ETF Guide'],
+        significance:'An ETF’s real tradeability is its <b>underlying basket</b>, not its screen ADV — so liquidity logic <b>branches by instrument type</b>. Basket liquidity is computed free from already-collected holdings; screen ADV can only raise it (a floor), never cap it. The stock-ADV rejection is blanked for ETF rows: a thin-screen ETF on a liquid basket is <b>not</b> rejected.',
+        exampleSignal:'basket_liq = Σ(constituent_adv * price * weight)\nETF passes if max(basket_liq, screen_$vol) >= FLOOR'},
+      {metric:'Spread / depth / resiliency — not in v1', feedTier:'paid', multiSource:false,
+        sources:['Harris — Trading &amp; Exchanges'],
+        significance:'The other <b>3 of Harris’s 4</b> liquidity dimensions — width (spread), immediacy, resiliency — need a paid real-time quote feed. Kept as <b>present-but-flagged</b> columns so the un-measured dimensions are explicit, not silently missing.',
+        exampleSignal:'// not in v1 — requires an L1/L2 quote feed\nspread = ask - bid; depth = book_size; resiliency = recovery_after_imbalance'},
+    ]],
   ];
   const tierColor={ohlcv:'var(--green)',collected:'var(--accent)',macro:'#a371f7',paid:'var(--red)'};
   let html=`<div style="margin:6px 0 4px"><span class="big" style="font-size:22px">Learning the business of trading</span></div>
