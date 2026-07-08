@@ -59,6 +59,11 @@
   /* liquidity disclosure note — makes the un-measured dimensions explicit */
   .lqnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #e3b341;border-radius:6px;background:#e3b3410d;color:var(--muted);font-size:12px;line-height:1.55}
   .lqnote b{color:var(--txt)}
+  /* macro regime banner (issue #39) — same note-box language, colored by regime */
+  .macronote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:6px;background:#2f81f70d;color:var(--muted);font-size:12px;line-height:1.55}
+  .macronote.risk-off{border-left-color:var(--red);background:#f851490d}
+  .macronote.risk-on{border-left-color:var(--green);background:#3fb9500d}
+  .macronote b{color:var(--txt)}
 </style>
 </head>
 <body>
@@ -198,6 +203,135 @@ function dvolCell(r){
 }
 // not-in-v1 cell (spread / depth / resiliency — need a paid quote feed)
 const naV1=()=>'<span class="muted" title="Order-book liquidity dimension — needs a paid quote feed. Not in v1.">n/a · v1</span>';
+
+// ── Macro / regime layer (issue #39) ──────────────────────────────────────
+// Fast, coincident gauge (VIX level + term structure) + slow, leading gauge
+// (yield-curve recession probit) — both FRED, both computed client-side from
+// raw upstream values (same "raw upstream, derive downstream" split as the
+// liquidity layer's effDollarVol()). Regime SOFT-gates default screener
+// filters — Chan: regime is a strategy-family switch; Douglas: a VIX spike is
+// a non-negotiable de-risk trigger, but here that means a nudged default, not
+// a lockout — every nudge stays user-overridable via the existing controls.
+const VIX_BUCKETS=[
+  {max:15,       key:'calm',     label:'Calm',     color:'var(--green)'},
+  {max:20,       key:'normal',   label:'Normal',   color:'var(--accent)'},
+  {max:30,       key:'elevated', label:'Elevated', color:'#e3b341'},
+  {max:40,       key:'stress',   label:'Stress',   color:'var(--red)'},
+  {max:Infinity, key:'panic',    label:'Panic',    color:'#ff6b6b'},
+];
+// rule-of-thumb bands — Cboe VIX methodology (Education/summaries/cboe-vix-index.md)
+function vixBucket(level){
+  if(level==null) return null;
+  return VIX_BUCKETS.find(b=>level<b.max)||VIX_BUCKETS[VIX_BUCKETS.length-1];
+}
+// term-structure inversion (VIX/VIX3M ratio) — a stronger crisis tell than level
+// alone: >1.0 = inverted/backwardation (near-dated vol pricier), >1.10 = deep dislocation.
+function vixInversion(vix,vix3m){
+  if(vix==null||vix3m==null||!vix3m) return null;
+  const ratio=vix/vix3m;
+  return {ratio, inverted:ratio>1.0, deep:ratio>1.10};
+}
+// standard normal CDF via Abramowitz–Stegun 7.1.26 erf approximation (max err 1.5e-7)
+function erf(x){
+  const sign=x<0?-1:1; x=Math.abs(x);
+  const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
+  const t=1/(1+p*x);
+  const y=1-(((((a5*t+a4)*t)+a3)*t+a2)*t+a1)*t*Math.exp(-x*x);
+  return sign*y;
+}
+const normCdf=x=>0.5*(1+erf(x/Math.SQRT2));
+// Estrella–Mishkin (1998) probit, fit on monthly US data ~1959–1995:
+// P(recession in 12m) = Φ(α + β·spread), spread = T10Y3M in percentage points.
+// ⚠ constants NOT re-verified against a current NY Fed refit — flagged per issue #39
+// acceptance criteria; see Education/summaries/yield-curve-leading-indicator-nyfed.md.
+const RECESSION_PROBIT_ALPHA=-0.5333, RECESSION_PROBIT_BETA=-0.6629;
+function recessionProb(spreadPct){
+  if(spreadPct==null) return null;
+  return normCdf(RECESSION_PROBIT_ALPHA+RECESSION_PROBIT_BETA*spreadPct);
+}
+function recessionBand(p){
+  if(p==null) return {label:'–',color:'var(--muted)'};
+  if(p<0.30) return {label:'green',color:'var(--green)'};
+  if(p<0.50) return {label:'amber',color:'#e3b341'};
+  return {label:'red',color:'var(--red)'};
+}
+let MACRO={loaded:false, vix:null, vix9d:null, vix3m:null, spread:null, spreadMonthly:false, asof:null};
+let macroPromise=null;
+let regimeDefaultsApplied=false;
+let CAP_FLOOR=0; // persisted across screener re-renders, same pattern as LIQ_FLOOR
+function regimeVerdict(){
+  const vb=vixBucket(MACRO.vix);
+  const prob=recessionProb(MACRO.spread);
+  const riskOff=(MACRO.vix!=null&&MACRO.vix>30)||(prob!=null&&prob>=0.5);
+  return {vixBucket:vb, prob, riskOff, inversion:vixInversion(MACRO.vix,MACRO.vix3m)};
+}
+// soft pre-set, applied once per session load: risk-off nudges the liquidity + cap
+// floor DEFAULTS tighter. Never forced — both stay user-editable selects. "VIX>30
+// suppresses new longs" == a tighter default $-volume floor, not a hard block.
+function applyRegimeDefaults(){
+  if(regimeDefaultsApplied||!MACRO.loaded) return;
+  regimeDefaultsApplied=true;
+  if(regimeVerdict().riskOff){
+    if(!LIQ_FLOOR) LIQ_FLOOR=1000000;
+    if(!CAP_FLOOR) CAP_FLOOR=0.2;
+  }
+}
+function loadMacro(){
+  if(!macroPromise) macroPromise=(async()=>{
+    try{
+      const d=await jget('/api/macro');
+      MACRO={loaded:true, vix:d.vix??null, vix9d:d.vix9d??null, vix3m:d.vix3m??null,
+        spread:(d.t10y3m_monthly??d.t10y3m??null), spreadMonthly:d.t10y3m_monthly!=null,
+        asof:d.asof??null};
+    }catch{
+      MACRO={loaded:false, vix:null, vix9d:null, vix3m:null, spread:null, spreadMonthly:false, asof:null};
+    }
+    applyRegimeDefaults();
+  })();
+  return macroPromise;
+}
+function capFloorLabel(v){ return v>=1?'$'+v+'B':'$'+(v*1000).toFixed(0)+'M'; }
+// shared regime banner — used by both the Screener controls and the Macro tab
+function regimeBannerHTML(){
+  if(!MACRO.loaded) return '';
+  const rv=regimeVerdict(), vb=rv.vixBucket, rb=recessionBand(rv.prob);
+  const cls=rv.riskOff?'risk-off':'risk-on';
+  const vixPill=vb?`<span class="pill" style="border:1px solid ${vb.color};color:${vb.color}">VIX ${fmt(MACRO.vix,1)} · ${vb.label}</span>`:'';
+  const recPill=`<span class="pill" style="border:1px solid ${rb.color};color:${rb.color}">P(recession 12m) ${rv.prob!=null?(rv.prob*100).toFixed(0)+'%':'–'}</span>`;
+  const invNote=(rv.inversion&&rv.inversion.inverted)?`<span class="pill" style="border:1px solid var(--red);color:var(--red)" title="VIX/VIX3M ratio ${rv.inversion.ratio.toFixed(2)} — near-term vol pricier than 3m; a stronger crisis tell than level alone">term-structure inverted${rv.inversion.deep?' (deep)':''}</span>`:'';
+  const defaultsNote=rv.riskOff
+    ?`Defaults nudged: $vol floor ≥ $${compact(LIQ_FLOOR)}/day, cap floor ≥ ${capFloorLabel(CAP_FLOOR)} — <b>soft, override any filter above.</b>`
+    :'No default-filter changes for this regime.';
+  return `<div class="macronote ${cls}">
+    <div style="margin-bottom:4px">${vixPill} ${recPill} ${invNote}</div>
+    <b>Regime: ${rv.riskOff?'risk-off':'risk-on / normal'}.</b> ${defaultsNote}
+    Yield-curve inversion is a <b>12-month leading warning, not a sell trigger</b>.
+  </div>`;
+}
+
+// ── Momentum layer (issue #40) ────────────────────────────
+// Fama-French prior(2,12): momentum = cumulative return t-12→t-2, SKIPPING the
+// most recent month (t-1) — that's the actual winner/loser bucketing rule; keeping
+// the skip-month contaminates the factor with short-term reversal. return_1/3/6/12m
+// and mom_factor are upstream (nightly-OHLCV) fields; RS % is the only thing
+// computed here — the cross-sectional percentile rank of mom_factor.
+// Harris: momentum is a price-discovery signal that price impact eats without a
+// liquidity gate, so the ranking POOL is liquid names only (passesLiquidityFloor),
+// same as Fama-French set factor breakpoints from liquid names only — an illiquid
+// micro-cap must never warp the percentile cuts for the liquid names around it.
+function computeMomentumRanks(rows){
+  const elig=rows.filter(r=>r.mom_factor!=null&&passesLiquidityFloor(r));
+  const n=elig.length;
+  const sorted=[...elig].sort((a,b)=>a.mom_factor-b.mom_factor); // ascending: worst → best
+  const pctile=new Map(sorted.map((r,i)=>[r, n>1?i/(n-1)*100:50]));
+  rows.forEach(r=>{ r.rs_percentile=pctile.has(r)?pctile.get(r):null; });
+}
+// RS-percentile cell — color-coded like a return (top-tercile green, bottom-tercile red)
+function rsCell(r){
+  if(r.rs_percentile==null) return '<span class="muted">–</span>';
+  const v=r.rs_percentile, c=v>=70?'pos':v<=30?'neg':'';
+  return `<span class="${c}">${Math.round(v)}</span>`;
+}
 // Central column registry — the ONE place columns are defined. Adding a metric
 // = adding one entry here (no <th>/<td> markup edits). Each entry:
 //   {key,label,num?,cls?,fmt?,tier}  where
@@ -217,6 +351,17 @@ const SCREENER_COLS=[
   // ── liquidity layer (default columns) — the tradeability gate every view passes
   {key:'adv',           label:'ADV',   num:true,           tier:'ohlcv',     fmt:r=>r.adv!=null?compact(r.adv):'–'},
   {key:'dollar_volume', label:'$ Vol', num:true,           tier:'ohlcv',     sortVal:r=>effDollarVol(r), fmt:r=>dvolCell(r)},
+  // ── momentum layer (issue #40) — trailing returns, skip-month factor, RS rank
+  {key:'return_1m',  label:'Ret 1M',  num:true,             tier:'ohlcv',     fmt:r=>pct(r.return_1m)},
+  {key:'return_3m',  label:'Ret 3M',  num:true,             tier:'ohlcv',     fmt:r=>pct(r.return_3m)},
+  {key:'return_6m',  label:'Ret 6M',  num:true,             tier:'ohlcv',     fmt:r=>pct(r.return_6m)},
+  {key:'return_12m', label:'Ret 12M', num:true,             tier:'ohlcv',     fmt:r=>pct(r.return_12m)},
+  {key:'mom_factor', label:'Momentum', num:true,            tier:'ohlcv',
+    tip:'Fama-French prior(2,12): cumulative return t-12→t-2, skipping the most recent month (t-1) to avoid short-term-reversal contamination. Re-ranked monthly.',
+    fmt:r=>pct(r.mom_factor)},
+  {key:'rs_percentile', label:'RS %ile', num:true,          tier:'ohlcv',
+    tip:'Cross-sectional percentile rank of the momentum factor vs. the universe (0=weakest, 100=strongest). Breakpoints computed from liquid names only — illiquid micro-caps never warp the cuts, and no name failing the $ vol floor can surface here.',
+    fmt:r=>rsCell(r)},
   {key:'score',  label:'Score',    num:true,               tier:'collected', fmt:r=>fmt(r.score,0)},
   {key:'pe',     label:'P/E',      num:true,               tier:'collected', fmt:r=>isETF(r)?'–':fmt(r.pe,1)},
   {key:'ebit_ev_yield', label:'EBIT/EV', num:true,         tier:'collected', fmt:r=>(isETF(r)||r.ebit_ev_yield==null)?'–':pct(r.ebit_ev_yield)},
@@ -248,10 +393,12 @@ const v1Badge=c=>c.notInV1?'<span class="tier t-v1" title="not in v1 — needs a
 
 async function renderScreener(){
   const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading…</div>';
+  await loadMacro(); // regime nudges LIQ_FLOOR/CAP_FLOOR defaults before controls render (once/session)
   v.innerHTML=`<div class="controls">
     <input type="text" id="q" placeholder="Search ticker / name…" />
     <select id="sector"><option value="">All sectors</option></select>
-    <select id="capFloor" title="Greenblatt cap-floor pre-rank filter">
+    <select id="capFloor" title="Greenblatt cap-floor pre-rank filter (nudged by macro regime — see banner below)">
       <option value="0">Cap floor: none</option>
       <option value="0.05">Cap floor: $50M+</option>
       <option value="0.2">Cap floor: $200M+</option>
@@ -260,7 +407,7 @@ async function renderScreener(){
     <label class="colitem" style="display:inline-flex;border:1px solid var(--border);border-radius:6px"><input type="checkbox" id="exclFin"> Excl. financials</label>
     <label class="colitem" style="display:inline-flex;border:1px solid var(--border);border-radius:6px"><input type="checkbox" id="exclUtil"> Excl. utilities</label>
     <label class="colitem" style="display:inline-flex;border:1px solid var(--border);border-radius:6px"><input type="checkbox" id="exclAdr"> Excl. ADRs</label>
-    <select id="dvolFloor" title="Hard liquidity gate — hide names below this daily dollar-volume floor (ETFs judged on basket liquidity)">
+    <select id="dvolFloor" title="Hard liquidity gate — hide names below this daily dollar-volume floor (ETFs judged on basket liquidity; nudged by macro regime — see banner below)">
       <option value="0">$ vol floor: any</option>
       <option value="100000">≥ $100K/day</option>
       <option value="1000000">≥ $1M/day</option>
@@ -270,6 +417,7 @@ async function renderScreener(){
     </select>
     <details class="colpick"><summary>Columns ▾</summary><div class="colmenu" id="colmenu"></div></details>
     <span class="muted" id="count"></span></div>
+    ${regimeBannerHTML()}
     <div class="lqnote">
       <b>Liquidity = the first-class gate.</b> Dollar volume (ADV × price) is a free stand-in for a quote feed, proxying only <b>1 of Harris's 4 liquidity dimensions — depth</b>. Spread (width), immediacy &amp; resiliency need a paid quote feed → <b>not in v1</b> (see the flagged columns). <b>ETFs</b> gate on <b>basket liquidity</b> (Σ constituent $ADV × weight), not screen ADV — a low-volume ETF on a liquid basket is not rejected.
     </div>
@@ -282,7 +430,9 @@ async function renderScreener(){
     secs.forEach(s=>{const o=document.createElement('option');o.value=o.textContent=s;sel.appendChild(o);});
     document.getElementById('q').oninput=drawScreener;
     sel.onchange=drawScreener;
-    document.getElementById('capFloor').onchange=drawScreener;
+    const cf=document.getElementById('capFloor');
+    cf.value=String(CAP_FLOOR);
+    cf.onchange=()=>{ CAP_FLOOR=Number(cf.value)||0; drawScreener(); };
     document.getElementById('exclFin').onchange=drawScreener;
     document.getElementById('exclUtil').onchange=drawScreener;
     document.getElementById('exclAdr').onchange=drawScreener;
@@ -303,13 +453,14 @@ function toggleCol(k,on){ colVisible[k]=on; drawScreener(); }
 function drawScreener(){
   const q=(document.getElementById('q').value||'').toLowerCase();
   const sec=document.getElementById('sector').value;
-  const capFloor=Number(document.getElementById('capFloor').value||0);
+  const capFloor=CAP_FLOOR;
   const exclFlags={fin:document.getElementById('exclFin').checked,util:document.getElementById('exclUtil').checked,adr:document.getElementById('exclAdr').checked};
   // pre-rank filters (not columns) — apply before ranking so excluded names never enter the composite
   const universe=screenerRows.filter(r=>
     (!capFloor || (r.mkt_cap!=null && r.mkt_cap>=capFloor)) &&
     !isExcludedSector(r,exclFlags));
   computeMagicRanks(universe);
+  computeMomentumRanks(universe);
   const searched=universe.filter(r=>
     (!sec||r.sector===sec) &&
     (!q || (r.ticker||'').toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q)));
@@ -326,7 +477,8 @@ function drawScreener(){
   const cols=SCREENER_COLS.filter(c=>colVisible[c.key]);
   const th=cols.map(c=>{
     const arrow=sortKey===c.key?(sortAsc?' ▲':' ▼'):'';
-    return `<th class="${c.num?'num':''}" onclick="setSort('${c.key}')" title="${c.label} · ${FEED_TIERS[c.tier]?FEED_TIERS[c.tier].label:c.tier} feed">${c.label}${arrow} ${tierBadge(c.tier)}${v1Badge(c)}</th>`;
+    const title=(c.tip?c.tip+' · ':`${c.label} · `)+`${FEED_TIERS[c.tier]?FEED_TIERS[c.tier].label:c.tier} feed`;
+    return `<th class="${c.num?'num':''}" onclick="setSort('${c.key}')" title="${title}">${c.label}${arrow} ${tierBadge(c.tier)}${v1Badge(c)}</th>`;
   }).join('');
   const body=rows.slice(0,300).map(r=>`<tr style="cursor:pointer" onclick="openStock('${r.ticker}')" title="Open ${r.ticker} detail">`+
     cols.map(c=>`<td class="${c.num?'num':''}${c.cls?' '+c.cls:''}">${c.fmt?c.fmt(r):(r[c.key]??'–')}</td>`).join('')+
@@ -672,6 +824,42 @@ async function renderData(){
   }catch(e){ v.innerHTML=`<div class="err">${e.message}<br>API unreachable at ${API()} — set the base above.</div>`; }
 }
 
+// ── MACRO (regime) ────────────────────────────────────────
+async function renderMacro(){
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading macro regime…</div>';
+  try{
+    await loadMacro();
+    if(!MACRO.loaded) throw new Error('macro data unavailable');
+    const rv=regimeVerdict(), vb=rv.vixBucket, rb=recessionBand(rv.prob);
+    let html=`<div style="margin:6px 0 4px"><span class="big" style="font-size:22px">Macro / regime context</span></div>
+      <div class="muted" style="margin-bottom:14px;max-width:760px">Two FRED-only gauges: a <b>fast, coincident</b> vol read (VIX) and a <b>slow, leading</b> recession-probability read (yield curve). Regime <b>soft-gates</b> the screener's default filters — every nudge stays user-overridable.</div>
+      ${regimeBannerHTML()}
+      <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr));margin-top:14px">
+        <div class="card">
+          <div class="name">VIX regime ${tierBadge('macro')}</div>
+          <div class="big" style="font-size:28px;margin:6px 0;${vb?`color:${vb.color}`:''}">${MACRO.vix!=null?fmt(MACRO.vix,1):'–'} <span style="font-size:14px">${vb?vb.label:''}</span></div>
+          <div class="muted" style="font-size:12px;line-height:1.5">Cboe VIX — 30-day expected S&amp;P vol from option prices. Bands: calm &lt;15 · normal 15–20 · elevated 20–30 · stress &gt;30 · panic &gt;40.</div>
+          <table style="font-size:12px;margin-top:8px">
+            <tr><td class="muted" style="border:none;padding:3px 8px 3px 0">VIX9D</td><td class="num" style="border:none;padding:3px 0">${MACRO.vix9d!=null?fmt(MACRO.vix9d,1):'–'}</td></tr>
+            <tr><td class="muted" style="border:none;padding:3px 8px 3px 0">VIX3M</td><td class="num" style="border:none;padding:3px 0">${MACRO.vix3m!=null?fmt(MACRO.vix3m,1):'–'}</td></tr>
+            <tr><td class="muted" style="border:none;padding:3px 8px 3px 0">VIX/VIX3M ratio</td><td class="num" style="border:none;padding:3px 0">${rv.inversion?rv.inversion.ratio.toFixed(2):'–'}</td></tr>
+          </table>
+          <div class="muted" style="font-size:11.5px;margin-top:8px">Term-structure inversion (ratio &gt;1.0, deep &gt;1.10) is a <b>stronger crisis tell than the level alone</b> — near-dated vol pricier than 3-month. FRED may not carry VIX9D/VIX3M; falls back to Cboe/yfinance if absent.</div>
+        </div>
+        <div class="card">
+          <div class="name">P(recession in 12m) ${tierBadge('macro')}</div>
+          <div class="big" style="font-size:28px;margin:6px 0;color:${rb.color}">${rv.prob!=null?(rv.prob*100).toFixed(0)+'%':'–'}</div>
+          <div class="muted" style="font-size:12px;line-height:1.5">NY Fed / Estrella–Mishkin probit on the <b>T10Y3M</b> yield-curve spread${MACRO.spreadMonthly?' (monthly average)':' (daily approximation — monthly average not available)'}: spread = ${MACRO.spread!=null?MACRO.spread.toFixed(2)+'pp':'–'}.</div>
+          <div class="muted" style="font-size:11.5px;margin-top:8px"><b>P(recession) = Φ(−0.5333 − 0.6629 × spread)</b>, coefficients from Estrella–Mishkin (1998), fit on monthly US data ~1959–1995. <b>⚠ Not re-verified against a current NY Fed refit</b> — re-check before trusting a precise threshold call.</div>
+          <div class="muted" style="font-size:11.5px;margin-top:8px">Bands: <span style="color:var(--green)">green &lt;30%</span> · <span style="color:#e3b341">amber 30–50%</span> · <span style="color:var(--red)">red ≥50%</span>. Treat inversion as a <b>12-month leading warning</b>, not a sell trigger — recessions historically arrive <i>after</i> the curve re-steepens. One known false positive: the spread narrowly inverted in 1966–67 without a recession following.</div>
+        </div>
+      </div>
+      <div class="muted" style="margin-top:16px;font-size:12px;max-width:760px">as of ${MACRO.asof||'–'} · sources: Cboe VIX methodology, NY Fed Yield Curve (Estrella–Mishkin) — see <span style="cursor:pointer;color:var(--accent)" onclick="goSection('education')">Education</span> for the full write-up.</div>`;
+    v.innerHTML=html;
+  }catch(e){ v.innerHTML=`<div class="err">${e.message}<br>API unreachable at ${API()} — set the base above, or GET /api/macro isn't wired up in the pipeline yet.</div>`; }
+}
+
 // ── EDUCATION ─────────────────────────────────────────────
 async function renderEducation(){
   const v=document.getElementById('view');
@@ -695,6 +883,124 @@ async function renderEducation(){
         sources:['Harris — Trading &amp; Exchanges'],
         significance:'The other <b>3 of Harris’s 4</b> liquidity dimensions — width (spread), immediacy, resiliency — need a paid real-time quote feed. Kept as <b>present-but-flagged</b> columns so the un-measured dimensions are explicit, not silently missing.',
         exampleSignal:'// not in v1 — requires an L1/L2 quote feed\nspread = ask - bid; depth = book_size; resiliency = recovery_after_imbalance'},
+    ]],
+    ['Macro / regime context (issue #39)', [
+      {metric:'VIX regime bucket (FRED VIXCLS)', feedTier:'macro', multiSource:true,
+        sources:['Cboe VIX index methodology','Chan — Quantitative Trading','Trading in the Zone — Douglas'],
+        significance:'Fast, coincident tail-risk gauge. Bucket the level (calm&lt;15 / normal 15–20 / elevated 20–30 / stress&gt;30 / panic&gt;40) into a market-wide <b>regime switch, not a stock picker</b> (Harris/Chan). Douglas: a VIX spike is a non-negotiable de-risk trigger — here that means a soft nudge to the default $-volume and cap floors, never a hard block.',
+        exampleSignal:'bucket = calm|normal|elevated|stress|panic   # VIXCLS level thresholds\nriskOff = VIX > 30  →  nudge default $vol floor + cap floor (soft, overridable)'},
+      {metric:'VIX term-structure inversion (VIX/VIX3M)', feedTier:'macro', multiSource:false,
+        sources:['Cboe VIX index methodology'],
+        significance:'Ratio &gt;1.0 (near-dated vol pricier than 3-month) is a <b>stronger crisis tell than the level alone</b>; &gt;1.10 = deep backwardation/dislocation. FRED may not carry VIX9D/VIX3M — falls back to Cboe/yfinance if absent.',
+        exampleSignal:'ratio = VIX / VIX3M\ninverted = ratio > 1.0; deep = ratio > 1.10'},
+      {metric:'Recession probability — T10Y3M probit', feedTier:'macro', multiSource:true,
+        sources:['NY Fed Yield Curve (Estrella–Mishkin)','Chan — Quantitative Trading'],
+        significance:'Slow, leading gauge: the entire term structure compressed into one number. Ingest T10Y3M (already the 10Y−3M spread, percent) via <code>fred.py</code>, resample to a monthly average, run through the Estrella–Mishkin (1998) probit. <b>Coefficients fit on 1959–1995 monthly data — flagged for re-verification, not re-derived here.</b> Treat curve inversion as a <b>12-month leading warning</b>, not a sell trigger; one known false positive (1966–67).',
+        exampleSignal:'P = Φ(−0.5333 − 0.6629 × spread)   # spread = T10Y3M, pp, monthly avg\nbadge = green(<30%) | amber(30–50%) | red(>=50%)'},
+      {metric:'Regime gate — soft default-filter pre-set', feedTier:'macro', multiSource:true,
+        sources:['NY Fed Yield Curve','Cboe VIX index methodology','Chan — Quantitative Trading'],
+        significance:'Risk-off (VIX&gt;30 or P(recession)≥50%) nudges the screener’s default $-volume and cap floors tighter — biasing toward liquid, larger names, away from thin/high-beta names. Risk-on relaxes it. Always a <b>soft pre-set, user-overridable</b> via the existing filter controls, never a hard block. Chan: use regime as a strategy-family switch given non-stationary markets.',
+        exampleSignal:'if riskOff: LIQ_FLOOR ||= $1M/day; CAP_FLOOR ||= $200M   // soft defaults only, editable'},
+    ]],
+    ['Fundamentals &amp; valuation (issue #52)', [
+      {metric:'Composite score (model.json) — summed-ordinal-rank engine', feedTier:'collected', multiSource:true,
+        sources:['Greenblatt — Magic Formula','Fama-French','Harris — Trading &amp; Exchanges','Chan — Quantitative Trading','Douglas — Trading in the Zone','Bailey et al. — Backtest Overfitting'],
+        significance:'A <b>summed-ordinal-rank engine</b>: combine factors via rank(A) + rank(B), never blended raw values — sidesteps the unit mismatch between a percentage and a yield. It’s the screener’s <b>value-trader engine</b>, flagging where price diverges from fundamental value; pair it with smart-money as the timing/confirmation overlay. Judge it at the <b>sample level over 20+ trades</b>, not the last one. Keep params ≤5 and validate out-of-sample — its upstream search history is opaque, so it must clear a deflation/OOS gate before becoming a default sort.',
+        exampleSignal:'score = rank(ROIC) + rank(EBIT/EV) [+ momentum/smart-money ranks]\n-> sort ascending; top decile = candidates'},
+      {metric:'ROIC / Return on Capital (quality axis)', feedTier:'collected', multiSource:true,
+        sources:['Greenblatt — Magic Formula','Fama-French'],
+        significance:'The <b>quality factor</b> — ideally EBIT ÷ tangible capital (net working capital + net fixed assets, with excess cash and goodwill removed), stricter than a book ROIC field and cleaner than ROE/ROA. EBIT (not net income) lets firms with different debt/tax loads compare fairly. In factor terms it’s the <b>RMW quality tilt</b>. Verify the pipeline’s ROIC actually strips excess cash, short-term debt, and goodwill.',
+        exampleSignal:'roic top-quartile (EBIT / tangible-capital) -> quality leg of composite'},
+      {metric:'EBIT/EV earnings-yield (cheapness axis)', feedTier:'collected', multiSource:true,
+        sources:['Greenblatt — Magic Formula','Fama-French'],
+        significance:'The <b>capital-structure-neutral</b> cheapness rank — preferred over P/E and E/P because EV counts both equity price and net debt, so two firms with different leverage but identical economics rank the same. Carry an EBIT/EV column beside P/E; a loose P/E field is only a rough approximation of the intended cheapness rank.',
+        exampleSignal:'rank by EBIT/EV descending (cheapest first) -> cheapness leg; beside pe column'},
+      {metric:'Market cap (cap-floor pre-rank filter)', feedTier:'collected', multiSource:true,
+        sources:['Greenblatt — Magic Formula','Fama-French','How to Read a Tear Sheet'],
+        significance:'A market-cap <b>floor applied before ranking</b> (not a display column) — tiers like &gt;$50M / &gt;$200M / &gt;$1B, with $50–100M recommended for individuals, because thin names can’t be replicated in the real world. It sets the liquidity tier and which risks apply — a small-cap can move 20% on one order. Also drop names that announced earnings in the last week and P/E ≤ 5 as <b>data-error guards</b>.',
+        exampleSignal:'mkt_cap < $50M -> exclude pre-rank\npe <= 5 OR earnings_within_7d -> data-error exclude'},
+      {metric:'Sector (financials/utilities/ADR exclusions)', feedTier:'collected', multiSource:false,
+        sources:['Greenblatt — Magic Formula'],
+        significance:'A <b>pre-rank sector filter</b>, not a display column: eliminate financials and utilities (their balance sheets break the capital/EBIT math) plus foreign companies/ADRs before ranking. Open question whether to exclude globally or only on the factors their accounting distorts. Sector also drives the risk-off defensive tilt.',
+        exampleSignal:'sector IN (financials, utilities) OR is_adr -> exclude pre-rank from EBIT-based factors'},
+      {metric:'DCF/comps upside % (absolute intrinsic value)', feedTier:'collected', multiSource:true,
+        sources:['Greenblatt — Magic Formula','Harris — Trading &amp; Exchanges','Chan — Quantitative Trading','Bailey et al. — Backtest Overfitting'],
+        significance:'Complementary to the composite, not redundant: DCF/comps upside is <b>absolute intrinsic value</b> (forecasts, WACC) answering “what is it worth?”, while the Magic-Formula rank is <b>relative, cross-sectional, trailing-only</b> — “which is best-ranked right now?”. The composite can host both as separate factors. Treat fundamentals as point-in-time — restated financials carry embedded look-ahead bias.',
+        exampleSignal:'dcf_upside_pct > +20% AND score top-decile -> value + rank agreement'},
+      {metric:'Factor-model tilts (SMB / HML / RMW / low-beta)', feedTier:'collected', multiSource:true,
+        sources:['Fama-French','Greenblatt — Magic Formula'],
+        significance:'Build tilts — SMB size (median-cap split), HML value (invert P/E to earnings-yield / book-to-market), RMW ROIC quality, low-beta — and combine as <b>composite z-scores</b>, not stacked hard filters, so no single characteristic zeroes out the universe. Match cadence to the factor: re-rank momentum monthly but value/quality/size annually or quarterly to cut turnover.',
+        exampleSignal:'z(momentum) + z(quality) + z(value) + z(-beta) -> composite tilt score\nre-rank per factor cadence'},
+      {metric:'Composite discipline (≤5 params, out-of-sample, point-in-time)', feedTier:'collected', multiSource:true,
+        sources:['Chan — Quantitative Trading','Bailey et al. — Backtest Overfitting','Greenblatt — Magic Formula'],
+        significance:'Keep parameters ≤5, validate <b>out-of-sample</b> (older = train, recent = test; test length by sample-size rule, not a fixed third), and treat all fundamentals as point-in-time. Restated financials carry embedded look-ahead, and a value bent maximizes survivorship inflation (Chan’s example: -42% real vs +388% survivorship-inflated). No factor becomes a default until it clears an OOS gate with its trial-count N logged.',
+        exampleSignal:'promote factor to default sort ONLY IF\nparams <= 5 AND OOS_Sharpe >= 0 AND N_trials logged'},
+      {metric:'ETF fundamentals rows (expense ratio + TCO)', feedTier:'collected', multiSource:false,
+        sources:['CFA ETF Guide'],
+        significance:'P/E, ROIC and upside are meaningless for a pooled fund — blank them for ETFs and show <b>expense ratio + total cost of ownership</b> instead (TCO = expense ratio + spread + premium/discount paid + creation/redemption costs). Add a data-quality flag on persistent/large NAV premium/discount and wide tracking difference — signals of stale marks or structural drift — and demote such ETFs.',
+        exampleSignal:'is_etf -> blank pe/roic/upside; show expense_ratio + TCO\nflag if |premium_discount| persistent -> demote'},
+    ]],
+    ['Liquidity &amp; microstructure (issue #51)', [
+      {metric:'Dollar volume (ADV × price)', feedTier:'ohlcv', multiSource:true,
+        sources:['Harris — Trading &amp; Exchanges','Greenblatt — Magic Formula','Chan — Quantitative Trading','How to Read a Tear Sheet','Information Sheet / Tearsheet','Fama-French','CFA ETF Guide'],
+        significance:'The P1 tradeability filter and the single most underrated line — a <b>hard filter</b>, not a nice-to-have. It’s the honest free stand-in for the missing quote feed, proxying the <b>depth</b> dimension of liquidity: a signal you can’t act on at size is not a signal, and there’s no liquidity to exit in a panic. Ship it as both a default column and a hard floor. It makes explicit the tradeability screen a cap-floor only handles implicitly, and the independent trader’s edge lives specifically at low capacity. Caveat: it proxies <b>depth ONLY</b> — nothing about spread or resiliency.',
+        exampleSignal:'dollar_vol < $2M -> hard-reject (untradeable); dollar_vol > $20M -> passes P1 liquidity floor'},
+      {metric:'Bid/ask spread (width / price-of-immediacy)', feedTier:'paid', multiSource:true,
+        sources:['Harris — Trading &amp; Exchanges','CFA ETF Guide','CME Intro to Futures'],
+        significance:'The <b>width</b> dimension — literally the price impatient traders pay for immediacy, and it carries an adverse-selection component. It’s a real trading cost the game/screener omits, but it needs a quote feed, so it’s correctly labelled ‘not in v1.’ Documenting it tells the build which liquidity dimension is <b>NOT</b> being measured rather than leaving the gap silent.',
+        exampleSignal:'spread_bps (paid feed) -> effective-cost gate; not in v1, dollar_vol proxies depth only'},
+      {metric:'Market depth / order book (resiliency)', feedTier:'paid', multiSource:true,
+        sources:['Harris — Trading &amp; Exchanges','CME Intro to Futures'],
+        significance:'The <b>depth</b> dimension and the only window onto <b>resiliency</b> (how fast the book refills). It cannot be measured from nightly OHLCV at all — state this limit explicitly. Dollar volume proxies depth only; true depth/book and resiliency are paid, real-time-only.',
+        exampleSignal:'book_depth / resiliency (paid, real-time) -> not measurable in v1 nightly pipeline'},
+      {metric:'Capacity filter', feedTier:'ohlcv', multiSource:false,
+        sources:['Chan — Quantitative Trading'],
+        significance:'Screen out names too thin to trade at your size without slippage, and treat capacity as a <b>first-class filter</b>. The independent trader’s edge lives specifically at <b>LOW capacity</b> — it’s far easier to run a high Sharpe on a small account — so don’t screen for strategies only a large fund could run. Minimize market impact by scaling order size.',
+        exampleSignal:'target_shares > 5% of ADV -> too big to trade cleanly at this size, demote'},
+      {metric:'ETF liquidity (basket-based, branched logic)', feedTier:'ohlcv', multiSource:false,
+        sources:['CFA ETF Guide'],
+        significance:'An ETF’s real tradeability lives in its <b>underlying basket</b>, not its on-screen volume — an AP can source the basket, so a thin-volume ETF on a mega-cap basket is highly tradeable. Never hard-reject an ETF on low screen ADV (ADV is a floor, not a ceiling). Compute capacity as the sum of each constituent’s dollar-ADV × weight (free, since holdings are already collected); the achievable spread (arbitrage band), not ADV, is the ETF gate.',
+        exampleSignal:'is_etf AND screen_ADV low BUT basket_dollar_ADV high -> keep (liquid basket), gate on spread'},
+      {metric:'Futures liquidity (contract volume + open interest, days-to-roll)', feedTier:'ohlcv', multiSource:false,
+        sources:['CME Intro to Futures'],
+        significance:'For futures, replace ADV/dollar-volume with active-month contract volume + open interest. <b>OI</b> is the tradeability signal ADV misses — it’s committed capital, and when OI drains from the front month it flags a dying contract about to roll. Surface days-to-roll so you’re not screening a contract that’s about to lose its liquidity.',
+        exampleSignal:'is_future AND front_month_OI falling AND days_to_roll < 5 -> flag dying front month, roll'},
+      {metric:'Factor breakpoints from liquid names only', feedTier:'ohlcv', multiSource:false,
+        sources:['Fama-French'],
+        significance:'When cutting the universe into percentile buckets, derive the breakpoints from <b>high dollar-volume names only</b>, then classify the whole universe against those cuts. Otherwise a flood of illiquid micro-caps warps the percentile cut points and distorts every factor rank.',
+        exampleSignal:'compute percentile breakpoints on dollar_vol-top-quartile, then rank full universe against them'},
+    ]],
+    ['Momentum — skip-month factor + RS rank (issue #40)', [
+      {metric:'Trailing returns (1/3/6/12-month)', feedTier:'ohlcv', multiSource:false,
+        sources:['Fama-French'],
+        significance:'Simple close-to-close returns over each trailing window, free from nightly OHLCV. Display-only building blocks — the priced-in signal is the skip-month factor below, not raw 12-month return.',
+        exampleSignal:'return_Nm = (price_today / price_N_months_ago) - 1'},
+      {metric:'Momentum factor — skip-month (t-12→t-2)', feedTier:'ohlcv', multiSource:true,
+        sources:['Fama-French','Chan — Quantitative Trading'],
+        significance:'Cumulative return from 12 months ago to 2 months ago, <b>skipping the most recent month (t-1)</b>. This IS French’s winner/loser bucketing rule — including t-1 contaminates the factor with short-term reversal, a different (opposite-signed) effect. Chan: momentum and mean-reversion are the only two profitable factor families worth a dedicated column. Re-ranked monthly.',
+        exampleSignal:'mom_factor = cumulative_return(t-12, t-2)   # excludes the last month'},
+      {metric:'RS percentile (cross-sectional rank)', feedTier:'ohlcv', multiSource:true,
+        sources:['Fama-French','Harris — Trading &amp; Exchanges'],
+        significance:'Percentile rank of the momentum factor vs. the universe (0=weakest, 100=strongest) — makes the factor comparable across names regardless of scale. <b>Breakpoints computed from liquid names only</b> (Fama-French) so illiquid micro-caps can’t warp the cuts; the ranking pool is the same hard liquidity gate (issue #37) every other view uses (Harris — momentum gets no exemption from the tradeability floor).',
+        exampleSignal:'liquid = universe.filter(passesLiquidityFloor)\nrs_percentile = percentile_rank(mom_factor, within=liquid)'},
+    ]],
+    ['Volatility — sizing, stops &amp; regime (issue #50)', [
+      {metric:'ATR / ATR% (Average True Range)', feedTier:'ohlcv', multiSource:true,
+        sources:['QuantInsti — Risk Management','Chan — Quantitative Trading','Harris — Trading &amp; Exchanges','How to Read a Tear Sheet','Information Sheet / Tearsheet'],
+        significance:'The <b>load-bearing volatility input</b>: ATR is the typical daily dollar move, so it sets stop distance and therefore all position sizing downstream. A stop too tight relative to ATR gets hit by normal noise; ATR tells the position how much room it needs to breathe and <b>keeps dollar-risk constant across names</b>. Size by volatility — a high-ATR name gets fewer shares. Lag it like any signal.',
+        exampleSignal:'stop = price - 2*ATR; shares = (equity * 1%) / (2*ATR) -> pre-sized trade plan'},
+      {metric:'Realized / historical volatility (rVol)', feedTier:'ohlcv', multiSource:true,
+        sources:['Harris — Trading &amp; Exchanges','Bailey et al. — Backtest Overfitting','How to Read a Tear Sheet','Information Sheet / Tearsheet','OIC — IV Rank / IV Percentile','CME Intro to Futures'],
+        significance:'How much the name actually moves (annualized stdev of returns) — the <b>baseline for risk</b> and the yardstick you compare implied vol against. High rVol means wider stops, smaller size, and pricier options. It encodes the fundamental-vs-transitory split, so use it as a <b>regime/sizing input, not a standalone stock picker</b>. On futures, compute on a roll-adjusted series so roll gaps aren’t counted as volatility.',
+        exampleSignal:'IV_rank high AND IV >> realized_vol_30d -> options overpriced (favor selling premium)'},
+      {metric:'Beta (vs SPY)', feedTier:'ohlcv', multiSource:true,
+        sources:['Harris — Trading &amp; Exchanges','Fama-French','Bailey et al. — Backtest Overfitting','How to Read a Tear Sheet','Information Sheet / Tearsheet','NY Fed — Yield Curve Leading Indicator'],
+        significance:'Tells you how much the name amplifies the market — high beta means the P/L is really a <b>leveraged index bet</b>, and in a selloff beta drives your loss regardless of the single-name thesis. Use it to size and for regime/low-vol tilts (favor low-beta quantiles), not as a standalone signal. Under a risk-off macro regime the default screen should <b>bias away from high-beta names</b>.',
+        exampleSignal:'beta < 0.8 tilt when P(recession) >= 30% (risk-off) -> defensive low-beta bias'},
+      {metric:'IV / IV-rank (the §2h mirror in volatility)', feedTier:'paid', multiSource:true,
+        sources:['OIC — IV Rank / IV Percentile','Derivatives — Types &amp; Signals','How to Read a Tear Sheet'],
+        significance:'Implied volatility and its rank also live in the volatility view as the forward-looking counterpart to realized vol — the core edge options screening adds is <b>realized-vs-implied</b>. Raw IV isn’t comparable across names, so it must be <b>normalized to IV Rank/Percentile</b>. Requires a paid options-chain feed (see Options group for full treatment).',
+        exampleSignal:'IV_rank vs realized_vol_30d divergence -> rich/cheap premium (see Options group)'},
     ]],
     ['Price & momentum (issue #49)', [
       {metric:'Momentum factor (prior 2–12 month return, skip-most-recent-month)', feedTier:'ohlcv', multiSource:true,
@@ -744,6 +1050,58 @@ async function renderEducation(){
         significance:'Because markets are non-stationary, condition rankings on recent data and let macro double as a <b>strategy-family switch</b> (mean-reversion vs momentum). Realized vol / VIX are a <b>regime switch, not a stock picker</b>; a VIX spike is a non-negotiable de-risk trigger, not a debatable one. Weight recent data — only roughly the last ~10 years is really suitable for a predictive model.',
         exampleSignal:'regime == stress -> switch default sort from momentum-family to mean-reversion-family + de-risk'},
     ]],
+    ['Smart-money moat (issue #53)', [
+      {metric:'Smart-money scored view (congress + insider + committee-conflict + news sentiment)', feedTier:'collected', multiSource:true,
+        sources:['Harris — Trading &amp; Exchanges','How to Read a Tear Sheet','Information Sheet / Tearsheet','Douglas — Trading in the Zone','Greenblatt — Magic Formula'],
+        significance:'The screener’s most defensible, theory-backed edge: congress trades, insider (EDGAR) filings, the committee-conflict cross-tab, and news sentiment are the adverse-selection order flow — the informed trading professionals fear — made observable. You want to be aligned with informed traders (insider/congress buying = people closest to the company/policy voting with money). <b>Give it its own scored view/filter, not raw event flags</b>, and combine the inputs into a single <b>adverse-selection-intensity score</b>. Read positioning as both confirmation AND a <b>crowding/squeeze warning</b>.',
+        exampleSignal:'congress_buy_90d AND insider_net_buy_qtr AND committee_conflict_flag -> smart-money-confirmed long'},
+      {metric:'UOA (unusual options activity) — options-side twin', feedTier:'paid', multiSource:true,
+        sources:['Derivatives — Types &amp; Signals','IV Rank / IV Percentile (OIC)','How to Read a Tear Sheet','Information Sheet / Tearsheet'],
+        significance:'The options-side twin of the equity moat — large sweeps or volume far exceeding open interest (especially OTM) flag possible informed positioning ahead of a catalyst, the same informed-flow thesis as congress/insider tracking. Noisy but a real flow signal; if options ship, surface it as a <b>flagship confirmation field</b>. Put/Call and skew extremes feed the same view as contrarian sentiment. Needs a <b>paid options feed</b> and corroboration before acting.',
+        exampleSignal:'UOA: call_volume >> call_OI (front-month OTM sweep) AND congress_buy_90d -> corroborated informed flow'},
+      {metric:'Out-of-sample validation of the moat', feedTier:'collected', multiSource:true,
+        sources:['Bailey et al. — Backtest Overfitting','Harris — Trading &amp; Exchanges'],
+        significance:'Validate the moat walk-forward / CSCV on held-out dates rather than reporting the single best committee/window cross-tab — a “moat” picked as the max of many noisy cross-tabs is <b>overfit</b>, and free-tier history may be shorter than the minimum backtest length for these cross-tabs. Congress/insider signals are also <b>noisy and lagged by filing rules</b>, so don’t overweight them.',
+        exampleSignal:'promote committee×window cross-tab ONLY IF OOS median rank holds AND N_combos logged'},
+      {metric:'Treat every signal as an edge, not a certainty', feedTier:'collected', multiSource:false,
+        sources:['Douglas — Trading in the Zone'],
+        significance:'A fired signal is a higher probability, not a guaranteed outcome. <b>Act on it without hesitation when it fires</b>, stop gathering evidence outside the defined signal (extra evidence just adds random variables), and expect a random win/loss distribution across many such signals — judge the edge at the <b>sample level</b>, not on the last trade. This is a usage/discipline policy, not a computable column.',
+        exampleSignal:'on signal fire: execute pre-sized plan, do NOT add ad-hoc filters -> discipline gate (behavior, not a column)'},
+    ]],
+    ['Options / derivatives (issue #56)', [
+      {metric:'Options-chain feed (IV, IV-Rank, skew, OI, Greeks, UOA)', feedTier:'paid', multiSource:true,
+        sources:['Derivatives — Types &amp; Signals','How to Read a Tear Sheet','Information Sheet / Tearsheet'],
+        significance:'A <b>whole second data dimension</b> with no equivalent in plain equity screening, and a real ongoing cost — IV, IV-Rank, skew, OI, Greeks and UOA all need a paid options-chain feed (Polygon / ORATS / Tradier / CBOE); free yfinance won’t cover them reliably. Decide instrument coverage before building, and <b>gate options signals on adequate OI/volume</b> since thin chains give unreliable readings.',
+        exampleSignal:'require paid options feed AND per-strike OI/volume adequate before computing any §2h column'},
+      {metric:'IV Rank + IV Percentile (must-have normalizer)', feedTier:'paid', multiSource:true,
+        sources:['IV Rank / IV Percentile (OIC)','Derivatives — Types &amp; Signals','How to Read a Tear Sheet','Information Sheet / Tearsheet'],
+        significance:'<b>THE pivot metric</b> of the whole options view: raw IV is meaningless across names (a biotech’s 60% vs a utility’s 18%), so IVR = (IV − 52wk-low)/(52wk-high − low)×100 and IVP = % of past-year days IV closed below today normalize it to “is vol expensive FOR THIS name right now?” — which flips the structure. High rank (&gt;~70) = premium-selling (spreads, condors, covered calls); low (&lt;~30) = premium-buying (long calls/puts, straddles). Ship <b>BOTH</b> (IVR is fragile to one spike; IVP is more robust). Start the nightly IV snapshot now — IVP needs ~3-6 months, true IVR ~1 year; flag “warming up” until then.',
+        exampleSignal:'IV_rank > 70 -> premium-selling candidate; IV_rank < 30 -> premium-buying candidate; show IVR + IVP side-by-side'},
+      {metric:'Skew (25Δ put/call IV ratio)', feedTier:'paid', multiSource:true,
+        sources:['IV Rank / IV Percentile (OIC)','Derivatives — Types &amp; Signals','How to Read a Tear Sheet','Information Sheet / Tearsheet','Cboe VIX Index'],
+        significance:'IV differs across strikes; equities skew negative by default (structural since the 1987 crash), so the presence of put-side skew is <b>NOT</b> the signal — a <b>FLATTENING skew is the notable event</b>, and a steepening put skew signals rising crash-pricing / defensive demand. Skew ratio = 25Δ put IV ÷ 25Δ call IV (&gt;1 confirms put-side fear) and hints which strikes are richest to sell. Rich call-side skew on a commodity can make a producer collar nearly costless.',
+        exampleSignal:'skew_ratio flattening from elevated -> notable signal; rich put skew -> sell put-side / build collar'},
+      {metric:'Put/Call ratio (contrarian sentiment)', feedTier:'paid', multiSource:true,
+        sources:['IV Rank / IV Percentile (OIC)','Derivatives — Types &amp; Signals','Douglas — Trading in the Zone','Information Sheet / Tearsheet','How to Read a Tear Sheet'],
+        significance:'Put volume ÷ call volume — a <b>contrarian sentiment gauge read only at extremes</b> (highs ~&gt;1.2 = capitulation/fear, potential bullish reversal; lows = complacency). It feeds the smart-money view as a sentiment overlay, but an extreme raises the <b>odds</b> of a reversal, it does not remove the randomness of any single trade — don’t treat it as a guaranteed reversal.',
+        exampleSignal:'put_call_ratio > 1.2 (capitulation) AND smart-money confirmation -> contrarian long candidate'},
+      {metric:'Open interest by strike', feedTier:'paid', multiSource:true,
+        sources:['Derivatives — Types &amp; Signals','CME Intro to Futures'],
+        significance:'Total outstanding contracts at a strike/expiry. <b>Large-OI strikes act as support/resistance magnets</b> via dealer hedging; rising OI + rising price = conviction, falling OI = positions closing. On futures OI is the second liquidity dimension and its drain from the front month is the <b>roll signal</b>.',
+        exampleSignal:'large OI at strike K near spot -> price magnet / support-resistance for strike selection'},
+      {metric:'Term structure (VIX vs VIX3M) / contango-backwardation', feedTier:'paid', multiSource:true,
+        sources:['IV Rank / IV Percentile (OIC)','Cboe VIX Index','Derivatives — Types &amp; Signals','CME Intro to Futures','Information Sheet / Tearsheet'],
+        significance:'IV plotted across expiries: <b>contango</b> (far &gt; near, ~85% of the time) is calm; <b>backwardation</b> (near &gt; far) signals acute near-term event risk or stress. VIX vs VIX3M is a cheap free proxy without a per-name chain, and curve inversion is a <b>more reliable crisis tell than VIX level alone</b>. On futures the curve defines roll yield (backwardation → positive roll, contango → negative).',
+        exampleSignal:'VIX/VIX3M > 1.0 (backwardation) -> near-term stress flag; contango -> calm regime'},
+      {metric:'The Greeks (Delta / Gamma / Theta / Vega / Rho)', feedTier:'paid', multiSource:true,
+        sources:['Derivatives — Types &amp; Signals','How to Read a Tear Sheet','Information Sheet / Tearsheet'],
+        significance:'Delta = directional exposure / hedge ratio; Gamma = delta acceleration and dealer-hedging flow; Theta = time decay (seller tailwind, buyer drag); Vega = IV-change exposure; Rho = rate sensitivity (minor short-dated). A <b>per-position risk dashboard</b> rather than a cross-sectional screen column. The Greek bias must <b>agree with the thesis</b> — a “big move” view that is accidentally −vega is self-contradictory.',
+        exampleSignal:'long-straddle -> +vega/−theta must match \'big move\' thesis; mismatch -> wrong structure'},
+      {metric:'Payoff / structure suggestion (Greek + IVR filter → rules engine)', feedTier:'paid', multiSource:true,
+        sources:['Information Sheet / Tearsheet','How to Read a Tear Sheet','Derivatives — Types &amp; Signals','IV Rank / IV Percentile (OIC)'],
+        significance:'<b>The differentiator</b>: let users filter by Greek exposure + IV Rank, then have a small principled rules engine suggest the structure — the “matching action to signal” table. The thesis gives <b>direction</b> (delta); IV Rank gives <b>structure</b>. Always find max loss first and default to defined-risk. Keep the rule set small to avoid overfitting the illustrative examples.',
+        exampleSignal:'bullish AND IV_rank<30 -> long call; bullish AND IV_rank>70 -> bull call spread; range-bound AND IV_rank>70 -> iron condor'},
+    ]],
   ];
   const tierColor={ohlcv:'var(--green)',collected:'var(--accent)',macro:'#a371f7',paid:'var(--red)'};
   let html=`<div style="margin:6px 0 4px"><span class="big" style="font-size:22px">Learning the business of trading</span></div>
@@ -784,6 +1142,8 @@ const SECTIONS={
           tabs:[['commodities','Commodities',renderCommodities],['options','Options',renderOptions],['drivers','Drivers',renderDrivers]]},
   stock: {label:'Stock', icon:'🏢', desc:'Equity screener + per-stock detail',
           tabs:[['screener','Screener',renderScreener]]},
+  macro: {label:'Macro', icon:'🌡️', desc:'VIX regime + yield-curve recession probability — soft-gates the screener defaults',
+          tabs:[['regime','Regime',renderMacro]]},
   education:{label:'Education', icon:'🎓', desc:'Learning the business of trading — metric significance, source overlap, example signals',
           tabs:[['learn','Learn',renderEducation]]},
 };
