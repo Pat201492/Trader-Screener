@@ -131,6 +131,53 @@ Depends on #35 (column registry) and #37 (liquidity gate). The front-end ships t
 
 ---
 
+## Look-ahead discipline layer (issue #42) — lag every OHLCV indicator to the prior close
+
+Depends on #40 (momentum columns). Cross-cutting gate on the **entire ohlcv metric block** — every §2a/§2b
+column derived from price/volume history (returns, momentum/RS rank, MA cross, RSI, MACD, ATR, realized vol,
+beta), current and future. Chan (Ch. 3): "Use lagged historical data... based on data up to the close of the
+previous trading period only," or the backtest silently trades on information that didn't exist yet.
+
+**The rule, mechanically:** for the value attached to trading day *i*, the computation may read bars/closes at
+index < *i* only. Day *i*'s own high/low/close is never read — that's what stops the classic "buy when within
+1% of the day's low" bug (you can't know the day's low until it closes), distinct from the truncation check
+below (see [`Education/summaries/quantitative-trading-chan-detailed.md`](../Education/summaries/quantitative-trading-chan-detailed.md)).
+
+**Reference implementation + gate (this repo, portable to the shared pipeline):** [`lookahead-gate/lookahead_lag.py`](../lookahead-gate/lookahead_lag.py)
+implements every listed indicator with that invariant enforced by construction (each reads `closes[:i]`,
+never `closes[i]`). [`lookahead-gate/ab_truncation_test.py`](../lookahead-gate/ab_truncation_test.py) is
+**Chan's A-vs-B truncation test**: run the full history through the indicators (file A), truncate the last
+N days (N = 10, 50, 100) and re-run (file B) — every overlapping row must be identical, or the "full" run was
+peeking at data that hadn't happened yet at that point. It also proves the gate isn't vacuous by re-running the
+same check against deliberately leaky variants (a centered/future-peeking moving average, a same-day RSI leak,
+an RS-rank computed off a time-pooled/future-aware distribution) and asserting the mismatches are caught, plus
+a direct same-day-peek check (corrupt day *i*'s own H/L/C, confirm every lagged indicator at *i* is unchanged).
+Run: `python lookahead-gate/ab_truncation_test.py` — exit 0 = pass.
+
+**Upstream contract (add to the shared pipeline).** Every field below must be computed from OHLCV **through
+the prior close only**:
+
+| Field | Meaning | Status |
+|---|---|---|
+| `return_1m/3m/6m/12m` | trailing close-to-close returns | shipped (issue #40) — must be re-verified lagged |
+| `mom_factor` | Fama-French prior(2,12), skip t-1 | shipped (issue #40) — must be re-verified lagged |
+| `rs_percentile` | cross-sectional rank of `mom_factor` | computed front-end, per-render — inherits the lag from `mom_factor`; never rank against a fixed/time-pooled distribution (see the RS-rank leak case in `ab_truncation_test.py`) |
+| `ma_cross` (50/200d) | fast/slow SMA cross | not yet shipped — SCREENER_SHORTLIST §2a |
+| `rsi` | Wilder RSI | not yet shipped — SCREENER_SHORTLIST §2a |
+| `macd` | MACD line/signal/hist | not yet shipped — SCREENER_SHORTLIST §2a |
+| `atr` | Average True Range | not yet shipped — SCREENER_SHORTLIST §2b; feeds §2g sizing |
+| `realized_vol` | trailing return stdev | not yet shipped — SCREENER_SHORTLIST §2b |
+| `beta` | vs. SPY | not yet shipped — SCREENER_SHORTLIST §2b |
+
+- **Wire the gate.** Port `lookahead_lag.py`'s functions (or the equivalent pandas/numpy computation, same
+  invariant) into the Stock-Data-Pipeline indicator stage, and run `ab_truncation_test.py`'s pattern as a
+  pre-publish assertion in that repo's `validate.py` / `run.py` — a non-zero exit blocks the nightly publish,
+  same as any other data-quality gate.
+- **Front-end disclosure.** The Screener footer carries a standing **"as-of prior close"** note (next to the
+  liquidity `lqnote`) so every OHLCV-derived column is explicitly labeled as lagged, not live-quote.
+
+---
+
 ## Options-Chain Feed (first feature)
 
 The first trader-specific feature: for any ticker already in the shared universe, pull and serve its **options chain** — every listed expiration, with the full grid of calls/puts per strike.

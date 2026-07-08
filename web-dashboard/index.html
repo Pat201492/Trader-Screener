@@ -65,6 +65,9 @@
   .macronote.risk-off{border-left-color:var(--red);background:#f851490d}
   .macronote.risk-on{border-left-color:var(--green);background:#3fb9500d}
   .macronote b{color:var(--txt)}
+  /* look-ahead discipline note (issue #42) — same note-box language, neutral accent */
+  .lagnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--muted);border-radius:6px;background:#8b949e0d;color:var(--muted);font-size:12px;line-height:1.55}
+  .lagnote b{color:var(--txt)}
 </style>
 </head>
 <body>
@@ -363,6 +366,10 @@ function regimeBannerHTML(){
 // the skip-month contaminates the factor with short-term reversal. return_1/3/6/12m
 // and mom_factor are upstream (nightly-OHLCV) fields; RS % is the only thing
 // computed here — the cross-sectional percentile rank of mom_factor.
+// Look-ahead discipline (issue #42): every OHLCV-derived field here is lagged to
+// the prior close upstream (see lookahead-gate/) — this cross-sectional rank is
+// recomputed fresh each render from that day's already-lagged mom_factor values,
+// never against a fixed/time-pooled distribution (that would smuggle future dates in).
 // Harris: momentum is a price-discovery signal that price impact eats without a
 // liquidity gate, so the ranking POOL is liquid names only (passesLiquidityFloor),
 // same as Fama-French set factor breakpoints from liquid names only — an illiquid
@@ -478,6 +485,9 @@ async function renderScreener(){
     ${regimeBannerHTML()}
     <div class="lqnote">
       <b>Liquidity = the first-class gate.</b> Dollar volume (ADV × price) is a free stand-in for a quote feed, proxying only <b>1 of Harris's 4 liquidity dimensions — depth</b>. Spread (width), immediacy &amp; resiliency need a paid quote feed → <b>not in v1</b> (see the flagged columns). <b>ETFs</b> gate on <b>basket liquidity</b> (Σ constituent $ADV × weight), not screen ADV — a low-volume ETF on a liquid basket is not rejected.
+    </div>
+    <div class="lagnote">
+      <b>Signals are as-of the prior close.</b> Every OHLCV-derived column (returns, momentum, RS %ile — and any future MA-cross/RSI/MACD/ATR/realized-vol/beta) is computed on data through the <b>previous session's close only</b>, never same-day high/low/close, to avoid look-ahead bias (Chan). Validated by an A-vs-B truncation test — see <code>lookahead-gate/</code>.
     </div>
     <div id="tbl"><div class="loading">Loading stocks…</div></div>`;
   try{
