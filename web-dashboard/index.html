@@ -696,6 +696,24 @@ async function renderEducation(){
         significance:'The other <b>3 of Harris’s 4</b> liquidity dimensions — width (spread), immediacy, resiliency — need a paid real-time quote feed. Kept as <b>present-but-flagged</b> columns so the un-measured dimensions are explicit, not silently missing.',
         exampleSignal:'// not in v1 — requires an L1/L2 quote feed\nspread = ask - bid; depth = book_size; resiliency = recovery_after_imbalance'},
     ]],
+    ['Volatility — sizing, stops &amp; regime (issue #50)', [
+      {metric:'ATR / ATR% (Average True Range)', feedTier:'ohlcv', multiSource:true,
+        sources:['QuantInsti — Risk Management','Chan — Quantitative Trading','Harris — Trading &amp; Exchanges','How to Read a Tear Sheet','Information Sheet / Tearsheet'],
+        significance:'The <b>load-bearing volatility input</b>: ATR is the typical daily dollar move, so it sets stop distance and therefore all position sizing downstream. A stop too tight relative to ATR gets hit by normal noise; ATR tells the position how much room it needs to breathe and <b>keeps dollar-risk constant across names</b>. Size by volatility — a high-ATR name gets fewer shares. Lag it like any signal.',
+        exampleSignal:'stop = price - 2*ATR; shares = (equity * 1%) / (2*ATR) -> pre-sized trade plan'},
+      {metric:'Realized / historical volatility (rVol)', feedTier:'ohlcv', multiSource:true,
+        sources:['Harris — Trading &amp; Exchanges','Bailey et al. — Backtest Overfitting','How to Read a Tear Sheet','Information Sheet / Tearsheet','OIC — IV Rank / IV Percentile','CME Intro to Futures'],
+        significance:'How much the name actually moves (annualized stdev of returns) — the <b>baseline for risk</b> and the yardstick you compare implied vol against. High rVol means wider stops, smaller size, and pricier options. It encodes the fundamental-vs-transitory split, so use it as a <b>regime/sizing input, not a standalone stock picker</b>. On futures, compute on a roll-adjusted series so roll gaps aren’t counted as volatility.',
+        exampleSignal:'IV_rank high AND IV >> realized_vol_30d -> options overpriced (favor selling premium)'},
+      {metric:'Beta (vs SPY)', feedTier:'ohlcv', multiSource:true,
+        sources:['Harris — Trading &amp; Exchanges','Fama-French','Bailey et al. — Backtest Overfitting','How to Read a Tear Sheet','Information Sheet / Tearsheet','NY Fed — Yield Curve Leading Indicator'],
+        significance:'Tells you how much the name amplifies the market — high beta means the P/L is really a <b>leveraged index bet</b>, and in a selloff beta drives your loss regardless of the single-name thesis. Use it to size and for regime/low-vol tilts (favor low-beta quantiles), not as a standalone signal. Under a risk-off macro regime the default screen should <b>bias away from high-beta names</b>.',
+        exampleSignal:'beta < 0.8 tilt when P(recession) >= 30% (risk-off) -> defensive low-beta bias'},
+      {metric:'IV / IV-rank (the §2h mirror in volatility)', feedTier:'paid', multiSource:true,
+        sources:['OIC — IV Rank / IV Percentile','Derivatives — Types &amp; Signals','How to Read a Tear Sheet'],
+        significance:'Implied volatility and its rank also live in the volatility view as the forward-looking counterpart to realized vol — the core edge options screening adds is <b>realized-vs-implied</b>. Raw IV isn’t comparable across names, so it must be <b>normalized to IV Rank/Percentile</b>. Requires a paid options-chain feed (see Options group for full treatment).',
+        exampleSignal:'IV_rank vs realized_vol_30d divergence -> rich/cheap premium (see Options group)'},
+    ]],
   ];
   const tierColor={ohlcv:'var(--green)',collected:'var(--accent)',macro:'#a371f7',paid:'var(--red)'};
   let html=`<div style="margin:6px 0 4px"><span class="big" style="font-size:22px">Learning the business of trading</span></div>
