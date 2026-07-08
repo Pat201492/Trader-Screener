@@ -182,8 +182,8 @@ Layer trader signals on top of raw chains — these become screener columns and 
 - Keep a **history** of chain snapshots too so OI-trend metrics are possible (don't overwrite — append by snapshot date).
 
 ### API (mirror the old `server.py` style)
-- `GET /api/options/{ticker}` → expirations + summary metrics (ATM IV, IV Rank, IV Percentile, put/call).
-- `GET /api/options/{ticker}/{expiration}` → full calls/puts grid for one expiry.
+- `GET /api/options/{ticker}` → expirations + summary metrics (ATM IV, IV Rank, IV Percentile, put/call, skew, OI-by-strike, UOA inputs — see the options-flow layer below).
+- `GET /api/options/{ticker}/{expiration}` → full calls/puts grid for one expiry, each contract carrying `delta`, `gamma`, `theta`, `vega`, `rho` (Greeks, sourced directly from Polygon — no in-house Black-Scholes).
 - `/api/stocks` rows carry `iv_rank`, `iv_percentile`, `atm_iv_30d`, `iv_history_days` for liquidity-gated tickers (see layer contract below) so the screener joins options data without a second round-trip per row.
 - Optional screener filter additions on `/api/stocks`: `min_iv_rank`, `min_put_call`, `unusual_only`.
 
@@ -206,6 +206,31 @@ Depends on #35 (column registry) and #39 (macro VIX regime). Raw IV is meaningle
 - **Warming-up gate, per row:** `iv_history_days < 126` (~3–6mo) flags IV Percentile "warming," `< 252` (~1yr) flags IV Rank "warming" (`ivWarmup()`). Each ticker's clock starts independently — one added to the universe later is not held to the same calendar as one tracked since the job began.
 - **Premium hint (`ivHint()`):** IVR ≥70 → "sell prem," IVR ≤30 → "buy prem." **Gated under the macro VIX regime** (`regimeVerdict()`, issue #39): a risk-off regime doesn't suppress the sell-premium hint (a single name's IVR can be idiosyncratically rich even in a calm tape, and vice versa) but attaches an explicit tail-risk caveat — Douglas: a VIX spike is a non-negotiable de-risk trigger, so a "sell premium" hint during one gets a caution, not silence. Same soft-nudge-never-a-hard-block pattern as the liquidity/cap-floor macro defaults.
 - Documented per-column in the header tooltip (`tip` field) plus a dedicated disclosure box (`.ivnote`) in the Screener controls, same convention as the liquidity/macro layers.
+
+## Options flow & structure layer (issue #46) — skew / put-call / OI magnets / UOA / Greeks
+
+Depends on #45 (options feed + IV Rank/Percentile) and #41 (smart-money moat). Derivatives — Types & Signals + OIC: puts trading richer than calls (equities run a negative skew by default — structural since the 1987 crash) prices crash/downside-protection demand; a **flattening** skew is the notable event, not the negative skew itself. Put/call extremes are a contrarian sentiment gauge read only at the edges. Large single-strike OI acts as a support/resistance magnet (dealer-hedging flow). UOA (today's volume dwarfing the standing OI book) is the **options-side twin of the smart-money moat** (issue #41) — same informed-order-flow thesis as congress/insider, expressed through derivatives. Douglas: an extreme raises reversal odds, it never removes the randomness of a single trade.
+
+**Upstream contract.** Joined onto liquidity-gated `/api/stocks` rows AND the `/api/options/{ticker}` summary, same dual-placement pattern as `iv_rank`/`iv_percentile`:
+
+| Field | Type | Meaning | Source |
+|---|---|---|---|
+| `skew_25d` | number \| null | 25Δ put IV / 25Δ call IV ratio | `options.py` / Polygon |
+| `put_call_oi` | number \| null | put/call ratio, OI-based (existing issue #45 field, now also joined onto stocks rows) | `options.py` / Polygon |
+| `total_oi` | integer \| null | total open interest across the collected chain — the chain-liquidity gate's OI leg | `options.py` / Polygon |
+| `total_volume` | integer \| null | total contract volume across the chain, today — the gate's volume leg + UOA numerator | `options.py` / Polygon |
+| `call_oi` / `put_oi` / `call_volume` / `put_volume` | integer \| null | optional per-side breakdown — gives UOA a directional lean; degrades to an undirected flag if absent | `options.py` / Polygon |
+| `oi_max_strike` / `oi_max_strike_oi` | number/integer \| null | the single-strike OI "magnet" + its OI | `options.py` / Polygon |
+| `delta`/`gamma`/`theta`/`vega`/`rho` | number \| null | per-contract Greeks (chain endpoint only — inherently per-position, not per-underlying) | `options.py` / Polygon |
+
+- **Chain-liquidity gate (`optionsChainLiquid()`):** ≥500 total OI and ≥100 total volume across the collected chain. Fail-safe — unknown OI/volume gates **closed** (thin-chain badge shown) rather than trusting an unverifiable reading, same posture as the rest of the liquidity layer. Skew/put-call/OI-magnet/UOA all route through this gate before rendering a value.
+- **Skew (`skewCell()`):** ratio ≤1.05 flags a "flattening" note — a heuristic band, not a snapshot-history percentile like IV Rank (no dedicated skew-history table exists yet).
+- **Put/call ratio (`putCallCell()`):** ≥1.2 flags capitulation/fear (contrarian bullish tell), ≤0.5 flags complacency (contrarian bearish tell).
+- **OI-by-strike (`oiMagnetCell()`):** the row-level column shows the chain-wide magnet strike + distance from spot; the per-expiry chain table (Options tab) additionally highlights the in-expiry OI peak per contract.
+- **UOA (`uoaCell()`/`uoaRatio()`/`uoaDirection()`):** volume ≥2× total OI flags "UOA"; direction (call-side vs put-side) is best-effort from the per-side volume/OI split, degrading to an undirected flag if the feed doesn't split by side.
+- **Smart-money twin (`computeSmartMoneyScores()`, issue #41):** UOA direction + put/call extreme fold in as a 4th weighted leg (weights rebalanced to congress 0.35 / insider 0.30 / news 0.15 / options 0.20, still summing to 1). Agreeing legs (UOA + P/C both bullish or both bearish) reach full ±1 conviction on the options leg; opposing legs cancel to 0. Only counted when the chain clears the liquidity gate.
+- **Greeks (Δ/Γ/Θ/V/ρ):** shipped as a **per-position risk dashboard**, not a screener column — the full per-contract grid in the Options tab chain table, plus a nearest-ATM call/put Greeks card on the stock detail page (`openStock()`'s `detOpt` block). Never aggregated into `SCREENER_COLS`.
+- Documented per-column in the header tooltip (`tip` field) plus a dedicated disclosure box (`.oflownote`) in the Screener controls, same convention as the liquidity/IV/macro layers.
 
 ## ⚠️ Open Items
 - [ ] **Define the screener spec** — which instruments, which columns, which filters/sorts. ("We will have to iron out the project screener — figure out later.")
