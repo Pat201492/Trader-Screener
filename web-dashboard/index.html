@@ -56,6 +56,7 @@
   .colitem:hover{background:#21262d}
   .colitem .tier{margin-left:auto}
   .t-v1{color:#f0883e;background:#f0883e1a;border-color:#f0883e55}
+  .t-oos{color:#f85149;background:#f851491a;border-color:#f8514955}
   /* liquidity disclosure note — makes the un-measured dimensions explicit */
   .lqnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #e3b341;border-radius:6px;background:#e3b3410d;color:var(--muted);font-size:12px;line-height:1.55}
   .lqnote b{color:var(--txt)}
@@ -130,6 +131,53 @@ function computeMagicRanks(rows){
   const roicRank=new Map([...elig].sort((a,b)=>b.roic-a.roic).map((r,i)=>[r,i+1]));
   const yieldRank=new Map([...elig].sort((a,b)=>b.ebit_ev_yield-a.ebit_ev_yield).map((r,i)=>[r,i+1]));
   rows.forEach(r=>{ r.magic_rank=eligSet.has(r)?roicRank.get(r)+yieldRank.get(r):null; });
+}
+// ── Smart-money moat (issue #41) — the differentiator ─────
+// Harris: congress trades, insider (EDGAR), committee-conflict, and news sentiment are the
+// adverse-selection component of the spread MADE OBSERVABLE — informed order flow. Fold them
+// into ONE scored view, not raw event flags — that's the screener's most defensible edge.
+// Signed, -100..100: >0 = net informed buying, <0 = net informed selling. Saturating (tanh)
+// on the raw disclosure counts so a single cluster of trades can't blow out the scale — the
+// signal is direction + rough intensity, not the literal trade count.
+// committee_conflict is a CONVICTION MULTIPLIER on the congress leg only (a committee member
+// trading their own oversight lane is the single strongest tell), not a separate additive
+// term or its own cross-tab column — Backtest Overfitting: reporting the single best
+// committee/window combo is just the max of many noisy cross-tabs.
+// Douglas: treat every hit as an EDGE (higher probability), not a certainty — expect a random
+// win/loss distribution across many such signals. Congress/insider filings are also
+// filing-lagged (STOCK Act allows up to ~45 days) — don't overweight a single disclosure.
+// NOT out-of-sample validated yet (walk-forward/CSCV pending) — see the `oosPending` column
+// flag below; ships hidden-by-default until validated.
+function computeSmartMoneyScores(rows){
+  rows.forEach(r=>{
+    const cBuy=r.congress_buys_90d, cSell=r.congress_sells_90d;
+    const iBuy=r.insider_buys_90d, iSell=r.insider_sells_90d;
+    const news=r.news_sentiment_30d;
+    const hasCongress=cBuy!=null||cSell!=null, hasInsider=iBuy!=null||iSell!=null, hasNews=news!=null;
+    if(!hasCongress && !hasInsider && !hasNews){
+      r.smart_money_score=null; r.smart_money_dir=null; r.smart_money_breakdown=null; return;
+    }
+    const congressNet=hasCongress?Math.tanh(((cBuy||0)-(cSell||0))/3):0;
+    const insiderNet =hasInsider?Math.tanh(((iBuy||0)-(iSell||0))/3):0;
+    const newsSig=hasNews?Math.max(-1,Math.min(1,news)):0;
+    const congressWeighted=Math.max(-1,Math.min(1,congressNet*(r.committee_conflict?1.5:1)));
+    const composite=0.45*congressWeighted+0.35*insiderNet+0.20*newsSig; // weights sum to 1 → ±100
+    r.smart_money_score=Math.round(composite*100);
+    r.smart_money_dir=r.smart_money_score>10?'buy':r.smart_money_score<-10?'sell':'neutral';
+    r.smart_money_breakdown={
+      congress: hasCongress?Math.round(congressWeighted*100):null,
+      insider:  hasInsider?Math.round(insiderNet*100):null,
+      news:     hasNews?Math.round(newsSig*100):null,
+      committee_conflict: !!r.committee_conflict,
+    };
+  });
+}
+function smartMoneyCell(r){
+  if(r.smart_money_score==null) return '<span class="muted">–</span>';
+  const cls=r.smart_money_score>10?'pos':r.smart_money_score<-10?'neg':'muted';
+  const b=r.smart_money_breakdown||{};
+  const title=`congress ${b.congress??'–'} · insider ${b.insider??'–'} · news ${b.news??'–'}${b.committee_conflict?' · committee-conflict':''}`;
+  return `<span class="${cls}" title="${title}">${r.smart_money_score>0?'+':''}${r.smart_money_score}</span>`;
 }
 // ── Liquidity layer (issue #37) ───────────────────────────
 // Tradeability is the FIRST-CLASS gate every surfaced name must pass. Dollar
@@ -207,6 +255,9 @@ const naV1=()=>'<span class="muted" title="Order-book liquidity dimension — ne
 //   cls   – extra <td> class (e.g. 'muted')
 //   fmt   – (row)=>cell HTML; defaults to the raw value
 //   tier  – feed tier (key of FEED_TIERS) for the badge
+//   oosPending – present but NOT out-of-sample validated yet (walk-forward/CSCV pending);
+//                hidden by default + flagged, same idea as notInV1 but for backtest-
+//                overfitting risk rather than a missing feed (see computeSmartMoneyScores)
 const SCREENER_COLS=[
   {key:'rank',   label:'#',        num:true, cls:'muted', tier:'collected', fmt:r=>r.rank??'–'},
   {key:'ticker', label:'Ticker',                          tier:'collected', fmt:r=>`<b style="color:var(--accent)">${r.ticker}</b>`},
@@ -226,6 +277,12 @@ const SCREENER_COLS=[
   {key:'expense_ratio', label:'Expense', num:true,         tier:'collected', fmt:r=>(isETF(r)&&r.expense_ratio!=null)?pct(r.expense_ratio):'–'},
   {key:'tco',    label:'TCO',      num:true,               tier:'collected', fmt:r=>(isETF(r)&&r.tco!=null)?pct(r.tco):'–'},
   {key:'etf_dq_flag', label:'ETF DQ', cls:'muted',         tier:'collected', fmt:r=>isETF(r)?dqBadge(r):'–'},
+  // ── smart-money moat composite (issue #41) — congress + insider + committee-conflict +
+  // news sentiment folded into ONE adverse-selection-intensity score (see
+  // computeSmartMoneyScores). Reuses the SAME liquidity-gated `rows` pipeline as every other
+  // column, so it never surfaces a name below the $ vol floor. oosPending: not out-of-sample
+  // validated yet — hidden by default & flagged (Backtest Overfitting caveat).
+  {key:'smart_money_score', label:'Smart $', num:true,     tier:'collected', oosPending:true, fmt:r=>smartMoneyCell(r)},
   // ── un-measured liquidity dimensions — PRESENT but explicitly NOT in v1 (need a
   // paid quote feed). Harris's width(spread)/immediacy/resiliency + true order-book
   // depth. Default hidden; discoverable & flagged in the column picker.
@@ -233,8 +290,8 @@ const SCREENER_COLS=[
   {key:'depth',      label:'Depth',      num:true,         tier:'paid', notInV1:true, fmt:naV1},
   {key:'resiliency', label:'Resiliency', num:true,         tier:'paid', notInV1:true, fmt:naV1},
 ];
-// per-column visibility (column picker) — all shown except not-in-v1 columns.
-const colVisible=Object.fromEntries(SCREENER_COLS.map(c=>[c.key,!c.notInV1]));
+// per-column visibility (column picker) — all shown except not-in-v1 / not-yet-validated columns.
+const colVisible=Object.fromEntries(SCREENER_COLS.map(c=>[c.key,!c.notInV1 && !c.oosPending]));
 const tierBadge=t=>{const m=FEED_TIERS[t];return `<span class="tier ${m?m.cls:''}">${m?m.label:t}</span>`;};
 // pre-rank filters (Greenblatt universe hygiene) — NOT columns; remove rows before ranking/display.
 function isExcludedSector(r,flags){
@@ -245,6 +302,7 @@ function isExcludedSector(r,flags){
   return false;
 }
 const v1Badge=c=>c.notInV1?'<span class="tier t-v1" title="not in v1 — needs a paid quote feed">v1✗</span>':'';
+const oosBadge=c=>c.oosPending?'<span class="tier t-oos" title="Not out-of-sample validated yet (walk-forward/CSCV pending) — opt-in, not a default column">OOS✗</span>':'';
 
 async function renderScreener(){
   const v=document.getElementById('view');
@@ -297,7 +355,7 @@ async function renderScreener(){
 function renderColMenu(){
   const m=document.getElementById('colmenu'); if(!m) return;
   m.innerHTML=SCREENER_COLS.map(c=>
-    `<label class="colitem"><input type="checkbox" ${colVisible[c.key]?'checked':''} onchange="toggleCol('${c.key}',this.checked)"> ${c.label} ${tierBadge(c.tier)}${v1Badge(c)}</label>`).join('');
+    `<label class="colitem"><input type="checkbox" ${colVisible[c.key]?'checked':''} onchange="toggleCol('${c.key}',this.checked)"> ${c.label} ${tierBadge(c.tier)}${v1Badge(c)}${oosBadge(c)}</label>`).join('');
 }
 function toggleCol(k,on){ colVisible[k]=on; drawScreener(); }
 function drawScreener(){
@@ -310,6 +368,7 @@ function drawScreener(){
     (!capFloor || (r.mkt_cap!=null && r.mkt_cap>=capFloor)) &&
     !isExcludedSector(r,exclFlags));
   computeMagicRanks(universe);
+  computeSmartMoneyScores(universe);
   const searched=universe.filter(r=>
     (!sec||r.sector===sec) &&
     (!q || (r.ticker||'').toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q)));
@@ -326,7 +385,7 @@ function drawScreener(){
   const cols=SCREENER_COLS.filter(c=>colVisible[c.key]);
   const th=cols.map(c=>{
     const arrow=sortKey===c.key?(sortAsc?' ▲':' ▼'):'';
-    return `<th class="${c.num?'num':''}" onclick="setSort('${c.key}')" title="${c.label} · ${FEED_TIERS[c.tier]?FEED_TIERS[c.tier].label:c.tier} feed">${c.label}${arrow} ${tierBadge(c.tier)}${v1Badge(c)}</th>`;
+    return `<th class="${c.num?'num':''}" onclick="setSort('${c.key}')" title="${c.label} · ${FEED_TIERS[c.tier]?FEED_TIERS[c.tier].label:c.tier} feed">${c.label}${arrow} ${tierBadge(c.tier)}${v1Badge(c)}${oosBadge(c)}</th>`;
   }).join('');
   const body=rows.slice(0,300).map(r=>`<tr style="cursor:pointer" onclick="openStock('${r.ticker}')" title="Open ${r.ticker} detail">`+
     cols.map(c=>`<td class="${c.num?'num':''}${c.cls?' '+c.cls:''}">${c.fmt?c.fmt(r):(r[c.key]??'–')}</td>`).join('')+
@@ -334,6 +393,83 @@ function drawScreener(){
   document.getElementById('tbl').innerHTML=`<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
 }
 function setSort(k){ if(sortKey===k)sortAsc=!sortAsc; else{sortKey=k;sortAsc=true;} drawScreener(); }
+
+// ── SMART MONEY — the moat, as its own dedicated view (issue #41) ────────
+// Deliberately separate from the main screener table (not just a column toggle): this IS the
+// differentiator, so it gets its own scored, sorted, drill-able view. Shares the SAME hard
+// liquidity gate (passesLiquidityFloor / LIQ_FLOOR) as the Screener tab — never surfaces a
+// name below the $ vol floor, ETFs judged on basket liquidity same as everywhere else.
+let smRows=[], smSortKey='smart_money_score', smSortAsc=false;
+async function renderSmartMoney(){
+  const v=document.getElementById('view');
+  v.innerHTML=`<div class="controls">
+    <input type="text" id="smQ" placeholder="Search ticker / name…" />
+    <select id="smDvolFloor" title="Hard liquidity gate — shared with the Screener tab">
+      <option value="0">$ vol floor: any</option>
+      <option value="100000">≥ $100K/day</option>
+      <option value="1000000">≥ $1M/day</option>
+      <option value="5000000">≥ $5M/day</option>
+      <option value="20000000">≥ $20M/day</option>
+      <option value="100000000">≥ $100M/day</option>
+    </select>
+    <span class="muted" id="smCount"></span></div>
+    <div class="lqnote">
+      <b>Smart-money moat — the differentiator, not raw flags.</b> Congress + insider (EDGAR) + committee-conflict + news sentiment folded into <b>one</b> adverse-selection-intensity score (Harris: informed order flow made observable). <b>Not out-of-sample validated yet</b> (walk-forward/CSCV on held-out dates pending) — treat every hit as an <b>edge</b> (higher probability), not a certainty, and expect a random win/loss distribution across many such signals (Douglas). Congress/insider filings are noisy &amp; filing-lagged (STOCK Act, up to ~45 days) — don&rsquo;t overweight a single disclosure. <b>Liquidity-gated:</b> names below the $ vol floor never surface here, same hard gate as the Screener.
+    </div>
+    <div id="smTbl"><div class="loading">Loading…</div></div>`;
+  try{
+    const d=await jget('/api/stocks?limit=1000');
+    smRows=d.stocks;
+    computeSmartMoneyScores(smRows);
+    document.getElementById('smQ').oninput=drawSmartMoney;
+    const df=document.getElementById('smDvolFloor');
+    df.value=String(LIQ_FLOOR);
+    df.onchange=()=>{ LIQ_FLOOR=Number(df.value)||0; drawSmartMoney(); };
+    drawSmartMoney();
+  }catch(e){ v.querySelector('#smTbl').innerHTML=`<div class="err">${e.message}<br>Is the API running? (uvicorn api:app)</div>`; }
+}
+function drawSmartMoney(){
+  const q=(document.getElementById('smQ').value||'').toLowerCase();
+  const eligible=smRows.filter(r=>r.smart_money_score!=null);
+  const searched=eligible.filter(r=>
+    !q || (r.ticker||'').toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q));
+  // THE hard liquidity gate — same shared floor every view must pass (see passesLiquidityFloor)
+  const rows=searched.filter(passesLiquidityFloor);
+  const gated=searched.length-rows.length;
+  rows.sort((a,b)=>{ let x=a[smSortKey], y=b[smSortKey];
+    if(x==null)return 1; if(y==null)return -1;
+    if(typeof x==='string')return smSortAsc?x.localeCompare(y):y.localeCompare(x);
+    return smSortAsc?x-y:y-x; });
+  document.getElementById('smCount').textContent=
+    `${rows.length} scored`+(LIQ_FLOOR?` · ${gated} below $${compact(LIQ_FLOOR)}/day $vol floor`:'')+
+    ` · ${smRows.length-eligible.length} with no congress/insider/news data`;
+  const arrow=k=>smSortKey===k?(smSortAsc?' ▲':' ▼'):'';
+  const body=rows.slice(0,300).map(r=>{
+    const b=r.smart_money_breakdown||{};
+    const dirCls=r.smart_money_dir==='buy'?'pos':r.smart_money_dir==='sell'?'neg':'muted';
+    return `<tr style="cursor:pointer" onclick="openStock('${r.ticker}')" title="Open ${r.ticker} detail">
+      <td><b style="color:var(--accent)">${r.ticker}</b></td>
+      <td class="muted">${(r.name||'').slice(0,32)}</td>
+      <td class="muted">${r.sector||'–'}</td>
+      <td class="num ${dirCls}">${r.smart_money_score>0?'+':''}${r.smart_money_score} <span class="muted" style="text-transform:uppercase;font-size:10px">${r.smart_money_dir}</span></td>
+      <td class="num muted">${b.congress??'–'}</td>
+      <td class="num muted">${b.insider??'–'}</td>
+      <td class="num muted">${b.news??'–'}</td>
+      <td class="muted">${b.committee_conflict?'<span class="neg" title="Committee member trading a name their committee oversees">⚠ conflict</span>':'–'}</td>
+      <td class="num">${dvolCell(r)}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('smTbl').innerHTML=`<table><thead><tr>
+    <th onclick="setSmSort('ticker')">Ticker${arrow('ticker')}</th><th>Name</th><th>Sector</th>
+    <th class="num" onclick="setSmSort('smart_money_score')" title="Composite adverse-selection-intensity score, -100..100 · not out-of-sample validated yet">Smart $${arrow('smart_money_score')} ${tierBadge('collected')} <span class="tier t-oos" title="Not out-of-sample validated yet (walk-forward/CSCV pending)">OOS✗</span></th>
+    <th class="num" title="Congress sub-score (committee-conflict up-weighted)">Congress</th>
+    <th class="num" title="Insider (EDGAR) sub-score">Insider</th>
+    <th class="num" title="News sentiment sub-score">News</th>
+    <th title="Congressperson trading a name their own committee oversees">Conflict</th>
+    <th class="num">$ Vol</th>
+    </tr></thead><tbody>${body}</tbody></table>`;
+}
+function setSmSort(k){ if(smSortKey===k)smSortAsc=!smSortAsc; else{smSortKey=k;smSortAsc=false;} drawSmartMoney(); }
 
 // ── COMMODITIES ───────────────────────────────────────────
 async function renderCommodities(){
@@ -574,6 +710,26 @@ async function openStock(tk){
         <b>Liquidity (v1 = depth only).</b> Dollar volume proxies just <b>1 of Harris's 4 liquidity dimensions — depth</b>. <b>Spread</b> (width), <b>immediacy</b> &amp; <b>resiliency</b> need a paid quote feed and are <b>not in v1</b>.${etf?' This ETF is gated on <b>basket liquidity</b> (underlying holdings), not its screen ADV.':''}
       </div>`;
     }
+    // smart-money moat — composite score + component breakdown + recent buy/sell flags
+    // (issue #41). Computed on this single row (no cross-row ranking needed, unlike magic_rank).
+    computeSmartMoneyScores([s]);
+    if(s.smart_money_score!=null){
+      const b=s.smart_money_breakdown||{};
+      const dirCls=s.smart_money_dir==='buy'?'pos':s.smart_money_dir==='sell'?'neg':'muted';
+      html+=`<div class="group-title">Smart money <span class="tier t-oos" title="Not out-of-sample validated yet (walk-forward/CSCV pending)">OOS✗</span></div>
+        <div class="card" style="max-width:640px;margin-bottom:14px">
+          <span class="pill ${dirCls}">score ${s.smart_money_score>0?'+':''}${s.smart_money_score} · ${s.smart_money_dir}</span>
+          <span class="pill muted">congress ${b.congress??'–'}</span>
+          <span class="pill muted">insider ${b.insider??'–'}</span>
+          <span class="pill muted">news ${b.news??'–'}</span>
+          ${b.committee_conflict?'<span class="pill neg">⚠ committee conflict</span>':''}
+          ${(s.congress_buys_90d!=null||s.congress_sells_90d!=null)?`<div class="muted" style="font-size:12px;margin-top:8px">Congress (90d): ${s.congress_buys_90d??0} buy${s.congress_buys_90d===1?'':'s'} · ${s.congress_sells_90d??0} sell${s.congress_sells_90d===1?'':'s'}</div>`:''}
+          ${(s.insider_buys_90d!=null||s.insider_sells_90d!=null)?`<div class="muted" style="font-size:12px">Insider (90d): ${s.insider_buys_90d??0} buy${s.insider_buys_90d===1?'':'s'} · ${s.insider_sells_90d??0} sell${s.insider_sells_90d===1?'':'s'}</div>`:''}
+          <div class="muted" style="font-size:11px;margin-top:8px">Edge, not a certainty — filing-lagged &amp; noisy (Douglas / Harris). Not out-of-sample validated yet.</div>
+        </div>`;
+    } else {
+      html+=`<div class="group-title">Smart money</div><div class="muted" style="margin-bottom:14px">No congress/insider/news data collected for ${s.ticker}.</div>`;
+    }
     // metric blocks
     const blocks=[
       ['Valuation',[['P/E',s.pe],['Fwd P/E',s.fwd_pe],['P/B',s.pb],['P/S',s.ps],['EV/EBITDA',s.ev_ebitda],['PEG',s.peg],['Div yield',s.div_yield,'%'],['Beta',s.beta]]],
@@ -696,6 +852,28 @@ async function renderEducation(){
         significance:'The other <b>3 of Harris’s 4</b> liquidity dimensions — width (spread), immediacy, resiliency — need a paid real-time quote feed. Kept as <b>present-but-flagged</b> columns so the un-measured dimensions are explicit, not silently missing.',
         exampleSignal:'// not in v1 — requires an L1/L2 quote feed\nspread = ask - bid; depth = book_size; resiliency = recovery_after_imbalance'},
     ]],
+    ['Smart-money moat — composite score (issue #41)', [
+      {metric:'Smart-money score (congress + insider + committee-conflict + news)', feedTier:'collected', multiSource:true,
+        sources:['Trading &amp; Exchanges — Harris','Backtest Overfitting','Trading in the Zone — Douglas'],
+        significance:'Congress trades, insider (EDGAR) filings, committee-conflict cross-tab, and news sentiment are the <b>adverse-selection component of the spread made observable</b> — informed order flow, per Harris. Folded into <b>one scored view</b>, not raw event flags — this is the screener&rsquo;s most defensible edge. <b>Not out-of-sample validated yet</b> (walk-forward/CSCV on held-out dates pending) — reporting the single best committee/window cross-tab would just be the max of many noisy ones, so the column ships <b>hidden by default</b> and flagged until validated. Treat every hit as a <b>higher probability, not a certainty</b> — act on it when it fires and expect a random win/loss distribution across many such signals (Douglas).',
+        exampleSignal:'congress_net = tanh((buys_90d - sells_90d) / 3)\ncongress_weighted = congress_net * (committee_conflict ? 1.5 : 1)   // conviction boost\nsmart_money_score = round(100 * (.45*congress_weighted + .35*insider_net + .20*news_sentiment))\nsurface(name) only if passesLiquidityFloor(name)   // shared hard gate, same as every view'},
+      {metric:'Congress trades (recent buy/sell)', feedTier:'collected', multiSource:false,
+        sources:['How to Read a Tear Sheet'],
+        significance:'Senate/House disclosures already collected (ingest_senate.py / ingest_house.py / ingest_senate_efd.py). Filing-lagged (STOCK Act allows up to ~45 days) and noisy — a handful of trades is not a conviction signal on its own, so counts are saturated (tanh) rather than used raw.',
+        exampleSignal:'congress_buys_90d, congress_sells_90d   // rolling 90-day disclosure counts'},
+      {metric:'Insider trades (EDGAR)', feedTier:'collected', multiSource:false,
+        sources:['How to Read a Tear Sheet'],
+        significance:'SEC EDGAR Form 4 filings (ingest_edgar.py / ingest_insider_mirror.py). &ldquo;The people closest to the company are voting with money&rdquo; — same saturating treatment as congress trades so a single cluster sale doesn&rsquo;t dominate the score.',
+        exampleSignal:'insider_buys_90d, insider_sells_90d   // rolling 90-day Form 4 counts'},
+      {metric:'Committee-conflict cross-tab', feedTier:'collected', multiSource:false,
+        sources:['Trading &amp; Exchanges — Harris'],
+        significance:'A committee member trading a name their committee oversees is the single strongest adverse-selection tell available (ingest_committees.py) — rare, so it&rsquo;s a <b>conviction multiplier</b> on the congress sub-score, not a separate additive term or its own cross-tab column (Backtest Overfitting: the single best committee/window combo is the max of many noisy ones).',
+        exampleSignal:'committee_conflict: boolean   // trader sits on a committee overseeing this name'},
+      {metric:'News sentiment', feedTier:'collected', multiSource:false,
+        sources:['news.py / TextBlob'],
+        significance:'Rolling sentiment from the existing news feed — the weakest, noisiest leg (lowest weight, 20%), used mainly as directional corroboration for the congress/insider signal rather than a standalone edge.',
+        exampleSignal:'news_sentiment_30d: -1..1   // rolling 30-day mean TextBlob polarity'},
+    ]],
   ];
   const tierColor={ohlcv:'var(--green)',collected:'var(--accent)',macro:'#a371f7',paid:'var(--red)'};
   let html=`<div style="margin:6px 0 4px"><span class="big" style="font-size:22px">Learning the business of trading</span></div>
@@ -734,8 +912,8 @@ const SECTIONS={
           tabs:[['integrity','Integrity',renderData]]},
   trader:{label:'Trader',icon:'📊', desc:'Commodities, options, commodity drivers',
           tabs:[['commodities','Commodities',renderCommodities],['options','Options',renderOptions],['drivers','Drivers',renderDrivers]]},
-  stock: {label:'Stock', icon:'🏢', desc:'Equity screener + per-stock detail',
-          tabs:[['screener','Screener',renderScreener]]},
+  stock: {label:'Stock', icon:'🏢', desc:'Equity screener + per-stock detail + smart-money moat',
+          tabs:[['screener','Screener',renderScreener],['smartmoney','Smart Money',renderSmartMoney]]},
   education:{label:'Education', icon:'🎓', desc:'Learning the business of trading — metric significance, source overlap, example signals',
           tabs:[['learn','Learn',renderEducation]]},
 };
