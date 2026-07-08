@@ -502,6 +502,44 @@ async function renderData(){
   }catch(e){ v.innerHTML=`<div class="err">${e.message}<br>API unreachable at ${API()} — set the base above.</div>`; }
 }
 
+// ── EDUCATION ─────────────────────────────────────────────
+async function renderEducation(){
+  const v=document.getElementById('view');
+  // each entry: metric, feedTier, significance, sources[], multiSource, exampleSignal
+  // content issues (#37…) append their section groups here.
+  const GROUPS=[
+  ];
+  const tierColor={ohlcv:'var(--green)',collected:'var(--accent)',macro:'#a371f7',paid:'var(--red)'};
+  let html=`<div style="margin:6px 0 4px"><span class="big" style="font-size:22px">Learning the business of trading</span></div>
+    <div class="muted" style="margin-bottom:6px;max-width:760px">Every metric the screener computes, grouped by section. Each card: why it matters &amp; how to trade off it, the sources that back it (an <b>overlap</b> pill means 2+ sources agree), and a concrete example signal in the shortlist&rsquo;s proposed column variables (most not yet in the live screener).</div>
+    <div style="margin-bottom:6px">
+      <span class="pill" style="border:1px solid ${tierColor.ohlcv}">ohlcv free</span>
+      <span class="pill" style="border:1px solid ${tierColor.collected}">collected free</span>
+      <span class="pill" style="border:1px solid ${tierColor.macro}">macro (FRED)</span>
+      <span class="pill" style="border:1px solid ${tierColor.paid}">paid feed</span>
+    </div>`;
+  for(const [grp,items] of GROUPS){
+    html+=`<div class="group-title">${grp}</div><div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(340px,1fr))">`;
+    html+=items.map(it=>{
+      const tc=tierColor[it.feedTier]||'var(--border)';
+      const overlap=it.multiSource?`<span class="pill" style="border:1px solid var(--accent);color:var(--accent)">overlap ×${it.sources.length}</span>`:'';
+      const srcPills=it.sources.map(s=>`<span class="pill" style="font-size:11px">${s}</span>`).join('');
+      return `<div class="card" style="padding:14px">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">
+          <div class="name">${it.metric}</div>
+          <span class="pill" style="border:1px solid ${tc};color:${tc};font-size:11px;white-space:nowrap">${it.feedTier}</span>
+        </div>
+        <div class="muted" style="font-size:12.5px;line-height:1.5;margin:8px 0 10px">${it.significance}</div>
+        <div style="margin-bottom:8px">${overlap}${srcPills}</div>
+        <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">Example signal</div>
+        <code style="display:block;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--txt);white-space:pre-wrap;word-break:break-word">${it.exampleSignal}</code>
+      </div>`;
+    }).join('');
+    html+='</div>';
+  }
+  v.innerHTML=html;
+}
+
 // ── workspaces / routing ──────────────────────────────────
 const SECTIONS={
   data:  {label:'Data',  icon:'🗄️', desc:'Data integrity — freshness, coverage, quality, gaps',
@@ -510,6 +548,8 @@ const SECTIONS={
           tabs:[['commodities','Commodities',renderCommodities],['options','Options',renderOptions],['drivers','Drivers',renderDrivers]]},
   stock: {label:'Stock', icon:'🏢', desc:'Equity screener + per-stock detail',
           tabs:[['screener','Screener',renderScreener]]},
+  education:{label:'Education', icon:'🎓', desc:'Learning the business of trading — metric significance, source overlap, example signals',
+          tabs:[['learn','Learn',renderEducation]]},
 };
 let SECTION=null;
 function renderNav(){
