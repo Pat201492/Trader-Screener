@@ -198,6 +198,29 @@ function dvolCell(r){
 }
 // not-in-v1 cell (spread / depth / resiliency — need a paid quote feed)
 const naV1=()=>'<span class="muted" title="Order-book liquidity dimension — needs a paid quote feed. Not in v1.">n/a · v1</span>';
+// ── Momentum layer (issue #40) ────────────────────────────
+// Fama-French prior(2,12): momentum = cumulative return t-12→t-2, SKIPPING the
+// most recent month (t-1) — that's the actual winner/loser bucketing rule; keeping
+// the skip-month contaminates the factor with short-term reversal. return_1/3/6/12m
+// and mom_factor are upstream (nightly-OHLCV) fields; RS % is the only thing
+// computed here — the cross-sectional percentile rank of mom_factor.
+// Harris: momentum is a price-discovery signal that price impact eats without a
+// liquidity gate, so the ranking POOL is liquid names only (passesLiquidityFloor),
+// same as Fama-French set factor breakpoints from liquid names only — an illiquid
+// micro-cap must never warp the percentile cuts for the liquid names around it.
+function computeMomentumRanks(rows){
+  const elig=rows.filter(r=>r.mom_factor!=null&&passesLiquidityFloor(r));
+  const n=elig.length;
+  const sorted=[...elig].sort((a,b)=>a.mom_factor-b.mom_factor); // ascending: worst → best
+  const pctile=new Map(sorted.map((r,i)=>[r, n>1?i/(n-1)*100:50]));
+  rows.forEach(r=>{ r.rs_percentile=pctile.has(r)?pctile.get(r):null; });
+}
+// RS-percentile cell — color-coded like a return (top-tercile green, bottom-tercile red)
+function rsCell(r){
+  if(r.rs_percentile==null) return '<span class="muted">–</span>';
+  const v=r.rs_percentile, c=v>=70?'pos':v<=30?'neg':'';
+  return `<span class="${c}">${Math.round(v)}</span>`;
+}
 // Central column registry — the ONE place columns are defined. Adding a metric
 // = adding one entry here (no <th>/<td> markup edits). Each entry:
 //   {key,label,num?,cls?,fmt?,tier}  where
@@ -217,6 +240,17 @@ const SCREENER_COLS=[
   // ── liquidity layer (default columns) — the tradeability gate every view passes
   {key:'adv',           label:'ADV',   num:true,           tier:'ohlcv',     fmt:r=>r.adv!=null?compact(r.adv):'–'},
   {key:'dollar_volume', label:'$ Vol', num:true,           tier:'ohlcv',     sortVal:r=>effDollarVol(r), fmt:r=>dvolCell(r)},
+  // ── momentum layer (issue #40) — trailing returns, skip-month factor, RS rank
+  {key:'return_1m',  label:'Ret 1M',  num:true,             tier:'ohlcv',     fmt:r=>pct(r.return_1m)},
+  {key:'return_3m',  label:'Ret 3M',  num:true,             tier:'ohlcv',     fmt:r=>pct(r.return_3m)},
+  {key:'return_6m',  label:'Ret 6M',  num:true,             tier:'ohlcv',     fmt:r=>pct(r.return_6m)},
+  {key:'return_12m', label:'Ret 12M', num:true,             tier:'ohlcv',     fmt:r=>pct(r.return_12m)},
+  {key:'mom_factor', label:'Momentum', num:true,            tier:'ohlcv',
+    tip:'Fama-French prior(2,12): cumulative return t-12→t-2, skipping the most recent month (t-1) to avoid short-term-reversal contamination. Re-ranked monthly.',
+    fmt:r=>pct(r.mom_factor)},
+  {key:'rs_percentile', label:'RS %ile', num:true,          tier:'ohlcv',
+    tip:'Cross-sectional percentile rank of the momentum factor vs. the universe (0=weakest, 100=strongest). Breakpoints computed from liquid names only — illiquid micro-caps never warp the cuts, and no name failing the $ vol floor can surface here.',
+    fmt:r=>rsCell(r)},
   {key:'score',  label:'Score',    num:true,               tier:'collected', fmt:r=>fmt(r.score,0)},
   {key:'pe',     label:'P/E',      num:true,               tier:'collected', fmt:r=>isETF(r)?'–':fmt(r.pe,1)},
   {key:'ebit_ev_yield', label:'EBIT/EV', num:true,         tier:'collected', fmt:r=>(isETF(r)||r.ebit_ev_yield==null)?'–':pct(r.ebit_ev_yield)},
@@ -310,6 +344,7 @@ function drawScreener(){
     (!capFloor || (r.mkt_cap!=null && r.mkt_cap>=capFloor)) &&
     !isExcludedSector(r,exclFlags));
   computeMagicRanks(universe);
+  computeMomentumRanks(universe);
   const searched=universe.filter(r=>
     (!sec||r.sector===sec) &&
     (!q || (r.ticker||'').toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q)));
@@ -326,7 +361,8 @@ function drawScreener(){
   const cols=SCREENER_COLS.filter(c=>colVisible[c.key]);
   const th=cols.map(c=>{
     const arrow=sortKey===c.key?(sortAsc?' ▲':' ▼'):'';
-    return `<th class="${c.num?'num':''}" onclick="setSort('${c.key}')" title="${c.label} · ${FEED_TIERS[c.tier]?FEED_TIERS[c.tier].label:c.tier} feed">${c.label}${arrow} ${tierBadge(c.tier)}${v1Badge(c)}</th>`;
+    const title=(c.tip?c.tip+' · ':`${c.label} · `)+`${FEED_TIERS[c.tier]?FEED_TIERS[c.tier].label:c.tier} feed`;
+    return `<th class="${c.num?'num':''}" onclick="setSort('${c.key}')" title="${title}">${c.label}${arrow} ${tierBadge(c.tier)}${v1Badge(c)}</th>`;
   }).join('');
   const body=rows.slice(0,300).map(r=>`<tr style="cursor:pointer" onclick="openStock('${r.ticker}')" title="Open ${r.ticker} detail">`+
     cols.map(c=>`<td class="${c.num?'num':''}${c.cls?' '+c.cls:''}">${c.fmt?c.fmt(r):(r[c.key]??'–')}</td>`).join('')+
@@ -695,6 +731,20 @@ async function renderEducation(){
         sources:['Harris — Trading &amp; Exchanges'],
         significance:'The other <b>3 of Harris’s 4</b> liquidity dimensions — width (spread), immediacy, resiliency — need a paid real-time quote feed. Kept as <b>present-but-flagged</b> columns so the un-measured dimensions are explicit, not silently missing.',
         exampleSignal:'// not in v1 — requires an L1/L2 quote feed\nspread = ask - bid; depth = book_size; resiliency = recovery_after_imbalance'},
+    ]],
+    ['Momentum — skip-month factor + RS rank (issue #40)', [
+      {metric:'Trailing returns (1/3/6/12-month)', feedTier:'ohlcv', multiSource:false,
+        sources:['Fama-French'],
+        significance:'Simple close-to-close returns over each trailing window, free from nightly OHLCV. Display-only building blocks — the priced-in signal is the skip-month factor below, not raw 12-month return.',
+        exampleSignal:'return_Nm = (price_today / price_N_months_ago) - 1'},
+      {metric:'Momentum factor — skip-month (t-12→t-2)', feedTier:'ohlcv', multiSource:true,
+        sources:['Fama-French','Chan — Quantitative Trading'],
+        significance:'Cumulative return from 12 months ago to 2 months ago, <b>skipping the most recent month (t-1)</b>. This IS French’s winner/loser bucketing rule — including t-1 contaminates the factor with short-term reversal, a different (opposite-signed) effect. Chan: momentum and mean-reversion are the only two profitable factor families worth a dedicated column. Re-ranked monthly.',
+        exampleSignal:'mom_factor = cumulative_return(t-12, t-2)   # excludes the last month'},
+      {metric:'RS percentile (cross-sectional rank)', feedTier:'ohlcv', multiSource:true,
+        sources:['Fama-French','Harris — Trading &amp; Exchanges'],
+        significance:'Percentile rank of the momentum factor vs. the universe (0=weakest, 100=strongest) — makes the factor comparable across names regardless of scale. <b>Breakpoints computed from liquid names only</b> (Fama-French) so illiquid micro-caps can’t warp the cuts; the ranking pool is the same hard liquidity gate (issue #37) every other view uses (Harris — momentum gets no exemption from the tradeability floor).',
+        exampleSignal:'liquid = universe.filter(passesLiquidityFloor)\nrs_percentile = percentile_rank(mom_factor, within=liquid)'},
     ]],
     ['Volatility — sizing, stops &amp; regime (issue #50)', [
       {metric:'ATR / ATR% (Average True Range)', feedTier:'ohlcv', multiSource:true,
