@@ -54,12 +54,15 @@ Strike out what you don't care about. Add rows for anything the reading surfaces
 | IV rank / percentile | [ ] | | | 🔴 |
 
 ### 2c. Liquidity & microstructure  🟡 / 🔴
+> **Decided (issue #37):** liquidity is the **first-class gate** every other signal passes through. ADV + dollar volume shipped as default columns **and** a hard floor. Dollar volume proxies only **1 of Harris's 4 dimensions — depth**; spread (width), immediacy, resiliency need a quote feed = **not in v1**. ETFs gate on **basket liquidity**, not screen ADV (CFA ETF Guide).
 | Metric | Want? | Use | Priority | Notes |
 |---|---|---|---|---|
-| Average daily volume (ADV) | [ ] | | | |
-| Dollar volume (ADV × price) | [ ] | | | tradeability filter |
-| Bid/ask spread | [ ] | | | 🔴 needs quote feed |
-| Market depth / book | [ ] | | | 🔴 real-time only |
+| Average daily volume (ADV) | ✅ | B | P1 | shipped; ohlcv-derived. For ETFs a floor never a ceiling (basket rules) |
+| Dollar volume (ADV × price) | ✅ | B | P1 | **hard tradeability gate** + default column; ETF rows judged on basket liquidity |
+| ETF basket liquidity (Σ constituent $ADV × weight) | ✅ | F | P1 | free from already-collected holdings; the ETF's true capacity |
+| Bid/ask spread (width) | ✅ | D | — | 🔴 needs quote feed — column present, **flagged not-in-v1** |
+| Market depth / book | ✅ | D | — | 🔴 real-time only — present, **not-in-v1** |
+| Resiliency (recovery after imbalance) | ✅ | D | — | 🔴 quote feed — present, **not-in-v1** |
 | Float / shares outstanding | [ ] | | | ✅ have |
 
 ### 2d. Fundamentals & valuation  ✅ (already collected — free)
