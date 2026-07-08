@@ -32,12 +32,14 @@ For each: **Want?** [ ] · **Use:** F(ilter) / S(ort) / B(oth) / D(isplay) · **
 Strike out what you don't care about. Add rows for anything the reading surfaces that's missing.
 
 ### 2a. Price & momentum  🟡 (computable from free OHLCV)
+> **Decided (issue #40):** trailing returns + the academically-correct momentum factor — cumulative return **t-12→t-2**, skipping the most recent month (Fama-French prior(2,12); including t-1 contaminates with short-term reversal). Converted to a **cross-sectional RS percentile** vs. the universe, re-ranked monthly. RS breakpoints computed from **liquid names only** (`passesLiquidityFloor()`) — no name failing the $ vol floor (issue #37) can surface via a momentum/RS sort.
 | Metric | Want? | Use | Priority | Notes |
 |---|---|---|---|---|
 | Last price | [ ] | | | |
 | % change (1d / 1w / 1m) | [ ] | | | |
-| Return 1/3/6/12-month | [ ] | | | momentum ranking |
-| Relative strength rank (vs universe) | [ ] | | | |
+| Return 1/3/6/12-month | ✅ | B | P1 | shipped as `return_1m/3m/6m/12m`; ohlcv-derived |
+| Momentum factor (t-12→t-2, skip-month) | ✅ | B | P1 | shipped as `mom_factor`; Fama-French prior(2,12) |
+| Relative strength rank (vs universe) | ✅ | B | P1 | shipped as `rs_percentile`; liquid-names-only breakpoints |
 | 52-week range / % off high-low | [ ] | | | |
 | Moving averages (50/200d) + cross | [ ] | | | trend |
 | RSI | [ ] | | | overbought/oversold |

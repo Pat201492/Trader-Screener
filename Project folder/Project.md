@@ -109,6 +109,28 @@ values — the same "raw upstream, derive downstream" split the liquidity layer 
 
 ---
 
+## Momentum layer (issue #40) — trailing returns + skip-month RS rank
+
+Depends on #35 (column registry) and #37 (liquidity gate). The front-end ships trailing return columns and the academically-correct momentum factor: cumulative return **t-12 → t-2**, skipping the most recent month (t-1). That skip is French's actual winner/loser bucketing rule — including t-1 contaminates the factor with short-term reversal, a *different* (and opposite-signed) effect. The raw factor is converted to a **cross-sectional percentile RS rank** against the universe so it's comparable across names regardless of scale.
+
+**Upstream contract (add to the shared pipeline).** Compute from the **nightly OHLCV** already collected and expose on each `/api/stocks` row:
+
+| Field | Type | Meaning | Source |
+|---|---|---|---|
+| `return_1m` | number \| null | trailing 1-month simple return, % | OHLCV close-to-close |
+| `return_3m` | number \| null | trailing 3-month simple return, % | OHLCV |
+| `return_6m` | number \| null | trailing 6-month simple return, % | OHLCV |
+| `return_12m` | number \| null | trailing 12-month simple return, % | OHLCV |
+| `mom_factor` | number \| null | cumulative return **t-12 → t-2** (skip t-1), % — the Fama-French prior(2,12) momentum factor | OHLCV, re-ranked monthly |
+
+- **`rs_percentile` is NOT an upstream field** — it's a cross-sectional statistic computed **front-end** (`computeMomentumRanks()`), because the ranking pool depends on the user's live liquidity-floor selection (`LIQ_FLOOR`), which only exists client-side. Recomputed on every `drawScreener()` pass, same as `magic_rank`.
+- **Liquidity gate (Fama-French):** the RS-percentile ranking pool is `passesLiquidityFloor()` names only — an illiquid micro-cap must never warp the percentile breakpoints for the liquid names around it. Rows failing the floor get `rs_percentile=null` and are dropped entirely by the hard gate before render, so no gated-out name can ever surface via a momentum/RS sort.
+- **Harris:** momentum is a genuine price-discovery signal, but price impact eats the edge without the same liquidity gate every other view uses — momentum gets no special exemption.
+- **Chan:** momentum (with mean-reversion) is one of the only two profitable factor families worth building a screener column for.
+- Documented per-column in the header tooltip (`tip` field on the `SCREENER_COLS` entry), not just here.
+
+---
+
 ## Options-Chain Feed (first feature)
 
 The first trader-specific feature: for any ticker already in the shared universe, pull and serve its **options chain** — every listed expiration, with the full grid of calls/puts per strike.
