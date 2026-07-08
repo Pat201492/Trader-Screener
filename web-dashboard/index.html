@@ -57,9 +57,13 @@
   .colitem .tier{margin-left:auto}
   .t-v1{color:#f0883e;background:#f0883e1a;border-color:#f0883e55}
   .t-oos{color:#f85149;background:#f851491a;border-color:#f8514955}
+  .t-warm{color:#79c0ff;background:#79c0ff1a;border-color:#79c0ff55}
   /* liquidity disclosure note — makes the un-measured dimensions explicit */
   .lqnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #e3b341;border-radius:6px;background:#e3b3410d;color:var(--muted);font-size:12px;line-height:1.55}
   .lqnote b{color:var(--txt)}
+  /* IV Rank / Percentile disclosure note (issue #45) — same note-box language, paid-feed colored */
+  .ivnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #e3b341;border-radius:6px;background:#e3b3410d;color:var(--muted);font-size:12px;line-height:1.55}
+  .ivnote b{color:var(--txt)}
   /* macro regime banner (issue #39) — same note-box language, colored by regime */
   .macronote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:6px;background:#2f81f70d;color:var(--muted);font-size:12px;line-height:1.55}
   .macronote.risk-off{border-left-color:var(--red);background:#f851490d}
@@ -380,6 +384,69 @@ function rsCell(r){
   const v=r.rs_percentile, c=v>=70?'pos':v<=30?'neg':'';
   return `<span class="${c}">${Math.round(v)}</span>`;
 }
+// ── IV Rank / IV Percentile layer (issue #45) — the options normalizer ────
+// OIC: raw IV is meaningless cross-name (a biotech's 60% vs a utility's 18%) — IV
+// Rank and IV Percentile are what make IV comparable at all, and the pivot that
+// flips the recommendation structure (high IVR -> sell premium, low -> buy).
+// Ship BOTH side-by-side, never raw IV alone, so a one-off spike shows up as an
+// IVR/IVP divergence instead of hiding behind a single misleading number
+// (Education/summaries/iv-rank-iv-percentile-oic.md).
+// Upstream contract (paid options-chain feed + nightly IV-snapshot job — see
+// Project.md "IV Rank / Percentile layer"): iv_rank, iv_percentile, atm_iv_30d
+// (the FIXED snapshot definition — 30-day ATM IV, same instrument every night
+// so the trailing window stays apples-to-apples) and iv_history_days (nightly
+// snapshots accrued for THIS ticker since the job started — a ticker added to
+// the universe later starts its own clock at 0).
+// History-accrual caveat: IVP needs ~3-6mo (63-126 trading days) and true IVR
+// needs ~1yr (252) before the reading is trustworthy. Flagged 'warming up'
+// PER ROW (accrual is per-ticker, not one global switch) until then — same
+// present-but-flagged idea as notInV1/oosPending, but for a still-accruing
+// history window rather than a missing feed or unvalidated backtest.
+const IV_WARMUP={ivpMin:63, ivpFull:126, ivrFull:252};
+function ivWarmup(r){
+  const d=r.iv_history_days;
+  if(d==null) return {days:null, ivpFull:false, ivrReady:false};
+  return {days:d, ivpFull:d>=IV_WARMUP.ivpFull, ivrReady:d>=IV_WARMUP.ivrFull};
+}
+function warmBadge(w,need){
+  const ready=need==='ivr'?w.ivrReady:w.ivpFull;
+  if(w.days==null||ready) return '';
+  const target=need==='ivr'?IV_WARMUP.ivrFull:IV_WARMUP.ivpFull;
+  const horizon=need==='ivr'?'~1yr':'~3-6mo';
+  return `<span class="tier t-warm" title="Warming up — ${w.days}/${target} trading days of nightly IV snapshots accrued. Needs ${horizon} before this reading is trustworthy.">warming</span>`;
+}
+// IVR thresholds -> buy/sell premium hint (OIC: >~70 rich = sell, <~30 cheap = buy).
+// Gated under the macro VIX regime (regimeVerdict(), issue #39/#45 dependency):
+// Douglas — a VIX spike is a non-negotiable de-risk trigger — so a risk-off
+// regime attaches an explicit tail-risk caveat to the SELL-premium hint rather
+// than suppressing it (single-name IVR can be rich for idiosyncratic reasons
+// even in a risk-off tape; this is a soft nudge, same never-a-hard-block
+// pattern as the liquidity/cap-floor defaults).
+function ivHint(r){
+  if(r.iv_rank==null) return null;
+  if(r.iv_rank>=70){
+    const riskOff=regimeVerdict().riskOff;
+    return {label:'sell prem', cls:'pos',
+      note:riskOff?'Rich IV, but macro regime is risk-off (VIX) — size down / hedge tail risk; don’t sell premium into a broad vol event.'
+                  :'IV rich for this name — favors selling premium (credit spreads, covered calls, iron condors).'};
+  }
+  if(r.iv_rank<=30) return {label:'buy prem', cls:'neg', note:'IV cheap for this name — favors buying premium (long calls/puts, straddles ahead of a catalyst).'};
+  return null;
+}
+function ivRankCell(r){
+  if(r.iv_rank==null) return '<span class="muted">–</span>';
+  const w=ivWarmup(r), hint=ivHint(r);
+  const cls=r.iv_rank>=70?'pos':r.iv_rank<=30?'neg':'';
+  const ivTitle=r.atm_iv_30d!=null?`30d ATM IV ${(r.atm_iv_30d*100).toFixed(1)}% (raw — never shown alone)`:'';
+  const hintHTML=hint?` <span class="${hint.cls}" style="font-size:10px;text-transform:uppercase" title="${hint.note}">${hint.label}</span>`:'';
+  return `<span class="${cls}" title="${ivTitle}">${Math.round(r.iv_rank)}</span>${hintHTML} ${warmBadge(w,'ivr')}`;
+}
+function ivPercentileCell(r){
+  if(r.iv_percentile==null) return '<span class="muted">–</span>';
+  const w=ivWarmup(r);
+  const cls=r.iv_percentile>=70?'pos':r.iv_percentile<=30?'neg':'';
+  return `<span class="${cls}">${Math.round(r.iv_percentile)}</span> ${warmBadge(w,'ivp')}`;
+}
 // Central column registry — the ONE place columns are defined. Adding a metric
 // = adding one entry here (no <th>/<td> markup edits). Each entry:
 //   {key,label,num?,cls?,fmt?,tier}  where
@@ -413,6 +480,17 @@ const SCREENER_COLS=[
   {key:'rs_percentile', label:'RS %ile', num:true,          tier:'ohlcv',
     tip:'Cross-sectional percentile rank of the momentum factor vs. the universe (0=weakest, 100=strongest). Breakpoints computed from liquid names only — illiquid micro-caps never warp the cuts, and no name failing the $ vol floor can surface here.',
     fmt:r=>rsCell(r)},
+  // ── IV Rank / IV Percentile layer (issue #45) — THE options normalizer. Ship both,
+  // never raw IV alone (OIC). Snapshot definition is fixed (30d ATM IV) so the trailing
+  // window is apples-to-apples; per-row 'warming' badge until enough nightly snapshots
+  // have accrued (see ivWarmup()). IVR>=70/<=30 carries a buy/sell-premium hint,
+  // soft-gated under the macro VIX regime (see ivHint()).
+  {key:'iv_rank', label:'IV Rank', num:true,                tier:'paid',
+    tip:'IV Rank = (current 30d-ATM IV − 52wk low) / (52wk high − 52wk low) × 100. Uses only the year\'s two extremes — fragile to a single spike, which is why IV Percentile ships beside it. ≥70 hints sell premium, ≤30 hints buy premium (caveated under a risk-off VIX regime). Warming up until ~1yr of nightly snapshots has accrued for this ticker.',
+    fmt:r=>ivRankCell(r)},
+  {key:'iv_percentile', label:'IV %ile', num:true,          tier:'paid',
+    tip:'IV Percentile = % of the past year\'s trading days this name\'s 30d-ATM IV closed below today\'s level. Uses the full distribution, not just the extremes — more robust than IV Rank after a one-off spike; the two are shipped side-by-side so a divergence between them is visible. Warming up until ~3-6mo of nightly snapshots has accrued for this ticker.',
+    fmt:r=>ivPercentileCell(r)},
   {key:'score',  label:'Score',    num:true,               tier:'collected', fmt:r=>fmt(r.score,0)},
   {key:'pe',     label:'P/E',      num:true,               tier:'collected', fmt:r=>isETF(r)?'–':fmt(r.pe,1)},
   {key:'ebit_ev_yield', label:'EBIT/EV', num:true,         tier:'collected', fmt:r=>(isETF(r)||r.ebit_ev_yield==null)?'–':pct(r.ebit_ev_yield)},
@@ -478,6 +556,9 @@ async function renderScreener(){
     ${regimeBannerHTML()}
     <div class="lqnote">
       <b>Liquidity = the first-class gate.</b> Dollar volume (ADV × price) is a free stand-in for a quote feed, proxying only <b>1 of Harris's 4 liquidity dimensions — depth</b>. Spread (width), immediacy &amp; resiliency need a paid quote feed → <b>not in v1</b> (see the flagged columns). <b>ETFs</b> gate on <b>basket liquidity</b> (Σ constituent $ADV × weight), not screen ADV — a low-volume ETF on a liquid basket is not rejected.
+    </div>
+    <div class="ivnote">
+      <b>IV Rank &amp; IV Percentile — the options normalizer (paid feed).</b> Raw IV is meaningless across names (a biotech's 60% vs a utility's 18%) — IVR/IVP are shipped <b>side-by-side</b>, never IV alone, so a one-off spike shows up as a divergence between them instead of a misleading single number. Snapshot definition is fixed (<b>30-day ATM IV</b>) for a consistent trailing window. Columns are flagged <b>warming up</b> per ticker until ~3-6mo of nightly snapshots have accrued (IV Percentile) / ~1yr (IV Rank). IVR ≥70 hints <b>sell premium</b>, ≤30 hints <b>buy premium</b> — soft-gated under the macro VIX regime (see the Macro tab): a rich-IV sell hint carries an explicit caution when the regime is risk-off.
     </div>
     <div id="tbl"><div class="loading">Loading stocks…</div></div>`;
   try{
@@ -758,10 +839,13 @@ async function loadOptions(){
   try{
     const s=await jget('/api/options/'+tk);
     const sm=s.summary||{};
+    const ivRow={iv_rank:sm.iv_rank, iv_percentile:sm.iv_percentile, iv_history_days:sm.iv_history_days, atm_iv_30d:sm.atm_iv_30d??sm.atm_iv};
     let head=`<div style="margin:6px 0 14px">
       <span class="pill">spot $${fmt(sm.spot)}</span>
       <span class="pill">ATM IV ${sm.atm_iv!=null?(sm.atm_iv*100).toFixed(1)+'%':'–'}</span>
       <span class="pill">IV mean ${sm.iv_mean!=null?(sm.iv_mean*100).toFixed(1)+'%':'–'}</span>
+      <span class="pill" title="the normalizer — never trust raw IV alone">IV Rank ${ivRankCell(ivRow)}</span>
+      <span class="pill">IV %ile ${ivPercentileCell(ivRow)}</span>
       <span class="pill">P/C OI ${fmt(sm.put_call_oi)}</span>
       <span class="pill">OI ${fmt(sm.total_oi,0)}</span></div>`;
     const exp=s.expirations&&s.expirations[0];
@@ -905,9 +989,12 @@ async function openStock(tk){
     try{
       const o=await jget('/api/options/'+tk);
       const sm=o.summary||{};
+      const ivRow={iv_rank:sm.iv_rank, iv_percentile:sm.iv_percentile, iv_history_days:sm.iv_history_days, atm_iv_30d:sm.atm_iv_30d??sm.atm_iv};
       document.getElementById('detOpt').innerHTML=`<div class="group-title">Options</div>
         <span class="pill">ATM IV ${sm.atm_iv!=null?(sm.atm_iv*100).toFixed(1)+'%':'–'}</span>
         <span class="pill">IV mean ${sm.iv_mean!=null?(sm.iv_mean*100).toFixed(1)+'%':'–'}</span>
+        <span class="pill" title="the normalizer — never trust raw IV alone">IV Rank ${ivRankCell(ivRow)}</span>
+        <span class="pill">IV %ile ${ivPercentileCell(ivRow)}</span>
         <span class="pill">P/C OI ${fmt(sm.put_call_oi)}</span>
         <span class="pill">OI ${fmt(sm.total_oi,0)}</span>`;
     }catch{ document.getElementById('detOpt').innerHTML=''; }

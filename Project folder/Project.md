@@ -135,45 +135,77 @@ Depends on #35 (column registry) and #37 (liquidity gate). The front-end ships t
 
 The first trader-specific feature: for any ticker already in the shared universe, pull and serve its **options chain** — every listed expiration, with the full grid of calls/puts per strike.
 
-### Data source
-- **Primary:** `yfinance` — already a dependency of the shared pipeline. Provides chains with no extra account/key:
-  - `yf.Ticker(sym).options` → list of expiration dates (`YYYY-MM-DD`).
-  - `yf.Ticker(sym).option_chain(exp)` → `.calls` and `.puts` DataFrames.
-- **Per-contract fields** yfinance returns: `contractSymbol`, `strike`, `lastPrice`, `bid`, `ask`, `change`, `percentChange`, `volume`, `openInterest`, `impliedVolatility`, `inTheMoney`, `lastTradeDate`.
-- **Caveat:** yfinance options are delayed/snapshot and Greeks beyond IV are **not** provided — we compute Greeks (delta/gamma/theta/vega) ourselves (Black-Scholes) or pull a paid feed later. Quote freshness ≠ real-time; fine for screening, not for execution.
+### Data source — **decided: paid feed (issue #45)**
+`yfinance` doesn't cover this reliably (delayed/snapshot chains, no Greeks) — confirmed a paid options-chain feed is a real, ongoing cost commitment, not a free add-on.
+
+**Primary: Polygon.io (Options Starter/Developer tier).** Reasons:
+- Ships **IV and Greeks precomputed per contract** — removes the in-house Black-Scholes step yfinance forced on us.
+- Full US equity/ETF listed-options coverage via one REST API — fits the existing "one collector, JSON/API output" pipeline shape (`options.py` stays a script that writes rows, same as every other collector).
+- Priced for a single nightly-snapshot workload, not per-quote/real-time billing — matches the hosting constraint (no new always-on machine, ARCHITECTURE.md).
+
+**Alternatives considered, not chosen for v1:**
+- **ORATS** — best-in-class vol-surface analytics (smoothed IV surface, skew, historical IV percentiles built in) but priced/scoped for professional vol trading; revisit if/when the screener needs a full smoothed surface rather than a fixed single-point (30d ATM) snapshot.
+- **Tradier** — cheaper, brokerage-native; a reasonable fallback if a brokerage integration is added later for execution, but its options-chain endpoint is a secondary feature there, not the core product.
+- **CBOE DataShop** — the authoritative exchange-direct source, but pricier and heavier to integrate than justified for v1; the macro VIX layer already gets Cboe-methodology data for free via FRED (issue #39).
+
+**Instrument coverage decision:** options chains are pulled only for tickers that are (a) already in the shared equity/ETF universe and (b) pass the existing hard liquidity gate (`passesLiquidityFloor()`, issue #37) — an illiquid underlying's option chain is wide/worthless and not worth the paid-feed call budget. No separate "options" instrument class is screened in v1 (SCREENER_SHORTLIST.md §1) — options stay a **per-underlying overlay**: IV Rank/Percentile columns joined onto the existing equity/ETF screener rows, plus the existing per-ticker chain lookup tab.
 
 ### Where it lives in the pipeline
-New collector script in the **shared** pipeline (so the old app can surface it too — collect once, serve both):
+Collector script in the **shared** pipeline (so the old app can surface it too — collect once, serve both):
 
 ```
-options.py   # iterate universe (or a watchlist subset) → for each ticker:
-             #   expirations = yf.Ticker(t).options
-             #   for exp in expirations (cap N nearest): pull calls+puts
-             #   normalize → store rows; derive metrics (see below)
+options.py   # iterate universe (liquidity-gated subset) → for each ticker:
+             #   pull chain from the paid feed (Polygon)
+             #   normalize → store snapshot rows; derive metrics (see below)
 ```
 
 - Slots into `run.py` after `fundamentals.py` (needs the universe; independent of model/news).
-- **Cadence:** options data moves intraday, but the shared pipeline is nightly. Start nightly snapshot (cheap, no new always-on machine — respects the hosting constraint). Flag faster/on-demand refresh as an open item.
-- **Scope control:** full chains for ~all tickers is large. Start with a **watchlist / top-N subset** and a cap on expirations per ticker (e.g. nearest 4–6) to keep storage + fetch time bounded.
+- **Cadence:** options data moves intraday, but the shared pipeline is nightly. Flag faster/on-demand refresh as an open item.
+- **Scope control:** liquidity-gated subset (not the full universe) + a cap on expirations per ticker (e.g. nearest 4–6) to keep storage + fetch time bounded.
+
+### Nightly IV-snapshot job — started now (issue #45)
+IV Rank needs ~1 year of history and IV Percentile ~3–6 months before either is trustworthy (see the layer below) — that clock only starts once snapshots exist, so the job starts accruing **immediately**, ahead of every downstream column being "ready."
+
+**Snapshot definition — fixed, not re-derived later:** 30-day ATM IV. For each ticker, each night: take the two listed expirations bracketing 30 calendar days to expiry, interpolate their IV at the strike nearest spot (ATM), linearly interpolate across the two expirations to the 30-day point. This mirrors the Cboe VIX methodology (same "30-day, interpolated, near-the-money" recipe used for the index itself — Education/summaries/cboe-vix-index.md) so single-name and macro vol reads are conceptually consistent. **Once chosen this definition must not change** — redefining it resets the trailing window and invalidates every IV Rank/Percentile computed against the old one.
 
 ### Derived metrics (computed, not fetched)
 Layer trader signals on top of raw chains — these become screener columns and feed the Research tab:
-- **IV rank / IV percentile** (needs IV history — accumulate over nightly snapshots).
+- **IV Rank / IV Percentile** — see the dedicated layer section below; the must-have normalizer, shipped as of issue #45.
 - **Put/call ratio** (volume + open interest) per ticker.
-- **ATM IV / IV skew** (term + strike skew).
-- **Greeks** via Black-Scholes (delta/gamma/theta/vega) using the risk-free rate already pulled from **FRED** (`fred.py`) and dividend yield from `fundamentals.json` — reuse existing data, don't refetch.
+- **IV skew** (term + strike skew).
+- **Greeks** — sourced directly from Polygon per contract (no in-house Black-Scholes needed for v1).
 - **Unusual activity** — volume ≫ open interest flags.
 
 ### Storage / schema
 - New table(s): `options_expirations` (ticker, exp dates) + `option_contracts` (one row per contract per snapshot date) — or a per-ticker JSON cache mirroring the `fundamentals.json` pattern.
-- Keep a **history** of snapshots so IV-rank / OI-trend metrics are possible (don't overwrite — append by snapshot date).
+- **`iv_snapshots`** (new, issue #45): one row per ticker per trading day — `ticker, snapshot_date, atm_iv_30d`. Append-only, never overwrite — this is the trailing window IV Rank/Percentile are computed from. Never redefine `atm_iv_30d`'s calculation once the table has history (see snapshot definition above).
+- Keep a **history** of chain snapshots too so OI-trend metrics are possible (don't overwrite — append by snapshot date).
 
 ### API (mirror the old `server.py` style)
-- `GET /api/options/{ticker}` → expirations + summary metrics (ATM IV, put/call, IV rank).
+- `GET /api/options/{ticker}` → expirations + summary metrics (ATM IV, IV Rank, IV Percentile, put/call).
 - `GET /api/options/{ticker}/{expiration}` → full calls/puts grid for one expiry.
+- `/api/stocks` rows carry `iv_rank`, `iv_percentile`, `atm_iv_30d`, `iv_history_days` for liquidity-gated tickers (see layer contract below) so the screener joins options data without a second round-trip per row.
 - Optional screener filter additions on `/api/stocks`: `min_iv_rank`, `min_put_call`, `unusual_only`.
 
 ---
+
+## IV Rank / IV Percentile layer (issue #45) — the options normalizer
+
+Depends on #35 (column registry) and #39 (macro VIX regime). Raw IV is meaningless cross-name (a biotech's 60% vs. a utility's 18% — Education/summaries/iv-rank-iv-percentile-oic.md) — IV Rank and IV Percentile are the must-have normalizer that make IV comparable at all, and the pivot that flips the recommendation structure (high IVR → sell premium, low IVR → buy premium). The front-end (`web-dashboard/index.html`) joins both as **default screener columns**, side-by-side, and **never displays raw IV as a standalone column or pill** — every place IV appears (screener, options tab, stock detail) it's alongside its Rank/Percentile.
+
+**Upstream contract (add to the shared pipeline).** Computed from the nightly `iv_snapshots` history (see above) and exposed on each liquidity-gated `/api/stocks` row + the `/api/options/{ticker}` summary:
+
+| Field | Type | Meaning | Source |
+|---|---|---|---|
+| `iv_rank` | number \| null | `(atm_iv_30d − 52wk low) / (52wk high − 52wk low) × 100` | derived from `iv_snapshots` |
+| `iv_percentile` | number \| null | % of the past year's trading days `atm_iv_30d` closed below today's level | derived from `iv_snapshots` |
+| `atm_iv_30d` | number \| null | today's fixed-definition snapshot (30-day ATM IV, fraction e.g. 0.34) | `options.py` / Polygon |
+| `iv_history_days` | integer \| null | count of nightly snapshots accrued for this ticker since the job started | derived from `iv_snapshots` |
+
+- Both `iv_rank` and `iv_percentile` are computed **upstream** (unlike `rs_percentile`), because the trailing window is a single-name time series, not a cross-sectional statistic that depends on the user's live filter state — no reason to ship a year of daily snapshots to the client just to recompute two numbers.
+- **Warming-up gate, per row:** `iv_history_days < 126` (~3–6mo) flags IV Percentile "warming," `< 252` (~1yr) flags IV Rank "warming" (`ivWarmup()`). Each ticker's clock starts independently — one added to the universe later is not held to the same calendar as one tracked since the job began.
+- **Premium hint (`ivHint()`):** IVR ≥70 → "sell prem," IVR ≤30 → "buy prem." **Gated under the macro VIX regime** (`regimeVerdict()`, issue #39): a risk-off regime doesn't suppress the sell-premium hint (a single name's IVR can be idiosyncratically rich even in a calm tape, and vice versa) but attaches an explicit tail-risk caveat — Douglas: a VIX spike is a non-negotiable de-risk trigger, so a "sell premium" hint during one gets a caution, not silence. Same soft-nudge-never-a-hard-block pattern as the liquidity/cap-floor macro defaults.
+- Documented per-column in the header tooltip (`tip` field) plus a dedicated disclosure box (`.ivnote`) in the Screener controls, same convention as the liquidity/macro layers.
 
 ## ⚠️ Open Items
 - [ ] **Define the screener spec** — which instruments, which columns, which filters/sorts. ("We will have to iron out the project screener — figure out later.")
@@ -181,14 +213,14 @@ Layer trader signals on top of raw chains — these become screener columns and 
 - [ ] **Confirm hosting model** — single Fly.io pipeline feeding both apps vs separate. Cost-driven (prefer one collector). See ARCHITECTURE.md.
 - [ ] **Cadence** — does the trader screener need faster-than-nightly data for any metric? If so, where does that fit without a second always-on machine?
 - [ ] **New metrics → shared pipeline** — agree that trader-specific metrics get added upstream so old app + Research reuse them.
-- [ ] **Instrument coverage** — yfinance covers equities/ETFs/some crypto; futures/options/forex need a data source decision.
+- [x] **Instrument coverage (options)** — decided (issue #45): liquidity-gated subset of the existing equity/ETF universe, not a separate options instrument class. Futures/forex options coverage still undecided.
 - [ ] **Auth / accounts** — reuse old `auth.py` / `accounts_database.py` or separate?
 
 ### Options-Chain Feed — open items
-- [ ] **Scope** — full universe vs watchlist/top-N; how many expirations per ticker to cap.
-- [ ] **Data source longevity** — is yfinance (delayed snapshot, no Greeks) good enough, or do we budget a paid options feed (Polygon/Tradier/ORATS) later?
+- [x] **Scope** — decided (issue #45): liquidity-gated subset (`passesLiquidityFloor()`), not the full universe; nearest 4–6 expirations per ticker.
+- [x] **Data source longevity** — decided (issue #45): paid feed, Polygon.io primary (see "Data source" above). yfinance ruled out (no Greeks, delayed).
 - [ ] **Cadence** — nightly snapshot to start; decide if/when intraday or on-demand refresh is needed (without an always-on machine — hosting cost).
-- [ ] **Greeks** — confirm Black-Scholes-in-house using FRED risk-free rate + fundamentals dividend yield; American-style options approximation acceptable?
-- [ ] **History / storage** — append-by-snapshot schema so IV-rank and OI trends are computable; storage growth bound.
+- [x] **Greeks** — decided (issue #45): sourced directly from Polygon per contract; in-house Black-Scholes no longer needed for v1.
+- [x] **History / storage** — decided (issue #45): append-only `iv_snapshots` table (ticker, snapshot_date, atm_iv_30d), fixed 30-day-ATM definition, started now so the ~1yr IV Rank window populates.
 - [ ] **Shared-pipeline placement** — confirm `options.py` runs in the same nightly Fly.io job so the old app gets it too (collect once).
-- [ ] **API shape** — finalize `/api/options/...` routes + which derived metrics surface as screener columns/filters.
+- [ ] **API shape** — finalize `/api/options/...` routes + which derived metrics surface as screener columns/filters beyond `iv_rank`/`iv_percentile` (already specified above).
