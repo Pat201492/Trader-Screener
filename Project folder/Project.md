@@ -72,6 +72,65 @@ Tradeability is the gate every other surfaced signal passes through. The front-e
 
 ---
 
+## Macro / regime layer (issue #39) — VIX + yield-curve context
+
+A macro tab pairs a **fast, coincident** vol gauge (VIX) with a **slow, leading** recession-probability
+gauge (yield curve), both FRED-only. The front-end (`web-dashboard/index.html`) computes the VIX regime
+bucket, term-structure inversion flag, and Estrella–Mishkin recession probit **client-side** from raw FRED
+values — the same "raw upstream, derive downstream" split the liquidity layer uses for `effDollarVol()`.
+
+**Upstream contract (add to the shared pipeline).** New `GET /api/macro` endpoint, sourced from `fred.py`:
+
+| Field | Type | Meaning | Source |
+|---|---|---|---|
+| `vix` | number | latest VIXCLS close | FRED `VIXCLS` |
+| `vix9d` | number \| null | 9-day VIX | FRED if carried, else Cboe/yfinance fallback |
+| `vix3m` | number \| null | 3-month VIX | FRED if carried, else Cboe/yfinance fallback |
+| `t10y3m` | number | latest daily 10Y−3M spread, percentage points (already the spread) | FRED `T10Y3M` |
+| `t10y3m_monthly` | number \| null | spread resampled to a monthly average — preferred input to the probit | derived from `T10Y3M` |
+| `asof` | string | as-of date for the snapshot | — |
+
+- The front-end degrades gracefully: prefers `t10y3m_monthly`, falls back to the raw daily `t10y3m` (labeled
+  "daily approximation" in the UI) when the monthly figure isn't available yet; if `/api/macro` is
+  unreachable the macro tab shows the standard API-unreachable error and the screener simply skips the
+  regime nudge (both filters keep their normal unfiltered defaults).
+- **VIX regime bucket:** calm &lt;15 / normal 15–20 / elevated 20–30 / stress &gt;30 / panic &gt;40 (Cboe VIX
+  methodology rule-of-thumb bands).
+- **Term-structure inversion:** VIX/VIX3M ratio &gt;1.0 flags inversion, &gt;1.10 = deep backwardation — a
+  stronger crisis tell than the VIX level alone.
+- **Recession probability:** `P = Φ(−0.5333 − 0.6629 × spread)` (Estrella–Mishkin 1998, fit on monthly US
+  data ~1959–1995). **⚠ Constants not re-verified against a current NY Fed refit** — re-check before
+  shipping any decision that leans on a precise threshold. Badge: green &lt;30% · amber 30–50% · red ≥50%.
+- **Regime gate is soft, never a hard block:** risk-off (VIX &gt;30 or P(recession) ≥50%) nudges the
+  screener's default **$-volume floor** and **cap floor** tighter (applied once per session load) — every
+  filter stays user-editable via the existing controls. Inversion is labeled a **12-month leading warning,
+  not a sell trigger** in the UI (recessions historically arrive after the curve re-steepens; one known
+  false positive, 1966–67).
+
+---
+
+## Momentum layer (issue #40) — trailing returns + skip-month RS rank
+
+Depends on #35 (column registry) and #37 (liquidity gate). The front-end ships trailing return columns and the academically-correct momentum factor: cumulative return **t-12 → t-2**, skipping the most recent month (t-1). That skip is French's actual winner/loser bucketing rule — including t-1 contaminates the factor with short-term reversal, a *different* (and opposite-signed) effect. The raw factor is converted to a **cross-sectional percentile RS rank** against the universe so it's comparable across names regardless of scale.
+
+**Upstream contract (add to the shared pipeline).** Compute from the **nightly OHLCV** already collected and expose on each `/api/stocks` row:
+
+| Field | Type | Meaning | Source |
+|---|---|---|---|
+| `return_1m` | number \| null | trailing 1-month simple return, % | OHLCV close-to-close |
+| `return_3m` | number \| null | trailing 3-month simple return, % | OHLCV |
+| `return_6m` | number \| null | trailing 6-month simple return, % | OHLCV |
+| `return_12m` | number \| null | trailing 12-month simple return, % | OHLCV |
+| `mom_factor` | number \| null | cumulative return **t-12 → t-2** (skip t-1), % — the Fama-French prior(2,12) momentum factor | OHLCV, re-ranked monthly |
+
+- **`rs_percentile` is NOT an upstream field** — it's a cross-sectional statistic computed **front-end** (`computeMomentumRanks()`), because the ranking pool depends on the user's live liquidity-floor selection (`LIQ_FLOOR`), which only exists client-side. Recomputed on every `drawScreener()` pass, same as `magic_rank`.
+- **Liquidity gate (Fama-French):** the RS-percentile ranking pool is `passesLiquidityFloor()` names only — an illiquid micro-cap must never warp the percentile breakpoints for the liquid names around it. Rows failing the floor get `rs_percentile=null` and are dropped entirely by the hard gate before render, so no gated-out name can ever surface via a momentum/RS sort.
+- **Harris:** momentum is a genuine price-discovery signal, but price impact eats the edge without the same liquidity gate every other view uses — momentum gets no special exemption.
+- **Chan:** momentum (with mean-reversion) is one of the only two profitable factor families worth building a screener column for.
+- Documented per-column in the header tooltip (`tip` field on the `SCREENER_COLS` entry), not just here.
+
+---
+
 ## Options-Chain Feed (first feature)
 
 The first trader-specific feature: for any ticker already in the shared universe, pull and serve its **options chain** — every listed expiration, with the full grid of calls/puts per strike.
