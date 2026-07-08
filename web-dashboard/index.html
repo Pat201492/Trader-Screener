@@ -726,6 +726,24 @@ async function renderEducation(){
         significance:'The benchmark price fills are measured against (Estimated Cost = TradeSize × TradeSign × (TradePrice − BenchmarkPrice)). Useful conceptually for execution-cost thinking, but real-time VWAP needs a <b>quote feed</b>, so it’s out of the free v1 for intraday use — a swing/position horizon doesn’t require it.',
         exampleSignal:'fill_price vs VWAP -> effective-cost estimate (paid/intraday only, not in v1)'},
     ]],
+    ['Smart-money moat (issue #53)', [
+      {metric:'Smart-money scored view (congress + insider + committee-conflict + news sentiment)', feedTier:'collected', multiSource:true,
+        sources:['Harris — Trading &amp; Exchanges','How to Read a Tear Sheet','Information Sheet / Tearsheet','Douglas — Trading in the Zone','Greenblatt — Magic Formula'],
+        significance:'The screener’s most defensible, theory-backed edge: congress trades, insider (EDGAR) filings, the committee-conflict cross-tab, and news sentiment are the adverse-selection order flow — the informed trading professionals fear — made observable. You want to be aligned with informed traders (insider/congress buying = people closest to the company/policy voting with money). <b>Give it its own scored view/filter, not raw event flags</b>, and combine the inputs into a single <b>adverse-selection-intensity score</b>. Read positioning as both confirmation AND a <b>crowding/squeeze warning</b>.',
+        exampleSignal:'congress_buy_90d AND insider_net_buy_qtr AND committee_conflict_flag -> smart-money-confirmed long'},
+      {metric:'UOA (unusual options activity) — options-side twin', feedTier:'paid', multiSource:true,
+        sources:['Derivatives — Types &amp; Signals','IV Rank / IV Percentile (OIC)','How to Read a Tear Sheet','Information Sheet / Tearsheet'],
+        significance:'The options-side twin of the equity moat — large sweeps or volume far exceeding open interest (especially OTM) flag possible informed positioning ahead of a catalyst, the same informed-flow thesis as congress/insider tracking. Noisy but a real flow signal; if options ship, surface it as a <b>flagship confirmation field</b>. Put/Call and skew extremes feed the same view as contrarian sentiment. Needs a <b>paid options feed</b> and corroboration before acting.',
+        exampleSignal:'UOA: call_volume >> call_OI (front-month OTM sweep) AND congress_buy_90d -> corroborated informed flow'},
+      {metric:'Out-of-sample validation of the moat', feedTier:'collected', multiSource:true,
+        sources:['Bailey et al. — Backtest Overfitting','Harris — Trading &amp; Exchanges'],
+        significance:'Validate the moat walk-forward / CSCV on held-out dates rather than reporting the single best committee/window cross-tab — a “moat” picked as the max of many noisy cross-tabs is <b>overfit</b>, and free-tier history may be shorter than the minimum backtest length for these cross-tabs. Congress/insider signals are also <b>noisy and lagged by filing rules</b>, so don’t overweight them.',
+        exampleSignal:'promote committee×window cross-tab ONLY IF OOS median rank holds AND N_combos logged'},
+      {metric:'Treat every signal as an edge, not a certainty', feedTier:'collected', multiSource:false,
+        sources:['Douglas — Trading in the Zone'],
+        significance:'A fired signal is a higher probability, not a guaranteed outcome. <b>Act on it without hesitation when it fires</b>, stop gathering evidence outside the defined signal (extra evidence just adds random variables), and expect a random win/loss distribution across many such signals — judge the edge at the <b>sample level</b>, not on the last trade. This is a usage/discipline policy, not a computable column.',
+        exampleSignal:'on signal fire: execute pre-sized plan, do NOT add ad-hoc filters -> discipline gate (behavior, not a column)'},
+    ]],
   ];
   const tierColor={ohlcv:'var(--green)',collected:'var(--accent)',macro:'#a371f7',paid:'var(--red)'};
   let html=`<div style="margin:6px 0 4px"><span class="big" style="font-size:22px">Learning the business of trading</span></div>
