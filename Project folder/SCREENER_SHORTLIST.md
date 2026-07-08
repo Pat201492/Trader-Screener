@@ -87,10 +87,14 @@ Strike out what you don't care about. Add rows for anything the reading surfaces
 | News sentiment | [ ] | | | from news.py |
 
 ### 2f. Macro context  ✅ (FRED — already collected)
+> **Decided (issue #39):** shipped as a macro tab pairing fast/coincident (VIX regime bucket + term-structure
+> inversion) with slow/leading (T10Y3M → Estrella–Mishkin recession probit). Soft-gates the screener's default
+> $-volume + cap floors — never a hard block. Probit constants flagged for re-verification; inversion labeled
+> a 12-month leading warning, not a sell trigger.
 | Metric | Want? | Use | Priority | Notes |
 |---|---|---|---|---|
-| Rates / yield curve | [ ] | | | regime filter |
-| VIX | [ ] | | | tail-risk gauge |
+| Rates / yield curve | ✅ | B | P1 | T10Y3M → monthly probit → P(recession) badge (green/amber/red) |
+| VIX | ✅ | B | P1 | VIXCLS regime bucket (calm/normal/elevated/stress/panic) + VIX/VIX3M term-structure inversion flag |
 | Other FRED series | [ ] | | | list: ____ |
 
 ### 2g. Risk / sizing  🟡
