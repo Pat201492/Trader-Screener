@@ -41,6 +41,20 @@
   .pill{display:inline-block;padding:2px 8px;border-radius:20px;background:#21262d;font-size:12px;margin-right:6px}
   .loading{color:var(--muted);padding:30px;text-align:center}
   .err{color:var(--red);padding:18px;border:1px solid var(--red);border-radius:8px;background:#f8514911}
+  /* feed-tier badges — free (collected/ohlcv) vs paid vs macro */
+  .tier{display:inline-block;font-size:9px;line-height:1;padding:2px 5px;border-radius:10px;text-transform:uppercase;letter-spacing:.3px;font-weight:600;vertical-align:middle;border:1px solid transparent}
+  .t-collected{color:var(--muted);background:#21262d;border-color:var(--border)}
+  .t-ohlcv{color:#58a6ff;background:#388bfd1a;border-color:#1f6feb55}
+  .t-paid{color:#e3b341;background:#e3b3411a;border-color:#e3b34155}
+  .t-macro{color:#bc8cff;background:#bc8cff1a;border-color:#8957e555}
+  /* column picker (show/hide) */
+  .colpick{position:relative}
+  .colpick>summary{list-style:none;cursor:pointer;background:var(--panel);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:7px 10px;user-select:none}
+  .colpick>summary::-webkit-details-marker{display:none}
+  .colmenu{position:absolute;z-index:20;margin-top:4px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:190px;box-shadow:0 6px 18px #0008}
+  .colitem{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:6px;cursor:pointer;white-space:nowrap}
+  .colitem:hover{background:#21262d}
+  .colitem .tier{margin-left:auto}
 </style>
 </head>
 <body>
@@ -83,11 +97,43 @@ async function ping(){
 }
 
 // ── SCREENER ──────────────────────────────────────────────
+// Feed tiers — how each column's data is sourced. Free = collected/ohlcv;
+// paid/macro are visually flagged so free vs paid columns are distinguishable.
+const FEED_TIERS={
+  collected:{label:'Collected', cls:'t-collected'},
+  ohlcv:    {label:'OHLCV',     cls:'t-ohlcv'},
+  paid:     {label:'Paid',      cls:'t-paid'},
+  macro:    {label:'Macro',     cls:'t-macro'},
+};
+// Central column registry — the ONE place columns are defined. Adding a metric
+// = adding one entry here (no <th>/<td> markup edits). Each entry:
+//   {key,label,num?,cls?,fmt?,tier}  where
+//   key   – field on the /api/stocks row (also the sort key)
+//   label – header text
+//   num   – right-align + numeric sort/format (default string)
+//   cls   – extra <td> class (e.g. 'muted')
+//   fmt   – (row)=>cell HTML; defaults to the raw value
+//   tier  – feed tier (key of FEED_TIERS) for the badge
+const SCREENER_COLS=[
+  {key:'rank',   label:'#',        num:true, cls:'muted', tier:'collected', fmt:r=>r.rank??'–'},
+  {key:'ticker', label:'Ticker',                          tier:'collected', fmt:r=>`<b style="color:var(--accent)">${r.ticker}</b>`},
+  {key:'name',   label:'Name',              cls:'muted',  tier:'collected', fmt:r=>(r.name||'').slice(0,38)},
+  {key:'sector', label:'Sector',            cls:'muted',  tier:'collected', fmt:r=>r.sector||'–'},
+  {key:'price',  label:'Price',    num:true,               tier:'ohlcv',     fmt:r=>r.price!=null?'$'+fmt(r.price):'–'},
+  {key:'score',  label:'Score',    num:true,               tier:'collected', fmt:r=>fmt(r.score,0)},
+  {key:'pe',     label:'P/E',      num:true,               tier:'collected', fmt:r=>fmt(r.pe,1)},
+  {key:'upside', label:'Upside %', num:true,               tier:'collected', fmt:r=>r.upside!=null?pct(r.upside):'–'},
+];
+// per-column visibility (column picker) — default all shown.
+const colVisible=Object.fromEntries(SCREENER_COLS.map(c=>[c.key,true]));
+const tierBadge=t=>{const m=FEED_TIERS[t];return `<span class="tier ${m?m.cls:''}">${m?m.label:t}</span>`;};
+
 async function renderScreener(){
   const v=document.getElementById('view');
   v.innerHTML=`<div class="controls">
     <input type="text" id="q" placeholder="Search ticker / name…" />
     <select id="sector"><option value="">All sectors</option></select>
+    <details class="colpick"><summary>Columns ▾</summary><div class="colmenu" id="colmenu"></div></details>
     <span class="muted" id="count"></span></div>
     <div id="tbl"><div class="loading">Loading stocks…</div></div>`;
   try{
@@ -98,9 +144,17 @@ async function renderScreener(){
     secs.forEach(s=>{const o=document.createElement('option');o.value=o.textContent=s;sel.appendChild(o);});
     document.getElementById('q').oninput=drawScreener;
     sel.onchange=drawScreener;
+    renderColMenu();
     drawScreener();
   }catch(e){ v.querySelector('#tbl').innerHTML=`<div class="err">${e.message}<br>Is the API running? (uvicorn api:app)</div>`; }
 }
+// column-picker menu — one checkbox per registered column, tagged with its tier.
+function renderColMenu(){
+  const m=document.getElementById('colmenu'); if(!m) return;
+  m.innerHTML=SCREENER_COLS.map(c=>
+    `<label class="colitem"><input type="checkbox" ${colVisible[c.key]?'checked':''} onchange="toggleCol('${c.key}',this.checked)"> ${c.label} ${tierBadge(c.tier)}</label>`).join('');
+}
+function toggleCol(k,on){ colVisible[k]=on; drawScreener(); }
 function drawScreener(){
   const q=(document.getElementById('q').value||'').toLowerCase();
   const sec=document.getElementById('sector').value;
@@ -112,18 +166,14 @@ function drawScreener(){
     if(typeof x==='string')return sortAsc?x.localeCompare(y):y.localeCompare(x);
     return sortAsc?x-y:y-x; });
   document.getElementById('count').textContent=`${rows.length} stocks`;
-  const cols=[['rank','#'],['ticker','Ticker'],['name','Name'],['sector','Sector'],
-              ['price','Price'],['score','Score'],['pe','P/E'],['upside','Upside %']];
-  const th=cols.map(([k,l])=>`<th class="${['price','score','pe','upside','rank'].includes(k)?'num':''}" onclick="setSort('${k}')">${l}${sortKey===k?(sortAsc?' ▲':' ▼'):''}</th>`).join('');
-  const body=rows.slice(0,300).map(r=>`<tr style="cursor:pointer" onclick="openStock('${r.ticker}')" title="Open ${r.ticker} detail">
-    <td class="num muted">${r.rank??'–'}</td>
-    <td><b style="color:var(--accent)">${r.ticker}</b></td>
-    <td class="muted">${(r.name||'').slice(0,38)}</td>
-    <td class="muted">${r.sector||'–'}</td>
-    <td class="num">${r.price!=null?'$'+fmt(r.price):'–'}</td>
-    <td class="num">${fmt(r.score,0)}</td>
-    <td class="num">${fmt(r.pe,1)}</td>
-    <td class="num">${r.upside!=null?pct(r.upside):'–'}</td></tr>`).join('');
+  const cols=SCREENER_COLS.filter(c=>colVisible[c.key]);
+  const th=cols.map(c=>{
+    const arrow=sortKey===c.key?(sortAsc?' ▲':' ▼'):'';
+    return `<th class="${c.num?'num':''}" onclick="setSort('${c.key}')" title="${c.label} · ${FEED_TIERS[c.tier]?FEED_TIERS[c.tier].label:c.tier} feed">${c.label}${arrow} ${tierBadge(c.tier)}</th>`;
+  }).join('');
+  const body=rows.slice(0,300).map(r=>`<tr style="cursor:pointer" onclick="openStock('${r.ticker}')" title="Open ${r.ticker} detail">`+
+    cols.map(c=>`<td class="${c.num?'num':''}${c.cls?' '+c.cls:''}">${c.fmt?c.fmt(r):(r[c.key]??'–')}</td>`).join('')+
+    `</tr>`).join('');
   document.getElementById('tbl').innerHTML=`<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
 }
 function setSort(k){ if(sortKey===k)sortAsc=!sortAsc; else{sortKey=k;sortAsc=true;} drawScreener(); }
