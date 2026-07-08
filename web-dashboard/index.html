@@ -59,6 +59,11 @@
   /* liquidity disclosure note — makes the un-measured dimensions explicit */
   .lqnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #e3b341;border-radius:6px;background:#e3b3410d;color:var(--muted);font-size:12px;line-height:1.55}
   .lqnote b{color:var(--txt)}
+  /* macro regime banner (issue #39) — same note-box language, colored by regime */
+  .macronote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:6px;background:#2f81f70d;color:var(--muted);font-size:12px;line-height:1.55}
+  .macronote.risk-off{border-left-color:var(--red);background:#f851490d}
+  .macronote.risk-on{border-left-color:var(--green);background:#3fb9500d}
+  .macronote b{color:var(--txt)}
 </style>
 </head>
 <body>
@@ -198,6 +203,112 @@ function dvolCell(r){
 }
 // not-in-v1 cell (spread / depth / resiliency — need a paid quote feed)
 const naV1=()=>'<span class="muted" title="Order-book liquidity dimension — needs a paid quote feed. Not in v1.">n/a · v1</span>';
+
+// ── Macro / regime layer (issue #39) ──────────────────────────────────────
+// Fast, coincident gauge (VIX level + term structure) + slow, leading gauge
+// (yield-curve recession probit) — both FRED, both computed client-side from
+// raw upstream values (same "raw upstream, derive downstream" split as the
+// liquidity layer's effDollarVol()). Regime SOFT-gates default screener
+// filters — Chan: regime is a strategy-family switch; Douglas: a VIX spike is
+// a non-negotiable de-risk trigger, but here that means a nudged default, not
+// a lockout — every nudge stays user-overridable via the existing controls.
+const VIX_BUCKETS=[
+  {max:15,       key:'calm',     label:'Calm',     color:'var(--green)'},
+  {max:20,       key:'normal',   label:'Normal',   color:'var(--accent)'},
+  {max:30,       key:'elevated', label:'Elevated', color:'#e3b341'},
+  {max:40,       key:'stress',   label:'Stress',   color:'var(--red)'},
+  {max:Infinity, key:'panic',    label:'Panic',    color:'#ff6b6b'},
+];
+// rule-of-thumb bands — Cboe VIX methodology (Education/summaries/cboe-vix-index.md)
+function vixBucket(level){
+  if(level==null) return null;
+  return VIX_BUCKETS.find(b=>level<b.max)||VIX_BUCKETS[VIX_BUCKETS.length-1];
+}
+// term-structure inversion (VIX/VIX3M ratio) — a stronger crisis tell than level
+// alone: >1.0 = inverted/backwardation (near-dated vol pricier), >1.10 = deep dislocation.
+function vixInversion(vix,vix3m){
+  if(vix==null||vix3m==null||!vix3m) return null;
+  const ratio=vix/vix3m;
+  return {ratio, inverted:ratio>1.0, deep:ratio>1.10};
+}
+// standard normal CDF via Abramowitz–Stegun 7.1.26 erf approximation (max err 1.5e-7)
+function erf(x){
+  const sign=x<0?-1:1; x=Math.abs(x);
+  const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
+  const t=1/(1+p*x);
+  const y=1-(((((a5*t+a4)*t)+a3)*t+a2)*t+a1)*t*Math.exp(-x*x);
+  return sign*y;
+}
+const normCdf=x=>0.5*(1+erf(x/Math.SQRT2));
+// Estrella–Mishkin (1998) probit, fit on monthly US data ~1959–1995:
+// P(recession in 12m) = Φ(α + β·spread), spread = T10Y3M in percentage points.
+// ⚠ constants NOT re-verified against a current NY Fed refit — flagged per issue #39
+// acceptance criteria; see Education/summaries/yield-curve-leading-indicator-nyfed.md.
+const RECESSION_PROBIT_ALPHA=-0.5333, RECESSION_PROBIT_BETA=-0.6629;
+function recessionProb(spreadPct){
+  if(spreadPct==null) return null;
+  return normCdf(RECESSION_PROBIT_ALPHA+RECESSION_PROBIT_BETA*spreadPct);
+}
+function recessionBand(p){
+  if(p==null) return {label:'–',color:'var(--muted)'};
+  if(p<0.30) return {label:'green',color:'var(--green)'};
+  if(p<0.50) return {label:'amber',color:'#e3b341'};
+  return {label:'red',color:'var(--red)'};
+}
+let MACRO={loaded:false, vix:null, vix9d:null, vix3m:null, spread:null, spreadMonthly:false, asof:null};
+let macroPromise=null;
+let regimeDefaultsApplied=false;
+let CAP_FLOOR=0; // persisted across screener re-renders, same pattern as LIQ_FLOOR
+function regimeVerdict(){
+  const vb=vixBucket(MACRO.vix);
+  const prob=recessionProb(MACRO.spread);
+  const riskOff=(MACRO.vix!=null&&MACRO.vix>30)||(prob!=null&&prob>=0.5);
+  return {vixBucket:vb, prob, riskOff, inversion:vixInversion(MACRO.vix,MACRO.vix3m)};
+}
+// soft pre-set, applied once per session load: risk-off nudges the liquidity + cap
+// floor DEFAULTS tighter. Never forced — both stay user-editable selects. "VIX>30
+// suppresses new longs" == a tighter default $-volume floor, not a hard block.
+function applyRegimeDefaults(){
+  if(regimeDefaultsApplied||!MACRO.loaded) return;
+  regimeDefaultsApplied=true;
+  if(regimeVerdict().riskOff){
+    if(!LIQ_FLOOR) LIQ_FLOOR=1000000;
+    if(!CAP_FLOOR) CAP_FLOOR=0.2;
+  }
+}
+function loadMacro(){
+  if(!macroPromise) macroPromise=(async()=>{
+    try{
+      const d=await jget('/api/macro');
+      MACRO={loaded:true, vix:d.vix??null, vix9d:d.vix9d??null, vix3m:d.vix3m??null,
+        spread:(d.t10y3m_monthly??d.t10y3m??null), spreadMonthly:d.t10y3m_monthly!=null,
+        asof:d.asof??null};
+    }catch{
+      MACRO={loaded:false, vix:null, vix9d:null, vix3m:null, spread:null, spreadMonthly:false, asof:null};
+    }
+    applyRegimeDefaults();
+  })();
+  return macroPromise;
+}
+function capFloorLabel(v){ return v>=1?'$'+v+'B':'$'+(v*1000).toFixed(0)+'M'; }
+// shared regime banner — used by both the Screener controls and the Macro tab
+function regimeBannerHTML(){
+  if(!MACRO.loaded) return '';
+  const rv=regimeVerdict(), vb=rv.vixBucket, rb=recessionBand(rv.prob);
+  const cls=rv.riskOff?'risk-off':'risk-on';
+  const vixPill=vb?`<span class="pill" style="border:1px solid ${vb.color};color:${vb.color}">VIX ${fmt(MACRO.vix,1)} · ${vb.label}</span>`:'';
+  const recPill=`<span class="pill" style="border:1px solid ${rb.color};color:${rb.color}">P(recession 12m) ${rv.prob!=null?(rv.prob*100).toFixed(0)+'%':'–'}</span>`;
+  const invNote=(rv.inversion&&rv.inversion.inverted)?`<span class="pill" style="border:1px solid var(--red);color:var(--red)" title="VIX/VIX3M ratio ${rv.inversion.ratio.toFixed(2)} — near-term vol pricier than 3m; a stronger crisis tell than level alone">term-structure inverted${rv.inversion.deep?' (deep)':''}</span>`:'';
+  const defaultsNote=rv.riskOff
+    ?`Defaults nudged: $vol floor ≥ $${compact(LIQ_FLOOR)}/day, cap floor ≥ ${capFloorLabel(CAP_FLOOR)} — <b>soft, override any filter above.</b>`
+    :'No default-filter changes for this regime.';
+  return `<div class="macronote ${cls}">
+    <div style="margin-bottom:4px">${vixPill} ${recPill} ${invNote}</div>
+    <b>Regime: ${rv.riskOff?'risk-off':'risk-on / normal'}.</b> ${defaultsNote}
+    Yield-curve inversion is a <b>12-month leading warning, not a sell trigger</b>.
+  </div>`;
+}
+
 // Central column registry — the ONE place columns are defined. Adding a metric
 // = adding one entry here (no <th>/<td> markup edits). Each entry:
 //   {key,label,num?,cls?,fmt?,tier}  where
@@ -248,10 +359,12 @@ const v1Badge=c=>c.notInV1?'<span class="tier t-v1" title="not in v1 — needs a
 
 async function renderScreener(){
   const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading…</div>';
+  await loadMacro(); // regime nudges LIQ_FLOOR/CAP_FLOOR defaults before controls render (once/session)
   v.innerHTML=`<div class="controls">
     <input type="text" id="q" placeholder="Search ticker / name…" />
     <select id="sector"><option value="">All sectors</option></select>
-    <select id="capFloor" title="Greenblatt cap-floor pre-rank filter">
+    <select id="capFloor" title="Greenblatt cap-floor pre-rank filter (nudged by macro regime — see banner below)">
       <option value="0">Cap floor: none</option>
       <option value="0.05">Cap floor: $50M+</option>
       <option value="0.2">Cap floor: $200M+</option>
@@ -260,7 +373,7 @@ async function renderScreener(){
     <label class="colitem" style="display:inline-flex;border:1px solid var(--border);border-radius:6px"><input type="checkbox" id="exclFin"> Excl. financials</label>
     <label class="colitem" style="display:inline-flex;border:1px solid var(--border);border-radius:6px"><input type="checkbox" id="exclUtil"> Excl. utilities</label>
     <label class="colitem" style="display:inline-flex;border:1px solid var(--border);border-radius:6px"><input type="checkbox" id="exclAdr"> Excl. ADRs</label>
-    <select id="dvolFloor" title="Hard liquidity gate — hide names below this daily dollar-volume floor (ETFs judged on basket liquidity)">
+    <select id="dvolFloor" title="Hard liquidity gate — hide names below this daily dollar-volume floor (ETFs judged on basket liquidity; nudged by macro regime — see banner below)">
       <option value="0">$ vol floor: any</option>
       <option value="100000">≥ $100K/day</option>
       <option value="1000000">≥ $1M/day</option>
@@ -270,6 +383,7 @@ async function renderScreener(){
     </select>
     <details class="colpick"><summary>Columns ▾</summary><div class="colmenu" id="colmenu"></div></details>
     <span class="muted" id="count"></span></div>
+    ${regimeBannerHTML()}
     <div class="lqnote">
       <b>Liquidity = the first-class gate.</b> Dollar volume (ADV × price) is a free stand-in for a quote feed, proxying only <b>1 of Harris's 4 liquidity dimensions — depth</b>. Spread (width), immediacy &amp; resiliency need a paid quote feed → <b>not in v1</b> (see the flagged columns). <b>ETFs</b> gate on <b>basket liquidity</b> (Σ constituent $ADV × weight), not screen ADV — a low-volume ETF on a liquid basket is not rejected.
     </div>
@@ -282,7 +396,9 @@ async function renderScreener(){
     secs.forEach(s=>{const o=document.createElement('option');o.value=o.textContent=s;sel.appendChild(o);});
     document.getElementById('q').oninput=drawScreener;
     sel.onchange=drawScreener;
-    document.getElementById('capFloor').onchange=drawScreener;
+    const cf=document.getElementById('capFloor');
+    cf.value=String(CAP_FLOOR);
+    cf.onchange=()=>{ CAP_FLOOR=Number(cf.value)||0; drawScreener(); };
     document.getElementById('exclFin').onchange=drawScreener;
     document.getElementById('exclUtil').onchange=drawScreener;
     document.getElementById('exclAdr').onchange=drawScreener;
@@ -303,7 +419,7 @@ function toggleCol(k,on){ colVisible[k]=on; drawScreener(); }
 function drawScreener(){
   const q=(document.getElementById('q').value||'').toLowerCase();
   const sec=document.getElementById('sector').value;
-  const capFloor=Number(document.getElementById('capFloor').value||0);
+  const capFloor=CAP_FLOOR;
   const exclFlags={fin:document.getElementById('exclFin').checked,util:document.getElementById('exclUtil').checked,adr:document.getElementById('exclAdr').checked};
   // pre-rank filters (not columns) — apply before ranking so excluded names never enter the composite
   const universe=screenerRows.filter(r=>
@@ -672,6 +788,42 @@ async function renderData(){
   }catch(e){ v.innerHTML=`<div class="err">${e.message}<br>API unreachable at ${API()} — set the base above.</div>`; }
 }
 
+// ── MACRO (regime) ────────────────────────────────────────
+async function renderMacro(){
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading macro regime…</div>';
+  try{
+    await loadMacro();
+    if(!MACRO.loaded) throw new Error('macro data unavailable');
+    const rv=regimeVerdict(), vb=rv.vixBucket, rb=recessionBand(rv.prob);
+    let html=`<div style="margin:6px 0 4px"><span class="big" style="font-size:22px">Macro / regime context</span></div>
+      <div class="muted" style="margin-bottom:14px;max-width:760px">Two FRED-only gauges: a <b>fast, coincident</b> vol read (VIX) and a <b>slow, leading</b> recession-probability read (yield curve). Regime <b>soft-gates</b> the screener's default filters — every nudge stays user-overridable.</div>
+      ${regimeBannerHTML()}
+      <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr));margin-top:14px">
+        <div class="card">
+          <div class="name">VIX regime ${tierBadge('macro')}</div>
+          <div class="big" style="font-size:28px;margin:6px 0;${vb?`color:${vb.color}`:''}">${MACRO.vix!=null?fmt(MACRO.vix,1):'–'} <span style="font-size:14px">${vb?vb.label:''}</span></div>
+          <div class="muted" style="font-size:12px;line-height:1.5">Cboe VIX — 30-day expected S&amp;P vol from option prices. Bands: calm &lt;15 · normal 15–20 · elevated 20–30 · stress &gt;30 · panic &gt;40.</div>
+          <table style="font-size:12px;margin-top:8px">
+            <tr><td class="muted" style="border:none;padding:3px 8px 3px 0">VIX9D</td><td class="num" style="border:none;padding:3px 0">${MACRO.vix9d!=null?fmt(MACRO.vix9d,1):'–'}</td></tr>
+            <tr><td class="muted" style="border:none;padding:3px 8px 3px 0">VIX3M</td><td class="num" style="border:none;padding:3px 0">${MACRO.vix3m!=null?fmt(MACRO.vix3m,1):'–'}</td></tr>
+            <tr><td class="muted" style="border:none;padding:3px 8px 3px 0">VIX/VIX3M ratio</td><td class="num" style="border:none;padding:3px 0">${rv.inversion?rv.inversion.ratio.toFixed(2):'–'}</td></tr>
+          </table>
+          <div class="muted" style="font-size:11.5px;margin-top:8px">Term-structure inversion (ratio &gt;1.0, deep &gt;1.10) is a <b>stronger crisis tell than the level alone</b> — near-dated vol pricier than 3-month. FRED may not carry VIX9D/VIX3M; falls back to Cboe/yfinance if absent.</div>
+        </div>
+        <div class="card">
+          <div class="name">P(recession in 12m) ${tierBadge('macro')}</div>
+          <div class="big" style="font-size:28px;margin:6px 0;color:${rb.color}">${rv.prob!=null?(rv.prob*100).toFixed(0)+'%':'–'}</div>
+          <div class="muted" style="font-size:12px;line-height:1.5">NY Fed / Estrella–Mishkin probit on the <b>T10Y3M</b> yield-curve spread${MACRO.spreadMonthly?' (monthly average)':' (daily approximation — monthly average not available)'}: spread = ${MACRO.spread!=null?MACRO.spread.toFixed(2)+'pp':'–'}.</div>
+          <div class="muted" style="font-size:11.5px;margin-top:8px"><b>P(recession) = Φ(−0.5333 − 0.6629 × spread)</b>, coefficients from Estrella–Mishkin (1998), fit on monthly US data ~1959–1995. <b>⚠ Not re-verified against a current NY Fed refit</b> — re-check before trusting a precise threshold call.</div>
+          <div class="muted" style="font-size:11.5px;margin-top:8px">Bands: <span style="color:var(--green)">green &lt;30%</span> · <span style="color:#e3b341">amber 30–50%</span> · <span style="color:var(--red)">red ≥50%</span>. Treat inversion as a <b>12-month leading warning</b>, not a sell trigger — recessions historically arrive <i>after</i> the curve re-steepens. One known false positive: the spread narrowly inverted in 1966–67 without a recession following.</div>
+        </div>
+      </div>
+      <div class="muted" style="margin-top:16px;font-size:12px;max-width:760px">as of ${MACRO.asof||'–'} · sources: Cboe VIX methodology, NY Fed Yield Curve (Estrella–Mishkin) — see <span style="cursor:pointer;color:var(--accent)" onclick="goSection('education')">Education</span> for the full write-up.</div>`;
+    v.innerHTML=html;
+  }catch(e){ v.innerHTML=`<div class="err">${e.message}<br>API unreachable at ${API()} — set the base above, or GET /api/macro isn't wired up in the pipeline yet.</div>`; }
+}
+
 // ── EDUCATION ─────────────────────────────────────────────
 async function renderEducation(){
   const v=document.getElementById('view');
@@ -695,6 +847,24 @@ async function renderEducation(){
         sources:['Harris — Trading &amp; Exchanges'],
         significance:'The other <b>3 of Harris’s 4</b> liquidity dimensions — width (spread), immediacy, resiliency — need a paid real-time quote feed. Kept as <b>present-but-flagged</b> columns so the un-measured dimensions are explicit, not silently missing.',
         exampleSignal:'// not in v1 — requires an L1/L2 quote feed\nspread = ask - bid; depth = book_size; resiliency = recovery_after_imbalance'},
+    ]],
+    ['Macro / regime context (issue #39)', [
+      {metric:'VIX regime bucket (FRED VIXCLS)', feedTier:'macro', multiSource:true,
+        sources:['Cboe VIX index methodology','Chan — Quantitative Trading','Trading in the Zone — Douglas'],
+        significance:'Fast, coincident tail-risk gauge. Bucket the level (calm&lt;15 / normal 15–20 / elevated 20–30 / stress&gt;30 / panic&gt;40) into a market-wide <b>regime switch, not a stock picker</b> (Harris/Chan). Douglas: a VIX spike is a non-negotiable de-risk trigger — here that means a soft nudge to the default $-volume and cap floors, never a hard block.',
+        exampleSignal:'bucket = calm|normal|elevated|stress|panic   # VIXCLS level thresholds\nriskOff = VIX > 30  →  nudge default $vol floor + cap floor (soft, overridable)'},
+      {metric:'VIX term-structure inversion (VIX/VIX3M)', feedTier:'macro', multiSource:false,
+        sources:['Cboe VIX index methodology'],
+        significance:'Ratio &gt;1.0 (near-dated vol pricier than 3-month) is a <b>stronger crisis tell than the level alone</b>; &gt;1.10 = deep backwardation/dislocation. FRED may not carry VIX9D/VIX3M — falls back to Cboe/yfinance if absent.',
+        exampleSignal:'ratio = VIX / VIX3M\ninverted = ratio > 1.0; deep = ratio > 1.10'},
+      {metric:'Recession probability — T10Y3M probit', feedTier:'macro', multiSource:true,
+        sources:['NY Fed Yield Curve (Estrella–Mishkin)','Chan — Quantitative Trading'],
+        significance:'Slow, leading gauge: the entire term structure compressed into one number. Ingest T10Y3M (already the 10Y−3M spread, percent) via <code>fred.py</code>, resample to a monthly average, run through the Estrella–Mishkin (1998) probit. <b>Coefficients fit on 1959–1995 monthly data — flagged for re-verification, not re-derived here.</b> Treat curve inversion as a <b>12-month leading warning</b>, not a sell trigger; one known false positive (1966–67).',
+        exampleSignal:'P = Φ(−0.5333 − 0.6629 × spread)   # spread = T10Y3M, pp, monthly avg\nbadge = green(<30%) | amber(30–50%) | red(>=50%)'},
+      {metric:'Regime gate — soft default-filter pre-set', feedTier:'macro', multiSource:true,
+        sources:['NY Fed Yield Curve','Cboe VIX index methodology','Chan — Quantitative Trading'],
+        significance:'Risk-off (VIX&gt;30 or P(recession)≥50%) nudges the screener’s default $-volume and cap floors tighter — biasing toward liquid, larger names, away from thin/high-beta names. Risk-on relaxes it. Always a <b>soft pre-set, user-overridable</b> via the existing filter controls, never a hard block. Chan: use regime as a strategy-family switch given non-stationary markets.',
+        exampleSignal:'if riskOff: LIQ_FLOOR ||= $1M/day; CAP_FLOOR ||= $200M   // soft defaults only, editable'},
     ]],
   ];
   const tierColor={ohlcv:'var(--green)',collected:'var(--accent)',macro:'#a371f7',paid:'var(--red)'};
@@ -736,6 +906,8 @@ const SECTIONS={
           tabs:[['commodities','Commodities',renderCommodities],['options','Options',renderOptions],['drivers','Drivers',renderDrivers]]},
   stock: {label:'Stock', icon:'🏢', desc:'Equity screener + per-stock detail',
           tabs:[['screener','Screener',renderScreener]]},
+  macro: {label:'Macro', icon:'🌡️', desc:'VIX regime + yield-curve recession probability — soft-gates the screener defaults',
+          tabs:[['regime','Regime',renderMacro]]},
   education:{label:'Education', icon:'🎓', desc:'Learning the business of trading — metric significance, source overlap, example signals',
           tabs:[['learn','Learn',renderEducation]]},
 };
