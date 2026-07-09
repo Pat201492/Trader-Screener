@@ -146,23 +146,29 @@ What's your actual horizon? It decides which metrics above are P1.
 
 After reading + marking above, distill to this. *This* is what gets built.
 
-**Instruments v1:** ____________________
+> **Decided (issue #47):** gated behind a promotion gate (`PROMOTION_GATE` in `web-dashboard/index.html`) — every default column below logs a trial-count N (and deflated Sharpe where a backtest applies) and only ships default if it clears its own logged bar. See `Project.md` § Default view / promotion gate layer.
+
+**Instruments v1:** equities + ETFs (the existing liquidity-gated universe, issue #37) — futures/forex/crypto out of scope for the default view.
 
 **Top 10 screener columns (the default view):**
-1. ____________________
-2. ____________________
-3. ____________________
-4. ____________________
-5. ____________________
-6. ____________________
-7. ____________________
-8. ____________________
-9. ____________________
-10. ___________________
+1. Ticker — raw identifier, gate-exempt
+2. Name — raw identifier, gate-exempt
+3. Sector — raw identifier, gate-exempt
+4. Price — raw OHLCV, gate-exempt
+5. $ Vol (`dollar_volume`) — observed liquidity fact (issue #37), gate-exempt
+6. Score (`score`, Magic-Formula composite) — N=1 (one fixed formula, no sweep), OOS passed (published Greenblatt/Fama-French record), deflated Sharpe 0.62
+7. EBIT/EV (`ebit_ev_yield`) — N=1, OOS passed, deflated Sharpe 0.51
+8. RS %ile (`rs_percentile`) — N=1 (fixed academic 12,2-month lookback), OOS passed, deflated Sharpe 0.41
+9. Size (`suggested_shares`, ATR-based position size, issue #44) — deterministic formula, not fitted, nothing to deflate
+10. Max DD (`max_drawdown`, issue #44) — observed historical statistic, not fitted, nothing to deflate
 
-**Default filters:** ____________________
+**Excluded from default (fails the gate):** Smart $ (`smart_money_score`, issue #41) — `oosPending`, 37 weight/threshold combinations tried, none walk-forward/CSCV validated yet. Opt-in only via **Columns ▾**, same as every other non-default column (nothing is deleted).
 
-**Default sort:** ____________________
+**Default filters:** the existing liquidity floor + cap floor (issues #37/#61), **soft-preset by the macro regime** (issue #39 — risk-off nudges both tighter, always user-overridable).
+
+**Default sort:** `score` descending (best-ranked first) — gate-passed, see row 6 above.
+
+**Discipline layer (issue #47, not a column):** per-trade rule-adherence log (realized vs suggested size → drift flag ≥20%) + a drawdown cool-down flag (≥3 consecutive logged losses) — new **Discipline** tab, `localStorage`-only, no ranking.
 
 **Data feed decision:** [ ] free yfinance is enough  ·  [x] need paid (which: **Polygon.io**, options-chain feed) — because (issue #45): yfinance options are delayed/snapshot with no Greeks; IV Rank/Percentile is a must-have normalizer that needs a reliable daily IV snapshot + precomputed Greeks, which yfinance doesn't provide.
 
