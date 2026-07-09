@@ -41,7 +41,7 @@ Strike out what you don't care about. Add rows for anything the reading surfaces
 | Return 1/3/6/12-month | ✅ | B | P1 | shipped as `return_1m/3m/6m/12m`; ohlcv-derived |
 | Momentum factor (t-12→t-2, skip-month) | ✅ | B | P1 | shipped as `mom_factor`; Fama-French prior(2,12) |
 | Relative strength rank (vs universe) | ✅ | B | P1 | shipped as `rs_percentile`; liquid-names-only breakpoints |
-| 52-week range / % off high-low | [ ] | | | |
+| 52-week range / % off high-low | ✅ | B | P2 | shipped as `range52_pct` (issue #43); front-end-computed from already-collected `low52`/`high52` (same pattern as `rs_percentile`) — regime context, not standalone |
 | Moving averages (50/200d) + cross | [ ] | | | trend |
 | RSI | [ ] | | | overbought/oversold |
 | MACD | [ ] | | | |
@@ -49,12 +49,13 @@ Strike out what you don't care about. Add rows for anything the reading surfaces
 
 ### 2b. Volatility  🟡 / 🔴
 > **Decided (issue #42):** ATR, realized vol, and beta are OHLCV-derived and get the same **prior-close lag** discipline as §2a — see `Project.md` § Look-ahead discipline layer.
+> **Decided (issue #43):** ATR/ATR%, realized vol, beta and 52-week range % shipped as screener columns — sizing/regime inputs, not standalone picks (see `Project.md` § Volatility / sizing layer).
 > **Decided (issue #45):** IV Rank/Percentile shipped as the required normalizer, side-by-side, never raw IV alone.
 | Metric | Want? | Use | Priority | Notes |
 |---|---|---|---|---|
-| ATR / ATR% | [ ] | | | sizing + stops |
-| Realized (historical) volatility | [ ] | | | |
-| Beta (vs SPY) | [ ] | | | |
+| ATR / ATR% | ✅ | B | P1 | shipped as `atr`/`atr_pct` (issue #43); the load-bearing sizing input — sets stop distance, sizes the position, feeds §2g's Kelly proxy |
+| Realized (historical) volatility | ✅ | B | P2 | shipped as `realized_vol` (issue #43); yardstick for judging IV richness + regime context, not a standalone signal |
+| Beta (vs SPY) | ✅ | B | P1 | shipped as `beta` (issue #43); promoted from detail-only — sizing/regime tilt input, not standalone |
 | Implied volatility (IV) | ✅ | D | P1 | 🔴 paid feed; raw input only — never shown as a standalone column, always beside IVR/IVP |
 | IV rank / percentile | ✅ | B | P1 | shipped as `iv_rank`/`iv_percentile`; 🔴 paid feed + nightly IV-snapshot job; warming-up until history accrues |
 

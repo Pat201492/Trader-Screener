@@ -165,9 +165,9 @@ the prior close only**:
 | `ma_cross` (50/200d) | fast/slow SMA cross | not yet shipped — SCREENER_SHORTLIST §2a |
 | `rsi` | Wilder RSI | not yet shipped — SCREENER_SHORTLIST §2a |
 | `macd` | MACD line/signal/hist | not yet shipped — SCREENER_SHORTLIST §2a |
-| `atr` | Average True Range | not yet shipped — SCREENER_SHORTLIST §2b; feeds §2g sizing |
-| `realized_vol` | trailing return stdev | not yet shipped — SCREENER_SHORTLIST §2b |
-| `beta` | vs. SPY | not yet shipped — SCREENER_SHORTLIST §2b |
+| `atr` | Average True Range | screener column shipped (issue #43) — front-end + contract only; pipeline computation lands in Stock-Data-Pipeline (reference impl: `lookahead-gate/lookahead_lag.py` `atr()`); feeds §2g sizing |
+| `realized_vol` | trailing return stdev | screener column shipped (issue #43) — same status as `atr`; reference impl: `lookahead_lag.py` `realized_vol()` |
+| `beta` | vs. SPY | screener column shipped (issue #43) — promoted from the stock-detail-only field (data already collected); reference impl: `lookahead_lag.py` `beta()` |
 
 - **Wire the gate.** Port `lookahead_lag.py`'s functions (or the equivalent pandas/numpy computation, same
   invariant) into the Stock-Data-Pipeline indicator stage, and run `ab_truncation_test.py`'s pattern as a
@@ -175,6 +175,35 @@ the prior close only**:
   same as any other data-quality gate.
 - **Front-end disclosure.** The Screener footer carries a standing **"as-of prior close"** note (next to the
   liquidity `lqnote`) so every OHLCV-derived column is explicitly labeled as lagged, not live-quote.
+
+---
+
+## Volatility / sizing layer (issue #43) — ATR/ATR%, realized vol, beta, 52w range %
+
+Depends on #35 (column registry) and #42 (look-ahead discipline — `lookahead-gate/lookahead_lag.py` already
+implements lagged `atr()`, `realized_vol()` and `beta()`). Adds the risk/sizing block from SCREENER_SHORTLIST
+§2b/§2g. QuantInsti / Chan: ATR is the **load-bearing input** — it sets stop distance and cascades into every
+downstream sizing decision (shares = risk% × equity / (k×ATR)), and is the practical volatility proxy for
+Kelly. Harris: realized vol, beta and the 52-week range encode the **fundamental-vs-transitory split** in a
+price move — they size positions and read the regime, they do **not** pick stocks on their own.
+
+**Upstream contract (add to the shared pipeline, OHLCV-derived, lagged to the prior close per issue #42):**
+
+| Field | Type | Meaning | Source |
+|---|---|---|---|
+| `atr` | number \| null | 14d Average True Range, $ | OHLCV — see `lookahead-gate/lookahead_lag.py` `atr()` |
+| `atr_pct` | number \| null | ATR as a % of price — comparable across names regardless of share price | derived: `atr / price × 100`, both prior-close-lagged |
+| `realized_vol` | number \| null | 30d annualized stdev of daily returns, % | OHLCV — see `lookahead_lag.py` `realized_vol()` |
+| `beta` | number \| null | trailing 60d beta vs. SPY | OHLCV — see `lookahead_lag.py` `beta()`; **already collected**, promoted from a stock-detail-only field to a screener column |
+
+- **`range52_pct` is NOT an upstream field** — like `rs_percentile`, it's computed **front-end** from the
+  already-collected `low52`/`high52`/`price` fields (today surfaced only on the stock detail page):
+  `(price − low52) / (high52 − low52) × 100` — 0% = at the 52w low, 100% = at the 52w high.
+- **Front-end disclosure.** A dedicated note (`.volnote`, next to the liquidity/lag notes) states these columns
+  are sizing/regime inputs, not standalone picks — same never-a-stock-picker framing as the macro VIX/regime
+  layer (issue #39).
+- Documented per-column in the header tooltip (`tip` field on the `SCREENER_COLS` entry), same as every other
+  layer.
 
 ---
 
