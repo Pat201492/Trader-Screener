@@ -409,6 +409,32 @@ Depends on #44, #46, #47 (**collected** feed tier — assembles collected + ohlc
 
 **Liquidity-dimension disclosure:** the existing `.lqnote` (issue #37, unchanged) plus a recommendation-card footer noting the skew/collar check's own chain-liquidity gate (`optionsChainLiquid()`, ≥500 OI / ≥100 vol, issue #46) — both surfaces state depth is the only measured liquidity dimension.
 
+## Pipeline gap (issue #81) — reference mock, real pipeline still outstanding
+
+A UI test against a mock backend surfaced that every "Upstream contract" section above (issues
+#37–#46) was documented but **never actually implemented** in Stock-Data-Pipeline — the front-end
+was confirmed correct (it renders every column once the fields are present), the columns and Options
+tab just had nothing to render, showing `–` / "thin chain" everywhere. Stock-Data-Pipeline is a
+separate repo not checked out alongside this one, so its collectors can't be edited from here.
+
+**[`pipeline-mock/`](../pipeline-mock/)** closes that gap the same way `lookahead-gate/` closed the
+look-ahead-bias gap for issue #42: a portable, stdlib-only **reference implementation + runnable
+fixture**, not the real pipeline. It serves every field listed above (`adv`/`dollar_volume`,
+`return_*m`/`mom_factor`, `atr`/`atr_pct`/`realized_vol`/`max_drawdown`, the smart-money block,
+`iv_rank`/`iv_percentile`/`atm_iv_30d`/`iv_history_days`, `skew_25d`/`put_call_oi`/`oi_max_strike`/
+UOA inputs, per-contract `gamma`/`theta`/`vega`/`rho`, and `/api/macro`) over the same routes
+`web-dashboard/index.html` calls, deliberately staged across a few tickers so the IV warming-up gate,
+the chain-liquidity ("thin chain") gate, and both ETF-basket-liquidity upstream shapes are all
+exercised, not just the happy path. `pipeline-mock/test_mock_server.py` asserts every field's
+presence and every gate's threshold behavior — run `python pipeline-mock/test_mock_server.py`, exit 0
+= pass.
+
+**Still outstanding:** porting the real computations (ADV/returns/ATR off real OHLCV, IV Rank/
+Percentile off a real `iv_snapshots` history, Greeks from Polygon, congress/insider/news from the
+existing `ingest_*` scripts) into Stock-Data-Pipeline's actual collectors — `pipeline-mock/` is a spec
++ local-dev fixture, not a substitute for that port. See `pipeline-mock/README.md` for exactly what
+should carry over (the response shape) vs. what's fixture-only (the sample values).
+
 ## ⚠️ Open Items
 - [ ] **Define the screener spec** — which instruments, which columns, which filters/sorts. ("We will have to iron out the project screener — figure out later.")
 - [ ] **Decide the data-sharing mechanism** — shared JSON/volume, shared DB, or new app calls old app's `/api/stocks`. Drives the hosting design.
@@ -424,5 +450,5 @@ Depends on #44, #46, #47 (**collected** feed tier — assembles collected + ohlc
 - [ ] **Cadence** — nightly snapshot to start; decide if/when intraday or on-demand refresh is needed (without an always-on machine — hosting cost).
 - [x] **Greeks** — decided (issue #45): sourced directly from Polygon per contract; in-house Black-Scholes no longer needed for v1.
 - [x] **History / storage** — decided (issue #45): append-only `iv_snapshots` table (ticker, snapshot_date, atm_iv_30d), fixed 30-day-ATM definition, started now so the ~1yr IV Rank window populates.
-- [ ] **Shared-pipeline placement** — confirm `options.py` runs in the same nightly Fly.io job so the old app gets it too (collect once).
+- [ ] **Shared-pipeline placement** — confirm `options.py` runs in the same nightly Fly.io job so the old app gets it too (collect once). Every field the front-end needs from it is now spec'd + exercised by `pipeline-mock/` (issue #81) — the real port into Stock-Data-Pipeline is what's left.
 - [ ] **API shape** — finalize `/api/options/...` routes + which derived metrics surface as screener columns/filters beyond `iv_rank`/`iv_percentile` (already specified above).
