@@ -17,12 +17,12 @@ Mark the ones you actually want to screen. (Be honest — each new class is a da
 |---|---|---|---|
 | Equities (stocks) | [ ] | ✅ yes | core; old screener already does this |
 | ETFs | [ ] | ✅ yes | already have universe + holdings |
-| Options | [ ] | 🔴 no | needs option-chain feed (greeks/IV) |
+| Options | ✅ | 🔴 paid (Polygon) | **decided (issue #45):** IV Rank/Percentile overlay + chain lookup, liquidity-gated subset of the equity/ETF universe — not a separate screened instrument class |
 | Futures | [ ] | 🔴 no | yfinance won't cover well |
 | Forex | [ ] | 🔴 no | data-source TBD |
 | Crypto | [ ] | 🟡 partial | yfinance has some; CME futures separate |
 
-**Decision:** which classes ship in v1? → __________________________
+**Decision:** which classes ship in v1? → Equities + ETFs (core screener) + options as a **per-underlying overlay** (IV Rank/Percentile columns + chain tab) on liquidity-gated names, fed by a paid feed (Polygon). Futures/forex/crypto remain undecided.
 
 ---
 
@@ -49,13 +49,14 @@ Strike out what you don't care about. Add rows for anything the reading surfaces
 
 ### 2b. Volatility  🟡 / 🔴
 > **Decided (issue #42):** ATR, realized vol, and beta are OHLCV-derived and get the same **prior-close lag** discipline as §2a — see `Project.md` § Look-ahead discipline layer.
+> **Decided (issue #45):** IV Rank/Percentile shipped as the required normalizer, side-by-side, never raw IV alone.
 | Metric | Want? | Use | Priority | Notes |
 |---|---|---|---|---|
 | ATR / ATR% | [ ] | | | sizing + stops |
 | Realized (historical) volatility | [ ] | | | |
 | Beta (vs SPY) | [ ] | | | |
-| Implied volatility (IV) | [ ] | | | 🔴 needs options feed |
-| IV rank / percentile | [ ] | | | 🔴 |
+| Implied volatility (IV) | ✅ | D | P1 | 🔴 paid feed; raw input only — never shown as a standalone column, always beside IVR/IVP |
+| IV rank / percentile | ✅ | B | P1 | shipped as `iv_rank`/`iv_percentile`; 🔴 paid feed + nightly IV-snapshot job; warming-up until history accrues |
 
 ### 2c. Liquidity & microstructure  🟡 / 🔴
 > **Decided (issue #37):** liquidity is the **first-class gate** every other signal passes through. ADV + dollar volume shipped as default columns **and** a hard floor. Dollar volume proxies only **1 of Harris's 4 dimensions — depth**; spread (width), immediacy, resiliency need a quote feed = **not in v1**. ETFs gate on **basket liquidity**, not screen ADV (CFA ETF Guide).
@@ -106,17 +107,19 @@ Strike out what you don't care about. Add rows for anything the reading surfaces
 | Stop distance (ATR multiple) | [ ] | | | |
 | Max drawdown (historical) | [ ] | | | |
 
-### 2h. Options / derivatives signals  🔴 (all need an options-chain feed — Polygon / ORATS / Tradier / CBOE)
-> Only relevant if §1 includes options. Background: [Derivatives — Types & Signals](../Education/Derivatives_Types_and_Trading_Signals.md). Raw IV doesn't compare across names — **IV Rank/percentile is the must-have normalizer.**
+### 2h. Options / derivatives signals  🔴 (needs an options-chain feed — **decided (issue #45): Polygon.io**, paid)
+> Only relevant if §1 includes options. Background: [Derivatives — Types & Signals](../Education/Derivatives_Types_and_Trading_Signals.md) · [IV Rank/Percentile — OIC](../Education/summaries/iv-rank-iv-percentile-oic.md). Raw IV doesn't compare across names — **IV Rank/percentile is the must-have normalizer.**
+> **Decided (issue #45):** IV Rank + IV Percentile shipped as joined screener columns, fed by a nightly IV-snapshot job (fixed 30-day-ATM definition) started now. Flagged "warming up" per ticker until ~3-6mo (IVP) / ~1yr (IVR) of snapshots accrue. IVR≥70/≤30 wired to sell/buy-premium hints, soft-gated under the macro VIX regime (issue #39) — a risk-off regime caveats the sell-premium hint rather than suppressing it.
+> **Decided (issue #46):** Skew, put/call ratio, OI-by-strike and UOA shipped as joined screener columns (`skew_25d`, `put_call_oi`, `oi_max_strike`, `uoa`), all gated on chain liquidity (`optionsChainLiquid()` — ≥500 OI / ≥100 vol, fail-safe closed on unknown) since thin chains give unreliable readings. UOA + put/call extremes also feed `computeSmartMoneyScores()` as a 4th weighted leg — the options-side twin of the equity moat (issue #41). Greeks (Δ/Γ/Θ/V/ρ) ship as a per-contract dashboard (Options tab chain table + a nearest-ATM Greeks card on the stock detail page) — deliberately **not** a screener column.
 | Metric | Want? | Use | Priority | Notes |
 |---|---|---|---|---|
-| Implied volatility (IV) | [ ] | | | expected move; rises into events |
-| **IV Rank / IV Percentile** | [ ] | | | the normalizer — "is IV high *for this name*" |
-| Volatility skew (put vs call IV) | [ ] | | | fear / crash-pricing gauge |
-| Put/Call ratio | [ ] | | | sentiment; contrarian at extremes |
-| Open interest (by strike) | [ ] | | | support/resistance magnets, conviction |
-| Unusual options activity (UOA) | [ ] | | | options-side smart money — ties to §2e moat |
-| Greeks (delta/gamma/theta/vega) | [ ] | | | risk dashboard per position |
+| Implied volatility (IV) | ✅ | D | P1 | expected move; rises into events. Raw value — never a standalone column, always shown beside IVR/IVP |
+| **IV Rank / IV Percentile** | ✅ | B | P1 | shipped as `iv_rank`/`iv_percentile`; "warming up" until nightly-snapshot history accrues (see §2b) |
+| Volatility skew (put vs call IV) | ✅ | B | P1 | shipped as `skew_25d` (25Δ put/call IV ratio); flattening toward/under 1.05 is the notable tell, not the negative skew itself |
+| Put/Call ratio | ✅ | B | P1 | shipped as `put_call_oi` (OI-based); contrarian, extremes flagged at ≥1.2 / ≤0.5; feeds the smart-money view |
+| Open interest (by strike) | ✅ | B | P2 | shipped as `oi_max_strike`/`oi_max_strike_oi` (screener column) + magnet highlight in the full per-expiry chain table |
+| Unusual options activity (UOA) | ✅ | B | P1 | shipped as `uoa` (volume ≥2× standing OI, directionally leaned by call/put-side split where available); feeds the smart-money view as the options-side twin |
+| Greeks (delta/gamma/theta/vega/rho) | ✅ | D | P2 | shipped as a **per-position dashboard**, not a screener column — full per-contract Δ/Γ/Θ/V/ρ in the Options tab chain table, plus a nearest-ATM call/put Greeks card on the stock detail page |
 | IV term structure (contango/backwardation) | [ ] | | | near vs far event risk |
 | VIX / macro vol | [ ] | | | regime filter; shares FRED macro tab |
 
@@ -155,7 +158,7 @@ After reading + marking above, distill to this. *This* is what gets built.
 
 **Default sort:** ____________________
 
-**Data feed decision:** [ ] free yfinance is enough  ·  [ ] need paid (which: Polygon / Alpaca / Tiingo / IBKR) — because: ____________________
+**Data feed decision:** [ ] free yfinance is enough  ·  [x] need paid (which: **Polygon.io**, options-chain feed) — because (issue #45): yfinance options are delayed/snapshot with no Greeks; IV Rank/Percentile is a must-have normalizer that needs a reliable daily IV snapshot + precomputed Greeks, which yfinance doesn't provide.
 
 ---
 

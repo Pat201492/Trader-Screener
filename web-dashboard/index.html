@@ -57,9 +57,16 @@
   .colitem .tier{margin-left:auto}
   .t-v1{color:#f0883e;background:#f0883e1a;border-color:#f0883e55}
   .t-oos{color:#f85149;background:#f851491a;border-color:#f8514955}
+  .t-warm{color:#79c0ff;background:#79c0ff1a;border-color:#79c0ff55}
   /* liquidity disclosure note — makes the un-measured dimensions explicit */
   .lqnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #e3b341;border-radius:6px;background:#e3b3410d;color:var(--muted);font-size:12px;line-height:1.55}
   .lqnote b{color:var(--txt)}
+  /* IV Rank / Percentile disclosure note (issue #45) — same note-box language, paid-feed colored */
+  .ivnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #e3b341;border-radius:6px;background:#e3b3410d;color:var(--muted);font-size:12px;line-height:1.55}
+  .ivnote b{color:var(--txt)}
+  /* Options flow & structure disclosure note (issue #46) — same note-box language, paid-feed colored */
+  .oflownote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #e3b341;border-radius:6px;background:#e3b3410d;color:var(--muted);font-size:12px;line-height:1.55}
+  .oflownote b{color:var(--txt)}
   /* macro regime banner (issue #39) — same note-box language, colored by regime */
   .macronote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:6px;background:#2f81f70d;color:var(--muted);font-size:12px;line-height:1.55}
   .macronote.risk-off{border-left-color:var(--red);background:#f851490d}
@@ -156,20 +163,36 @@ function computeMagicRanks(rows){
 // filing-lagged (STOCK Act allows up to ~45 days) — don't overweight a single disclosure.
 // NOT out-of-sample validated yet (walk-forward/CSCV pending) — see the `oosPending` column
 // flag below; ships hidden-by-default until validated.
+// Options leg (issue #46): UOA (call/put-side volume vs. OI) + put/call-ratio extremes are
+// the OPTIONS-SIDE TWIN of the same informed-flow thesis — folded in as a 4th weighted leg,
+// not a bolt-on. Only counted when the chain clears the liquidity gate (optionsChainLiquid,
+// defined below) — a thin chain's skew/OI/UOA reading is noise, not signal.
 function computeSmartMoneyScores(rows){
   rows.forEach(r=>{
     const cBuy=r.congress_buys_90d, cSell=r.congress_sells_90d;
     const iBuy=r.insider_buys_90d, iSell=r.insider_sells_90d;
     const news=r.news_sentiment_30d;
     const hasCongress=cBuy!=null||cSell!=null, hasInsider=iBuy!=null||iSell!=null, hasNews=news!=null;
-    if(!hasCongress && !hasInsider && !hasNews){
+    // options-side twin: UOA direction (call-side vs put-side unusual volume) + put/call-ratio
+    // extreme (contrarian — crowded one-sided positioning), both gated on chain liquidity.
+    const chainLiquid=optionsChainLiquid(r);
+    const ratio=chainLiquid?uoaRatio(r):null;
+    const uoaFlagged=ratio!=null&&ratio>=UOA_RATIO_FLAG;
+    const uoaDir=uoaFlagged?uoaDirection(r):null;
+    const uoaSig=uoaFlagged?(uoaDir==='call'?1:uoaDir==='put'?-1:0):0;
+    const pc=chainLiquid?r.put_call_oi:null;
+    const pcSig=pc==null?0:pc>=PC_EXTREME_HIGH?1:pc<=PC_EXTREME_LOW?-1:0; // contrarian: high P/C -> bullish tell (+1)
+    const hasOptions=uoaFlagged||pcSig!==0;
+    if(!hasCongress && !hasInsider && !hasNews && !hasOptions){
       r.smart_money_score=null; r.smart_money_dir=null; r.smart_money_breakdown=null; return;
     }
     const congressNet=hasCongress?Math.tanh(((cBuy||0)-(cSell||0))/3):0;
     const insiderNet =hasInsider?Math.tanh(((iBuy||0)-(iSell||0))/3):0;
     const newsSig=hasNews?Math.max(-1,Math.min(1,news)):0;
     const congressWeighted=Math.max(-1,Math.min(1,congressNet*(r.committee_conflict?1.5:1)));
-    const composite=0.45*congressWeighted+0.35*insiderNet+0.20*newsSig; // weights sum to 1 → ±100
+    // agreeing legs -> full ±1 conviction; opposing legs cancel to 0 (contradictory reads)
+    const optionsNet=hasOptions?Math.max(-1,Math.min(1,(uoaSig+pcSig)/2)):0;
+    const composite=0.35*congressWeighted+0.30*insiderNet+0.15*newsSig+0.20*optionsNet; // weights sum to 1 → ±100
     r.smart_money_score=Math.round(composite*100);
     r.smart_money_dir=r.smart_money_score>10?'buy':r.smart_money_score<-10?'sell':'neutral';
     r.smart_money_breakdown={
@@ -177,6 +200,8 @@ function computeSmartMoneyScores(rows){
       insider:  hasInsider?Math.round(insiderNet*100):null,
       news:     hasNews?Math.round(newsSig*100):null,
       committee_conflict: !!r.committee_conflict,
+      options:  hasOptions?Math.round(optionsNet*100):null,
+      uoa_flagged: uoaFlagged, uoa_dir: uoaDir, put_call_extreme: pcSig!==0,
     };
   });
 }
@@ -184,7 +209,7 @@ function smartMoneyCell(r){
   if(r.smart_money_score==null) return '<span class="muted">–</span>';
   const cls=r.smart_money_score>10?'pos':r.smart_money_score<-10?'neg':'muted';
   const b=r.smart_money_breakdown||{};
-  const title=`congress ${b.congress??'–'} · insider ${b.insider??'–'} · news ${b.news??'–'}${b.committee_conflict?' · committee-conflict':''}`;
+  const title=`congress ${b.congress??'–'} · insider ${b.insider??'–'} · news ${b.news??'–'} · options ${b.options??'–'}${b.committee_conflict?' · committee-conflict':''}${b.uoa_flagged?` · UOA(${b.uoa_dir||'?'})`:''}${b.put_call_extreme?' · P/C extreme':''}`;
   return `<span class="${cls}" title="${title}">${r.smart_money_score>0?'+':''}${r.smart_money_score}</span>`;
 }
 // ── Liquidity layer (issue #37) ───────────────────────────
@@ -387,6 +412,168 @@ function rsCell(r){
   const v=r.rs_percentile, c=v>=70?'pos':v<=30?'neg':'';
   return `<span class="${c}">${Math.round(v)}</span>`;
 }
+// ── IV Rank / IV Percentile layer (issue #45) — the options normalizer ────
+// OIC: raw IV is meaningless cross-name (a biotech's 60% vs a utility's 18%) — IV
+// Rank and IV Percentile are what make IV comparable at all, and the pivot that
+// flips the recommendation structure (high IVR -> sell premium, low -> buy).
+// Ship BOTH side-by-side, never raw IV alone, so a one-off spike shows up as an
+// IVR/IVP divergence instead of hiding behind a single misleading number
+// (Education/summaries/iv-rank-iv-percentile-oic.md).
+// Upstream contract (paid options-chain feed + nightly IV-snapshot job — see
+// Project.md "IV Rank / Percentile layer"): iv_rank, iv_percentile, atm_iv_30d
+// (the FIXED snapshot definition — 30-day ATM IV, same instrument every night
+// so the trailing window stays apples-to-apples) and iv_history_days (nightly
+// snapshots accrued for THIS ticker since the job started — a ticker added to
+// the universe later starts its own clock at 0).
+// History-accrual caveat: IVP needs ~3-6mo (63-126 trading days) and true IVR
+// needs ~1yr (252) before the reading is trustworthy. Flagged 'warming up'
+// PER ROW (accrual is per-ticker, not one global switch) until then — same
+// present-but-flagged idea as notInV1/oosPending, but for a still-accruing
+// history window rather than a missing feed or unvalidated backtest.
+const IV_WARMUP={ivpMin:63, ivpFull:126, ivrFull:252};
+function ivWarmup(r){
+  const d=r.iv_history_days;
+  if(d==null) return {days:null, ivpFull:false, ivrReady:false};
+  return {days:d, ivpFull:d>=IV_WARMUP.ivpFull, ivrReady:d>=IV_WARMUP.ivrFull};
+}
+function warmBadge(w,need){
+  const ready=need==='ivr'?w.ivrReady:w.ivpFull;
+  if(w.days==null||ready) return '';
+  const target=need==='ivr'?IV_WARMUP.ivrFull:IV_WARMUP.ivpFull;
+  const horizon=need==='ivr'?'~1yr':'~3-6mo';
+  return `<span class="tier t-warm" title="Warming up — ${w.days}/${target} trading days of nightly IV snapshots accrued. Needs ${horizon} before this reading is trustworthy.">warming</span>`;
+}
+// IVR thresholds -> buy/sell premium hint (OIC: >~70 rich = sell, <~30 cheap = buy).
+// Gated under the macro VIX regime (regimeVerdict(), issue #39/#45 dependency):
+// Douglas — a VIX spike is a non-negotiable de-risk trigger — so a risk-off
+// regime attaches an explicit tail-risk caveat to the SELL-premium hint rather
+// than suppressing it (single-name IVR can be rich for idiosyncratic reasons
+// even in a risk-off tape; this is a soft nudge, same never-a-hard-block
+// pattern as the liquidity/cap-floor defaults).
+function ivHint(r){
+  if(r.iv_rank==null) return null;
+  if(r.iv_rank>=70){
+    const riskOff=regimeVerdict().riskOff;
+    return {label:'sell prem', cls:'pos',
+      note:riskOff?'Rich IV, but macro regime is risk-off (VIX) — size down / hedge tail risk; don’t sell premium into a broad vol event.'
+                  :'IV rich for this name — favors selling premium (credit spreads, covered calls, iron condors).'};
+  }
+  if(r.iv_rank<=30) return {label:'buy prem', cls:'neg', note:'IV cheap for this name — favors buying premium (long calls/puts, straddles ahead of a catalyst).'};
+  return null;
+}
+function ivRankCell(r){
+  if(r.iv_rank==null) return '<span class="muted">–</span>';
+  const w=ivWarmup(r), hint=ivHint(r);
+  const cls=r.iv_rank>=70?'pos':r.iv_rank<=30?'neg':'';
+  const ivTitle=r.atm_iv_30d!=null?`30d ATM IV ${(r.atm_iv_30d*100).toFixed(1)}% (raw — never shown alone)`:'';
+  const hintHTML=hint?` <span class="${hint.cls}" style="font-size:10px;text-transform:uppercase" title="${hint.note}">${hint.label}</span>`:'';
+  return `<span class="${cls}" title="${ivTitle}">${Math.round(r.iv_rank)}</span>${hintHTML} ${warmBadge(w,'ivr')}`;
+}
+function ivPercentileCell(r){
+  if(r.iv_percentile==null) return '<span class="muted">–</span>';
+  const w=ivWarmup(r);
+  const cls=r.iv_percentile>=70?'pos':r.iv_percentile<=30?'neg':'';
+  return `<span class="${cls}">${Math.round(r.iv_percentile)}</span> ${warmBadge(w,'ivp')}`;
+}
+// ── Options flow & structure layer (issue #46) — skew / put-call / OI magnets / UOA ──
+// Derivatives — Types & Signals + OIC: puts trading richer than calls (equities run a
+// NEGATIVE skew by default — structural since the 1987 crash) prices crash/downside-
+// protection demand. The presence of that skew is NOT the signal — a FLATTENING skew
+// (ratio drifting toward/under 1) is the notable event. Put/call extremes are a
+// contrarian sentiment gauge, read only at the edges (crowded one-sided positioning,
+// faded rather than followed). Large single-strike OI is a support/resistance magnet
+// (dealer hedging flow). UOA (today's volume dwarfing the standing OI book) is the
+// options-side TWIN of the smart-money moat (issue #41) — same informed-order-flow
+// thesis as congress/insider, expressed through derivatives instead of cash equity;
+// wired into computeSmartMoneyScores() above as a 4th weighted leg.
+// Douglas: an extreme reading raises reversal ODDS, it never removes the randomness of
+// any single trade — corroborate, don't trade off one flagged extreme alone.
+//
+// Upstream contract — joined onto liquidity-gated /api/stocks rows AND the
+// /api/options/{ticker} summary, same dual-placement pattern as iv_rank/iv_percentile:
+//   skew_25d                number|null   25Δ put IV / 25Δ call IV ratio
+//   put_call_oi              number|null   put/call ratio, OI-based (already on the options
+//                                          summary since issue #45; now also joined onto
+//                                          stocks rows for the twin score + screener column)
+//   total_oi / total_volume  integer|null  chain-wide OI / today's contract volume — the
+//                                          liquidity gate's two legs + the UOA ratio
+//   call_oi/put_oi/call_volume/put_volume  integer|null  optional per-side breakdown —
+//                                          gives UOA a directional lean; degrades to
+//                                          "flagged, direction unknown" if not provided
+//   oi_max_strike / oi_max_strike_oi        the single-strike OI "magnet" + its OI
+//
+// Chain-liquidity gate (issue #46 acceptance: "gate on adequate OI/volume — thin chains
+// give unreliable skew/OI/spread readings"). Fail-safe: unknown OI/volume gates CLOSED,
+// same don't-trust-what-you-can't-verify posture as the rest of the liquidity layer.
+const OPT_LIQ_MIN_OI=500, OPT_LIQ_MIN_VOL=100;
+function optionsChainLiquid(r){
+  const oi=r.total_oi, vol=r.total_volume;
+  if(oi==null||vol==null) return false;
+  return oi>=OPT_LIQ_MIN_OI && vol>=OPT_LIQ_MIN_VOL;
+}
+function thinChainBadge(){
+  return `<span class="tier t-warm" title="Chain liquidity below the gate (≥${OPT_LIQ_MIN_OI} OI / ≥${OPT_LIQ_MIN_VOL} vol) — thin chains give unreliable skew/OI/spread readings, so the reading is withheld.">thin chain</span>`;
+}
+// Skew: ratio ≤ SKEW_FLATTEN flags a flattening — falling downside-protection demand vs.
+// the equities-normal negative skew. Heuristic band, not a snapshot-history percentile
+// (unlike IV Rank) — no dedicated skew-history table exists yet.
+const SKEW_FLATTEN=1.05;
+function skewCell(r){
+  if(r.skew_25d==null) return '<span class="muted">–</span>';
+  if(!optionsChainLiquid(r)) return thinChainBadge();
+  const v=r.skew_25d, flat=v<=SKEW_FLATTEN;
+  const note=flat?` <span style="font-size:10px;text-transform:uppercase;color:var(--accent)" title="Skew has flattened toward/under 1 — falling crash/downside-protection demand vs. the equities-normal negative skew. The notable signal, not the negative skew itself.">flattening</span>`:'';
+  return `<span title="25Δ put IV / 25Δ call IV. Equities run negative skew by default (ratio &gt;1, puts pricier) — a flattening toward/under ${SKEW_FLATTEN} is the notable tell, not the negative skew itself.">${v.toFixed(2)}</span>${note}`;
+}
+// Put/call ratio (OI-based): contrarian sentiment, read only at the extremes (Derivatives —
+// Types & Signals: highs ~>1.2 = capitulation/fear, potential bullish reversal; lows =
+// complacency). An extreme raises reversal ODDS — it doesn't remove single-trade randomness.
+const PC_EXTREME_HIGH=1.2, PC_EXTREME_LOW=0.5;
+function putCallCell(r){
+  if(r.put_call_oi==null) return '<span class="muted">–</span>';
+  if(!optionsChainLiquid(r)) return thinChainBadge();
+  const v=r.put_call_oi;
+  const cls=v>=PC_EXTREME_HIGH?'pos':v<=PC_EXTREME_LOW?'neg':'';
+  const hint=v>=PC_EXTREME_HIGH?'capitulation/fear → contrarian bullish tell':v<=PC_EXTREME_LOW?'complacency → contrarian bearish tell':'';
+  return `<span class="${cls}" title="Put/call ratio (OI-based). ≥${PC_EXTREME_HIGH} or ≤${PC_EXTREME_LOW} flags a crowd extreme — an edge, not a certainty (Douglas).">${v.toFixed(2)}</span>${hint?` <span class="muted" style="font-size:10px;text-transform:uppercase">${hint}</span>`:''}`;
+}
+// Open interest by strike: the single-strike OI "magnet" — standing commitment (unlike
+// volume, which clears daily) that tends to pin price near expiry via dealer-hedging flow.
+function oiMagnetCell(r){
+  if(r.oi_max_strike==null) return '<span class="muted">–</span>';
+  if(!optionsChainLiquid(r)) return thinChainBadge();
+  const dist=(r.price!=null)?((r.oi_max_strike-r.price)/r.price*100):null;
+  return `$${fmt(r.oi_max_strike)} <span class="muted" style="font-size:11px" title="Open interest at the magnet strike">OI ${fmt(r.oi_max_strike_oi,0)}</span>${dist!=null?` <span class="muted" style="font-size:11px">(${dist>=0?'+':''}${dist.toFixed(1)}% from spot)</span>`:''}`;
+}
+// UOA: today's volume dwarfing the standing OI book — the options-side smart-money tell.
+// Direction (call-side vs put-side) is optional/best-effort from the per-side volume/OI
+// split; degrades to an undirected flag if the upstream feed doesn't split by side. Noisy
+// alone (single-trade randomness) — corroborate, don't trade off UOA by itself (Douglas).
+const UOA_RATIO_FLAG=2; // volume >= 2x total OI
+function uoaRatio(r){
+  if(r.total_volume==null||!r.total_oi) return null;
+  return r.total_volume/r.total_oi;
+}
+function uoaSideRatios(r){
+  if(r.call_oi==null||r.put_oi==null||r.call_volume==null||r.put_volume==null) return null;
+  return {call:r.call_oi?r.call_volume/r.call_oi:null, put:r.put_oi?r.put_volume/r.put_oi:null};
+}
+function uoaDirection(r){
+  const s=uoaSideRatios(r); if(!s) return null;
+  if(s.call!=null&&(s.put==null||s.call>s.put)&&s.call>=UOA_RATIO_FLAG) return 'call';
+  if(s.put!=null&&(s.call==null||s.put>s.call)&&s.put>=UOA_RATIO_FLAG) return 'put';
+  return null;
+}
+function uoaCell(r){
+  if(r.total_volume==null) return '<span class="muted">–</span>';
+  if(!optionsChainLiquid(r)) return thinChainBadge();
+  const ratio=uoaRatio(r);
+  if(ratio==null||ratio<UOA_RATIO_FLAG) return `<span class="muted">${ratio!=null?ratio.toFixed(1)+'×':'–'}</span>`;
+  const dir=uoaDirection(r);
+  const cls=dir==='call'?'pos':dir==='put'?'neg':'';
+  const title=`Volume ${fmt(r.total_volume,0)} vs OI ${fmt(r.total_oi,0)} (${ratio.toFixed(1)}×)${dir?` · ${dir}-side unusual`:''}. Noisy alone — corroborate, don't trade on UOA by itself (Douglas).`;
+  return `<span class="${cls}" title="${title}">⚠ UOA ${ratio.toFixed(1)}×</span>`;
+}
 // Central column registry — the ONE place columns are defined. Adding a metric
 // = adding one entry here (no <th>/<td> markup edits). Each entry:
 //   {key,label,num?,cls?,fmt?,tier}  where
@@ -420,6 +607,32 @@ const SCREENER_COLS=[
   {key:'rs_percentile', label:'RS %ile', num:true,          tier:'ohlcv',
     tip:'Cross-sectional percentile rank of the momentum factor vs. the universe (0=weakest, 100=strongest). Breakpoints computed from liquid names only — illiquid micro-caps never warp the cuts, and no name failing the $ vol floor can surface here.',
     fmt:r=>rsCell(r)},
+  // ── IV Rank / IV Percentile layer (issue #45) — THE options normalizer. Ship both,
+  // never raw IV alone (OIC). Snapshot definition is fixed (30d ATM IV) so the trailing
+  // window is apples-to-apples; per-row 'warming' badge until enough nightly snapshots
+  // have accrued (see ivWarmup()). IVR>=70/<=30 carries a buy/sell-premium hint,
+  // soft-gated under the macro VIX regime (see ivHint()).
+  {key:'iv_rank', label:'IV Rank', num:true,                tier:'paid',
+    tip:'IV Rank = (current 30d-ATM IV − 52wk low) / (52wk high − 52wk low) × 100. Uses only the year\'s two extremes — fragile to a single spike, which is why IV Percentile ships beside it. ≥70 hints sell premium, ≤30 hints buy premium (caveated under a risk-off VIX regime). Warming up until ~1yr of nightly snapshots has accrued for this ticker.',
+    fmt:r=>ivRankCell(r)},
+  {key:'iv_percentile', label:'IV %ile', num:true,          tier:'paid',
+    tip:'IV Percentile = % of the past year\'s trading days this name\'s 30d-ATM IV closed below today\'s level. Uses the full distribution, not just the extremes — more robust than IV Rank after a one-off spike; the two are shipped side-by-side so a divergence between them is visible. Warming up until ~3-6mo of nightly snapshots has accrued for this ticker.',
+    fmt:r=>ivPercentileCell(r)},
+  // ── options flow & structure (issue #46) — skew/put-call/OI-magnets/UOA, all gated on
+  // chain liquidity (optionsChainLiquid — thin chains show 'thin chain' instead of a number).
+  // UOA + put/call extremes also feed computeSmartMoneyScores() as the options-side twin.
+  {key:'skew_25d', label:'Skew', num:true, tier:'paid',
+    tip:'25Δ put IV / 25Δ call IV. Equities run negative skew by default (puts pricier, ratio >1) — a flattening toward/under 1.05 is the notable signal, not the negative skew itself. Gated on chain liquidity.',
+    fmt:r=>skewCell(r)},
+  {key:'put_call_oi', label:'P/C', num:true, tier:'paid',
+    tip:'Put/call ratio (OI-based). Contrarian sentiment, read only at the extremes (≥1.2 capitulation/fear, ≤0.5 complacency) — an edge, not a certainty. Also feeds the Smart Money tab as the options-side twin. Gated on chain liquidity.',
+    fmt:r=>putCallCell(r)},
+  {key:'oi_max_strike', label:'OI Magnet', num:true, tier:'paid',
+    tip:'Strike with the largest single-strike open interest — standing commitment (unlike volume, which clears daily) that tends to act as a support/resistance magnet near expiry. Gated on chain liquidity.',
+    fmt:r=>oiMagnetCell(r)},
+  {key:'uoa', label:'UOA', num:true, tier:'paid', sortVal:r=>uoaRatio(r),
+    tip:'Unusual options activity — today\'s volume vs. standing open interest (≥2× flagged), directionally leaned by call/put-side volume where available. Feeds the Smart Money tab as the options-side twin. Noisy alone — corroborate. Gated on chain liquidity.',
+    fmt:r=>uoaCell(r)},
   {key:'score',  label:'Score',    num:true,               tier:'collected', fmt:r=>fmt(r.score,0)},
   {key:'pe',     label:'P/E',      num:true,               tier:'collected', fmt:r=>isETF(r)?'–':fmt(r.pe,1)},
   {key:'ebit_ev_yield', label:'EBIT/EV', num:true,         tier:'collected', fmt:r=>(isETF(r)||r.ebit_ev_yield==null)?'–':pct(r.ebit_ev_yield)},
@@ -430,10 +643,11 @@ const SCREENER_COLS=[
   {key:'tco',    label:'TCO',      num:true,               tier:'collected', fmt:r=>(isETF(r)&&r.tco!=null)?pct(r.tco):'–'},
   {key:'etf_dq_flag', label:'ETF DQ', cls:'muted',         tier:'collected', fmt:r=>isETF(r)?dqBadge(r):'–'},
   // ── smart-money moat composite (issue #41) — congress + insider + committee-conflict +
-  // news sentiment folded into ONE adverse-selection-intensity score (see
-  // computeSmartMoneyScores). Reuses the SAME liquidity-gated `rows` pipeline as every other
-  // column, so it never surfaces a name below the $ vol floor. oosPending: not out-of-sample
-  // validated yet — hidden by default & flagged (Backtest Overfitting caveat).
+  // news sentiment + the options-side twin (UOA + put/call extremes, issue #46) folded into
+  // ONE adverse-selection-intensity score (see computeSmartMoneyScores). Reuses the SAME
+  // liquidity-gated `rows` pipeline as every other column, so it never surfaces a name below
+  // the $ vol floor. oosPending: not out-of-sample validated yet — hidden by default & flagged
+  // (Backtest Overfitting caveat).
   {key:'smart_money_score', label:'Smart $', num:true,     tier:'collected', oosPending:true, fmt:r=>smartMoneyCell(r)},
   // ── un-measured liquidity dimensions — PRESENT but explicitly NOT in v1 (need a
   // paid quote feed). Harris's width(spread)/immediacy/resiliency + true order-book
@@ -488,6 +702,12 @@ async function renderScreener(){
     </div>
     <div class="lagnote">
       <b>Signals are as-of the prior close.</b> Every OHLCV-derived column (returns, momentum, RS %ile — and any future MA-cross/RSI/MACD/ATR/realized-vol/beta) is computed on data through the <b>previous session's close only</b>, never same-day high/low/close, to avoid look-ahead bias (Chan). Validated by an A-vs-B truncation test — see <code>lookahead-gate/</code>.
+    </div>
+    <div class="ivnote">
+      <b>IV Rank &amp; IV Percentile — the options normalizer (paid feed).</b> Raw IV is meaningless across names (a biotech's 60% vs a utility's 18%) — IVR/IVP are shipped <b>side-by-side</b>, never IV alone, so a one-off spike shows up as a divergence between them instead of a misleading single number. Snapshot definition is fixed (<b>30-day ATM IV</b>) for a consistent trailing window. Columns are flagged <b>warming up</b> per ticker until ~3-6mo of nightly snapshots have accrued (IV Percentile) / ~1yr (IV Rank). IVR ≥70 hints <b>sell premium</b>, ≤30 hints <b>buy premium</b> — soft-gated under the macro VIX regime (see the Macro tab): a rich-IV sell hint carries an explicit caution when the regime is risk-off.
+    </div>
+    <div class="oflownote">
+      <b>Options flow &amp; structure (paid feed, issue #46).</b> Skew (25Δ put/call IV), put/call ratio, OI-by-strike magnets and UOA are all gated on chain liquidity (≥${OPT_LIQ_MIN_OI} OI / ≥${OPT_LIQ_MIN_VOL} vol) — thin chains give unreliable readings, shown as <b>thin chain</b> rather than a number. Equities run a negative skew by default (puts pricier); a <b>flattening</b> is the notable tell, not the skew itself. <b>UOA + put/call extremes also feed the Smart Money tab</b> as the options-side twin of the equity moat — an edge, not a certainty (Douglas): corroborate, don't trade off one flagged extreme alone. Per-position <b>Greeks</b> (Δ/Γ/Θ/V/ρ) live in the Options tab and the stock detail's Greeks card — a risk dashboard, not a screener column.
     </div>
     <div id="tbl"><div class="loading">Loading stocks…</div></div>`;
   try{
@@ -576,7 +796,7 @@ async function renderSmartMoney(){
     </select>
     <span class="muted" id="smCount"></span></div>
     <div class="lqnote">
-      <b>Smart-money moat — the differentiator, not raw flags.</b> Congress + insider (EDGAR) + committee-conflict + news sentiment folded into <b>one</b> adverse-selection-intensity score (Harris: informed order flow made observable). <b>Not out-of-sample validated yet</b> (walk-forward/CSCV on held-out dates pending) — treat every hit as an <b>edge</b> (higher probability), not a certainty, and expect a random win/loss distribution across many such signals (Douglas). Congress/insider filings are noisy &amp; filing-lagged (STOCK Act, up to ~45 days) — don&rsquo;t overweight a single disclosure. <b>Liquidity-gated:</b> names below the $ vol floor never surface here, same hard gate as the Screener.
+      <b>Smart-money moat — the differentiator, not raw flags.</b> Congress + insider (EDGAR) + committee-conflict + news sentiment + the <b>options-side twin</b> (UOA + put/call extremes, issue #46) folded into <b>one</b> adverse-selection-intensity score (Harris: informed order flow made observable). <b>Not out-of-sample validated yet</b> (walk-forward/CSCV on held-out dates pending) — treat every hit as an <b>edge</b> (higher probability), not a certainty, and expect a random win/loss distribution across many such signals (Douglas). Congress/insider filings are noisy &amp; filing-lagged (STOCK Act, up to ~45 days) — don&rsquo;t overweight a single disclosure. The options leg only counts when the chain clears its own liquidity gate (thin chains withheld). <b>Liquidity-gated:</b> names below the $ vol floor never surface here, same hard gate as the Screener.
     </div>
     <div id="smTbl"><div class="loading">Loading…</div></div>`;
   try{
@@ -617,6 +837,7 @@ function drawSmartMoney(){
       <td class="num muted">${b.congress??'–'}</td>
       <td class="num muted">${b.insider??'–'}</td>
       <td class="num muted">${b.news??'–'}</td>
+      <td class="num muted" title="${b.uoa_flagged?`UOA flagged${b.uoa_dir?' · '+b.uoa_dir+'-side':''}`:''}${b.put_call_extreme?' · put/call extreme':''}">${b.options??'–'}</td>
       <td class="muted">${b.committee_conflict?'<span class="neg" title="Committee member trading a name their committee oversees">⚠ conflict</span>':'–'}</td>
       <td class="num">${dvolCell(r)}</td>
     </tr>`;
@@ -627,6 +848,7 @@ function drawSmartMoney(){
     <th class="num" title="Congress sub-score (committee-conflict up-weighted)">Congress</th>
     <th class="num" title="Insider (EDGAR) sub-score">Insider</th>
     <th class="num" title="News sentiment sub-score">News</th>
+    <th class="num" title="Options-side twin (issue #46) — UOA (call/put-side volume vs OI) + put/call-ratio extremes, gated on chain liquidity">Options ${tierBadge('paid')}</th>
     <th title="Congressperson trading a name their own committee oversees">Conflict</th>
     <th class="num">$ Vol</th>
     </tr></thead><tbody>${body}</tbody></table>`;
@@ -768,24 +990,48 @@ async function loadOptions(){
   try{
     const s=await jget('/api/options/'+tk);
     const sm=s.summary||{};
+    const ivRow={iv_rank:sm.iv_rank, iv_percentile:sm.iv_percentile, iv_history_days:sm.iv_history_days, atm_iv_30d:sm.atm_iv_30d??sm.atm_iv};
+    // options flow & structure (issue #46) — same row-shaped object the screener columns
+    // consume, built from the summary so skew/put-call/OI-magnet/UOA share one cell renderer.
+    const flowRow={skew_25d:sm.skew_25d, put_call_oi:sm.put_call_oi, total_oi:sm.total_oi, total_volume:sm.total_volume,
+      call_oi:sm.call_oi, put_oi:sm.put_oi, call_volume:sm.call_volume, put_volume:sm.put_volume,
+      oi_max_strike:sm.oi_max_strike, oi_max_strike_oi:sm.oi_max_strike_oi, price:sm.spot};
     let head=`<div style="margin:6px 0 14px">
       <span class="pill">spot $${fmt(sm.spot)}</span>
       <span class="pill">ATM IV ${sm.atm_iv!=null?(sm.atm_iv*100).toFixed(1)+'%':'–'}</span>
       <span class="pill">IV mean ${sm.iv_mean!=null?(sm.iv_mean*100).toFixed(1)+'%':'–'}</span>
-      <span class="pill">P/C OI ${fmt(sm.put_call_oi)}</span>
+      <span class="pill" title="the normalizer — never trust raw IV alone">IV Rank ${ivRankCell(ivRow)}</span>
+      <span class="pill">IV %ile ${ivPercentileCell(ivRow)}</span>
+      <span class="pill" title="25Δ put IV / 25Δ call IV — a flattening is the notable tell, not the negative skew itself">Skew ${skewCell(flowRow)}</span>
+      <span class="pill" title="put/call ratio (OI-based) — contrarian sentiment, extremes flagged">P/C ${putCallCell(flowRow)}</span>
+      <span class="pill" title="largest single-strike OI — support/resistance magnet">OI Magnet ${oiMagnetCell(flowRow)}</span>
+      <span class="pill" title="today's volume vs standing OI — options-side smart-money tell, feeds the Smart Money tab">UOA ${uoaCell(flowRow)}</span>
       <span class="pill">OI ${fmt(sm.total_oi,0)}</span></div>`;
     const exp=s.expirations&&s.expirations[0];
     if(!exp){ box.innerHTML=head+`<div class="muted">no expirations</div>`; return; }
     const ch=await jget(`/api/options/${tk}/${exp}`);
-    const rows=ch.contracts.sort((a,b)=>a.strike-b.strike).map(c=>`<tr>
-      <td>${c.type}</td><td class="num">${fmt(c.strike)}</td>
+    const contracts=ch.contracts.slice().sort((a,b)=>a.strike-b.strike);
+    // OI-by-strike magnet — highlight the single-strike OI peak within this expiry
+    const maxOI=Math.max(0,...contracts.map(c=>c.open_interest||0));
+    const rows=contracts.map(c=>{
+      const magnet=maxOI>0&&c.open_interest===maxOI;
+      return `<tr${magnet?' style="background:#e3b3411a"':''}>
+      <td>${c.type}</td><td class="num">${fmt(c.strike)}${magnet?' <span class="tier t-paid" title="Largest single-strike OI in this expiry — the OI magnet">magnet</span>':''}</td>
       <td class="num">${fmt(c.bid)}</td><td class="num">${fmt(c.ask)}</td>
       <td class="num">${c.iv!=null?(c.iv*100).toFixed(1)+'%':'–'}</td>
-      <td class="num">${c.delta??'–'}</td><td class="num">${fmt(c.open_interest,0)}</td>
-      <td class="num">${fmt(c.volume,0)}</td></tr>`).join('');
-    box.innerHTML=head+`<div class="muted" style="margin-bottom:6px">nearest expiry ${exp} · ${ch.contracts.length} contracts</div>
+      <td class="num" title="Delta">${c.delta??'–'}</td>
+      <td class="num" title="Gamma">${c.gamma??'–'}</td>
+      <td class="num" title="Theta">${c.theta??'–'}</td>
+      <td class="num" title="Vega">${c.vega??'–'}</td>
+      <td class="num" title="Rho">${c.rho??'–'}</td>
+      <td class="num">${fmt(c.open_interest,0)}</td>
+      <td class="num">${fmt(c.volume,0)}</td></tr>`;
+    }).join('');
+    box.innerHTML=head+`<div class="muted" style="margin-bottom:6px">nearest expiry ${exp} · ${ch.contracts.length} contracts · per-contract Greeks — a per-position risk read, not a screener column</div>
       <table><thead><tr><th>Type</th><th class="num">Strike</th><th class="num">Bid</th><th class="num">Ask</th>
-      <th class="num">IV</th><th class="num">Δ</th><th class="num">OI</th><th class="num">Vol</th></tr></thead>
+      <th class="num">IV</th><th class="num" title="Delta">Δ</th><th class="num" title="Gamma">Γ</th>
+      <th class="num" title="Theta">Θ</th><th class="num" title="Vega">V</th><th class="num" title="Rho">ρ</th>
+      <th class="num">OI</th><th class="num">Vol</th></tr></thead>
       <tbody>${rows}</tbody></table>`;
   }catch(e){ box.innerHTML=`<div class="err">${e.message}<br>Ticker may not be in the options feed (only top-N universe tickers are collected).</div>`; }
 }
@@ -884,7 +1130,10 @@ async function openStock(tk){
           <span class="pill muted">congress ${b.congress??'–'}</span>
           <span class="pill muted">insider ${b.insider??'–'}</span>
           <span class="pill muted">news ${b.news??'–'}</span>
+          <span class="pill muted" title="Options-side twin (issue #46) — UOA + put/call-ratio extremes, gated on chain liquidity">options ${b.options??'–'}</span>
           ${b.committee_conflict?'<span class="pill neg">⚠ committee conflict</span>':''}
+          ${b.uoa_flagged?`<span class="pill ${b.uoa_dir==='call'?'pos':b.uoa_dir==='put'?'neg':''}">⚠ UOA${b.uoa_dir?' · '+b.uoa_dir+'-side':''}</span>`:''}
+          ${b.put_call_extreme?'<span class="pill">⚠ P/C extreme</span>':''}
           ${(s.congress_buys_90d!=null||s.congress_sells_90d!=null)?`<div class="muted" style="font-size:12px;margin-top:8px">Congress (90d): ${s.congress_buys_90d??0} buy${s.congress_buys_90d===1?'':'s'} · ${s.congress_sells_90d??0} sell${s.congress_sells_90d===1?'':'s'}</div>`:''}
           ${(s.insider_buys_90d!=null||s.insider_sells_90d!=null)?`<div class="muted" style="font-size:12px">Insider (90d): ${s.insider_buys_90d??0} buy${s.insider_buys_90d===1?'':'s'} · ${s.insider_sells_90d??0} sell${s.insider_sells_90d===1?'':'s'}</div>`:''}
           <div class="muted" style="font-size:11px;margin-top:8px">Edge, not a certainty — filing-lagged &amp; noisy (Douglas / Harris). Not out-of-sample validated yet.</div>
@@ -915,11 +1164,47 @@ async function openStock(tk){
     try{
       const o=await jget('/api/options/'+tk);
       const sm=o.summary||{};
-      document.getElementById('detOpt').innerHTML=`<div class="group-title">Options</div>
+      const ivRow={iv_rank:sm.iv_rank, iv_percentile:sm.iv_percentile, iv_history_days:sm.iv_history_days, atm_iv_30d:sm.atm_iv_30d??sm.atm_iv};
+      // options flow & structure (issue #46) — same cell renderers as the screener columns
+      const flowRow={skew_25d:sm.skew_25d, put_call_oi:sm.put_call_oi, total_oi:sm.total_oi, total_volume:sm.total_volume,
+        call_oi:sm.call_oi, put_oi:sm.put_oi, call_volume:sm.call_volume, put_volume:sm.put_volume,
+        oi_max_strike:sm.oi_max_strike, oi_max_strike_oi:sm.oi_max_strike_oi, price:sm.spot};
+      let optHtml=`<div class="group-title">Options</div>
         <span class="pill">ATM IV ${sm.atm_iv!=null?(sm.atm_iv*100).toFixed(1)+'%':'–'}</span>
         <span class="pill">IV mean ${sm.iv_mean!=null?(sm.iv_mean*100).toFixed(1)+'%':'–'}</span>
-        <span class="pill">P/C OI ${fmt(sm.put_call_oi)}</span>
+        <span class="pill" title="the normalizer — never trust raw IV alone">IV Rank ${ivRankCell(ivRow)}</span>
+        <span class="pill">IV %ile ${ivPercentileCell(ivRow)}</span>
+        <span class="pill" title="25Δ put IV / 25Δ call IV — a flattening is the notable tell, not the negative skew itself">Skew ${skewCell(flowRow)}</span>
+        <span class="pill" title="put/call ratio (OI-based) — contrarian sentiment, extremes flagged">P/C ${putCallCell(flowRow)}</span>
+        <span class="pill" title="largest single-strike OI — support/resistance magnet">OI Magnet ${oiMagnetCell(flowRow)}</span>
+        <span class="pill" title="today's volume vs standing OI — feeds the Smart Money tab as the options-side twin">UOA ${uoaCell(flowRow)}</span>
         <span class="pill">OI ${fmt(sm.total_oi,0)}</span>`;
+      // per-position Greeks — a risk dashboard, not a screener column (issue #46). Nearest
+      // expiry, ATM call + put (closest strike to spot) — the two most relevant "positions".
+      try{
+        const exp=o.expirations&&o.expirations[0];
+        if(exp&&sm.spot!=null){
+          const ch=await jget(`/api/options/${tk}/${exp}`);
+          const nearestAtm=side=>ch.contracts.filter(c=>c.type===side)
+            .reduce((best,c)=>(!best||Math.abs(c.strike-sm.spot)<Math.abs(best.strike-sm.spot))?c:best,null);
+          const callC=nearestAtm('call'), putC=nearestAtm('put');
+          const greekCard=(label,c)=>c?`<div class="card" style="padding:10px 12px">
+            <div class="name" style="font-size:12px">${label} $${fmt(c.strike)} · ${exp}</div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;font-size:12px">
+              <span title="Delta — directional exposure / hedge ratio">Δ ${c.delta??'–'}</span>
+              <span title="Gamma — delta acceleration, dealer-hedging flow">Γ ${c.gamma??'–'}</span>
+              <span title="Theta — time decay (seller tailwind, buyer drag)">Θ ${c.theta??'–'}</span>
+              <span title="Vega — IV-change exposure">V ${c.vega??'–'}</span>
+              <span title="Rho — rate sensitivity (minor for short-dated)">ρ ${c.rho??'–'}</span>
+            </div></div>`:'';
+          if(callC||putC){
+            optHtml+=`<div class="group-title">Greeks — nearest-ATM per-position risk read</div>
+              <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">${greekCard('Call',callC)}${greekCard('Put',putC)}</div>
+              <div class="muted" style="font-size:11px;margin-top:4px">Per-position dashboard, not a screener column — the Greek bias must agree with the thesis (a "big move" view that's accidentally −vega is self-contradictory).</div>`;
+          }
+        }
+      }catch{}
+      document.getElementById('detOpt').innerHTML=optHtml;
     }catch{ document.getElementById('detOpt').innerHTML=''; }
     // commodity drivers
     try{
