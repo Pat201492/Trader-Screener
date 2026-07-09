@@ -168,6 +168,7 @@ the prior close only**:
 | `atr` | Average True Range | screener column shipped (issue #43) — front-end + contract only; pipeline computation lands in Stock-Data-Pipeline (reference impl: `lookahead-gate/lookahead_lag.py` `atr()`); feeds §2g sizing |
 | `realized_vol` | trailing return stdev | screener column shipped (issue #43) — same status as `atr`; reference impl: `lookahead_lag.py` `realized_vol()` |
 | `beta` | vs. SPY | screener column shipped (issue #43) — promoted from the stock-detail-only field (data already collected); reference impl: `lookahead_lag.py` `beta()` |
+| `max_drawdown` | historical peak-to-subsequent-trough decline, % | screener column shipped (issue #44) — front-end + contract only, same status as `atr`; reference impl: `lookahead_lag.py` `max_drawdown()`; feeds §2g's worst-historical-loss size cap |
 
 - **Wire the gate.** Port `lookahead_lag.py`'s functions (or the equivalent pandas/numpy computation, same
   invariant) into the Stock-Data-Pipeline indicator stage, and run `ab_truncation_test.py`'s pattern as a
@@ -202,6 +203,50 @@ price move — they size positions and read the regime, they do **not** pick sto
 - **Front-end disclosure.** A dedicated note (`.volnote`, next to the liquidity/lag notes) states these columns
   are sizing/regime inputs, not standalone picks — same never-a-stock-picker framing as the macro VIX/regime
   layer (issue #39).
+- Documented per-column in the header tooltip (`tip` field on the `SCREENER_COLS` entry), same as every other
+  layer.
+
+---
+
+## Risk / sizing layer (issue #44) — ATR stop distance, fixed-fractional + half-Kelly size, max drawdown
+
+Depends on #43 (ATR/ATR%/mom_factor already shipped) and #40 (momentum block — `rs_percentile` is the
+trending-regime proxy). Turns a screen hit into a **pre-sized trade plan**: stop distance, suggested position
+size, and the historical max drawdown that caps it. Adds the §2g "Risk / sizing" block from
+SCREENER_SHORTLIST.md.
+
+**Upstream contract (add to the shared pipeline, OHLCV-derived, lagged to the prior close per issue #42):**
+
+| Field | Type | Meaning | Source |
+|---|---|---|---|
+| `max_drawdown` | number \| null | historical max drawdown, % — largest peak-to-**subsequent**-trough decline (time order matters), trailing ~1yr window | OHLCV — see `lookahead-gate/lookahead_lag.py` `max_drawdown()` |
+
+- **`stop_distance` and `suggested_shares` are NOT upstream fields** — both are computed **front-end**
+  (`stopDistance()`/`suggestedShares()`), same pattern as `range52_pct`, because they depend on the
+  session's user-editable sizing inputs (equity, risk%, k), which only exist client-side.
+- **Fixed-fractional (QuantInsti).** `stop_distance = k × ATR`; `suggested_shares = (equity × risk%) / stop_distance`
+  — allocates **equal risk, not equal dollars** per name. At 2% risk you can absorb ~50 consecutive losses
+  before ruin.
+- **Half-Kelly cap (Chan).** `f = m/σ²` using `mom_factor` as the trailing-return proxy (m) and `atr_pct` as
+  the volatility proxy (σ), **halved** — Gaussian Kelly underestimates tail risk, so full Kelly is never
+  used. Negative momentum clamps the Kelly leg to 0 (no long-side allocation), not a short suggestion.
+- **Worst-historical-loss cap.** The shipped `max_drawdown` column caps size directly: if the worst
+  peak-to-trough decline ever observed recurred while holding the suggested shares, the dollar loss must
+  still stay inside risk% of equity. `suggested_shares` is the **tightest** of the fixed-fractional,
+  half-Kelly, and worst-loss-cap legs — never trusts a missing leg as "uncapped".
+- **Trending-regime gate.** ATR stops only help when a name is actually trending (Chan) — on a
+  mean-reverting/range-bound name a stop just realizes the loss. `ma_cross` (50/200DMA) isn't shipped
+  upstream yet, so the front-end proxy is the already-shipped momentum block: `rs_percentile` in the 70+/30-
+  band (the same threshold the RS %ile and IV Rank cells already color by) reads as trending; the noisy
+  30-70 middle reads as range-bound. Fail-safe like the options chain-liquidity gate — unknown
+  `rs_percentile` gates **closed** (no stop shown), never an assumed trend. `stop_distance`/`suggested_shares`
+  render `mean-revert`/`–` instead of a number when the gate is closed.
+- **Deliberate, non-fitted defaults (open-parameter caveat).** Equity $100,000, risk% 1% (QuantInsti: 1-2%),
+  k=2 (2×ATR) — round, illustrative defaults, **not optimized against any name's history**, same posture as
+  the VIX-regime bucket thresholds. All three are user-editable inputs (equity number field, risk%/k selects)
+  in the Screener controls, persisted across re-renders same as `LIQ_FLOOR`/`CAP_FLOOR`.
+- **Behavioral framing (Douglas).** The sizing panel disclosure (`.risknote`) states these outputs are
+  **pre-commitments to be obeyed after a drawdown**, not suggestions to widen the stop or double up.
 - Documented per-column in the header tooltip (`tip` field on the `SCREENER_COLS` entry), same as every other
   layer.
 
