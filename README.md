@@ -12,6 +12,7 @@ Trader-oriented screener + research terminal, built on the shared data pipeline 
 **Plans:**
 - **[CUTOVER.md](CUTOVER.md)** — repoint both apps at the Stock-Data-Pipeline repo (phased checklist).
 - **[Project/Commodities.md](Project%20folder/Commodities.md)** — commodities dashboard (energy/metals/ags), data collected in the shared pipeline.
+- **[lookahead-gate/](lookahead-gate/)** — reference lagged-indicator implementation + Chan's A-vs-B truncation gate (issue #42; see `Project.md` § Look-ahead discipline layer).
 
 > `old/` (a reference copy of the old project, gitignored) is **not** tracked in this repo.
 

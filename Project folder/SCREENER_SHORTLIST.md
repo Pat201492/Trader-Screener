@@ -33,6 +33,7 @@ Strike out what you don't care about. Add rows for anything the reading surfaces
 
 ### 2a. Price & momentum  🟡 (computable from free OHLCV)
 > **Decided (issue #40):** trailing returns + the academically-correct momentum factor — cumulative return **t-12→t-2**, skipping the most recent month (Fama-French prior(2,12); including t-1 contaminates with short-term reversal). Converted to a **cross-sectional RS percentile** vs. the universe, re-ranked monthly. RS breakpoints computed from **liquid names only** (`passesLiquidityFloor()`) — no name failing the $ vol floor (issue #37) can surface via a momentum/RS sort.
+> **Decided (issue #42):** every metric in this section is **lagged to the prior close** — computed on OHLCV through the previous period only, never same-day high/low/close (Chan). Validated by the A-vs-B truncation test (see `Project.md` § Look-ahead discipline layer, `lookahead-gate/`).
 | Metric | Want? | Use | Priority | Notes |
 |---|---|---|---|---|
 | Last price | [ ] | | | |
@@ -47,6 +48,7 @@ Strike out what you don't care about. Add rows for anything the reading surfaces
 | VWAP | [ ] | | | intraday → 🔴 if real-time |
 
 ### 2b. Volatility  🟡 / 🔴
+> **Decided (issue #42):** ATR, realized vol, and beta are OHLCV-derived and get the same **prior-close lag** discipline as §2a — see `Project.md` § Look-ahead discipline layer.
 > **Decided (issue #45):** IV Rank/Percentile shipped as the required normalizer, side-by-side, never raw IV alone.
 | Metric | Want? | Use | Priority | Notes |
 |---|---|---|---|---|
