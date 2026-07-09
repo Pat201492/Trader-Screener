@@ -1,6 +1,6 @@
 """
-Reference implementation of every §2a/§2b OHLCV-derived indicator, lagged one
-period to the prior close (issue #42; see Project folder/Project.md).
+Reference implementation of every §2a/§2b/§2g OHLCV-derived indicator, lagged
+one period to the prior close (issue #42; see Project folder/Project.md).
 
 Chan (Quantitative Trading, Ch. 3): "Use lagged historical data... based on
 data up to the close of the previous trading period only" — the cure for
@@ -151,3 +151,26 @@ def beta(asset_closes, mkt_closes, i, window=60):
     cov = sum((a - ma) * (m - mm) for a, m in zip(a_rets, m_rets)) / (len(a_rets) - 1)
     var = sum((m - mm) ** 2 for m in m_rets) / (len(m_rets) - 1)
     return cov / var if var else None
+
+
+def max_drawdown(closes, i, window=252):
+    """Historical max drawdown (%) over the `window` closes strictly before day
+    i — peak-to-SUBSEQUENT-trough (time order matters, per Chan/QuantInsti),
+    not just the largest high-low spread. window=252 (~1 trading year) is a
+    deliberate, round default, not fitted to any name's history. Feeds the
+    risk/sizing layer's worst-historical-loss cap (issue #44)."""
+    start = i - window if window is not None else 0
+    if start < 0:
+        start = 0
+    if i - start < 2:
+        return None
+    series = closes[start:i]
+    peak = series[0]
+    worst = 0.0
+    for c in series:
+        if c > peak:
+            peak = c
+        dd = (peak - c) / peak if peak else 0.0
+        if dd > worst:
+            worst = dd
+    return worst * 100

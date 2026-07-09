@@ -70,6 +70,11 @@
   /* Volatility / sizing disclosure note (issue #43) — ohlcv-tier accent, ties to the ATR/vol/beta column badges */
   .volnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #1f6feb;border-radius:6px;background:#1f6feb0d;color:var(--muted);font-size:12px;line-height:1.55}
   .volnote b{color:var(--txt)}
+  /* Risk / sizing disclosure note (issue #44) — ohlcv-tier accent, ties to the stop/size/drawdown column badges */
+  .risknote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #1f6feb;border-radius:6px;background:#1f6feb0d;color:var(--muted);font-size:12px;line-height:1.55}
+  .risknote b{color:var(--txt)}
+  .sizectl{display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--muted)}
+  .sizectl input[type=number]{width:90px;background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:4px 6px}
   /* macro regime banner (issue #39) — same note-box language, colored by regime */
   .macronote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:6px;background:#2f81f70d;color:var(--muted);font-size:12px;line-height:1.55}
   .macronote.risk-off{border-left-color:var(--red);background:#f851490d}
@@ -338,6 +343,13 @@ let MACRO={loaded:false, vix:null, vix9d:null, vix3m:null, spread:null, spreadMo
 let macroPromise=null;
 let regimeDefaultsApplied=false;
 let CAP_FLOOR=0; // persisted across screener re-renders, same pattern as LIQ_FLOOR
+// ── Risk / sizing inputs (issue #44) — persisted across re-renders, same pattern
+// as LIQ_FLOOR/CAP_FLOOR. Deliberate, ROUND defaults — NOT fitted to any name's
+// history (QuantInsti/Chan: an open-parameter risk knob must not be optimized
+// away, or it stops being a pre-commitment). User-editable via the sizing panel.
+let SIZING_EQUITY=100000; // $100k account, a round illustrative default
+let SIZING_RISK_PCT=0.01; // 1% risk/trade (QuantInsti: 1-2%; 2% ~= 50 losses-to-ruin)
+let SIZING_K=2;            // stop = k × ATR; k=2 is the common, deliberate default
 function regimeVerdict(){
   const vb=vixBucket(MACRO.vix);
   const prob=recessionProb(MACRO.spread);
@@ -429,6 +441,99 @@ function range52Cell(r){
   if(v==null) return '<span class="muted">–</span>';
   const c=v>=80?'pos':v<=20?'neg':'';
   return `<span class="${c}">${v.toFixed(0)}%</span>`;
+}
+// ── Risk / sizing layer (issue #44) — turns a screen hit into a pre-sized trade
+// plan: stop distance (k×ATR), fixed-fractional + half-Kelly-capped position
+// size, historical max drawdown. Depends on #43 (ATR/atr_pct/mom_factor already
+// shipped as columns) and #40 (rs_percentile, the trending-regime proxy).
+//
+// QuantInsti: shares = (equity × risk%) / (k×ATR) allocates EQUAL RISK, not
+// equal dollars — at 2% risk you can absorb ~50 consecutive losses before
+// ruin. Chan: Kelly f = m/σ² (using ATR as the volatility proxy) sets an
+// optimum fraction, but Gaussian Kelly UNDERESTIMATES tail risk, so this ships
+// HALF-Kelly, further capped by the worst-historical-loss rule — here, the
+// already-shipped `max_drawdown` column (the largest peak-to-trough decline
+// actually observed), not a normal-distribution estimate. Harris: ATR-scaled
+// sizing caps price impact — most active traders lose because they trade too
+// much. Douglas: this triad is a PRE-COMMITMENT to be obeyed AFTER a
+// drawdown, not a suggestion to widen the stop or double up.
+//
+// Trending-regime gate: ATR stops only help when a name is actually trending
+// (Chan) — on a mean-reverting/range-bound name a stop just realizes the loss.
+// `ma_cross` (50/200DMA) isn't shipped upstream yet (see Project.md), so the
+// front-end proxy is the momentum block already shipped (issue #40):
+// rs_percentile sitting in the extremes (>=70 or <=30) reads as a name with a
+// dominant trend, same 70/30 band the RS/IV-rank cells already color by. The
+// noisy 30-70 middle reads as range-bound. Fail-safe like the options
+// chain-liquidity gate: unknown rs_percentile gates CLOSED (no stop), never
+// an assumed trend.
+function trendingRegime(r){
+  return r.rs_percentile!=null && (r.rs_percentile>=70 || r.rs_percentile<=30);
+}
+function stopDistance(r){
+  if(r.atr==null || !trendingRegime(r)) return null;
+  return SIZING_K*r.atr;
+}
+// Fixed-fractional leg (QuantInsti) — the primary sizing formula.
+function fixedFractionalShares(r){
+  const sd=stopDistance(r);
+  if(!sd) return null;
+  return (SIZING_EQUITY*SIZING_RISK_PCT)/sd;
+}
+// Half-Kelly leg (Chan) — f=m/σ² via ATR% as the volatility proxy, m = the
+// already-shipped momentum factor as the trailing-return proxy. NEVER full
+// Kelly. Negative momentum -> f<=0 -> no long-side Kelly allocation (clamped
+// at 0, not a short suggestion). m (a ~10-month cumulative return) and σ (a
+// short-window ATR%) are deliberately NOT rescaled to matching periods — this
+// leg routinely comes out generous, which is fine because suggestedShares()
+// always takes the TIGHTEST of all three legs, so a generous Kelly figure
+// never binds on its own; the fixed-fractional/worst-loss legs do.
+function halfKellyFraction(r){
+  if(r.mom_factor==null || !r.atr_pct) return null;
+  const m=r.mom_factor/100, sigma=r.atr_pct/100;
+  const fullKelly=m/(sigma*sigma);
+  return Math.max(0, fullKelly/2);
+}
+function halfKellyShares(r){
+  const f=halfKellyFraction(r);
+  if(f==null || !r.price) return null;
+  return (SIZING_EQUITY*f)/r.price;
+}
+// Worst-historical-loss cap: if the worst peak-to-trough decline ever observed
+// (`max_drawdown`) recurred while holding N shares, the dollar loss must still
+// stay inside risk% of equity — caps size even when the ATR or Kelly leg would
+// suggest more.
+function worstLossCapShares(r){
+  if(!r.max_drawdown || !r.price) return null;
+  const worstLossPerShare=r.price*(r.max_drawdown/100);
+  if(!worstLossPerShare) return null;
+  return (SIZING_EQUITY*SIZING_RISK_PCT)/worstLossPerShare;
+}
+// Final suggested size = the TIGHTEST of every leg with data — never trust a
+// missing leg as "uncapped". No stop (not trending / no ATR) -> no sized plan.
+function suggestedShares(r){
+  if(stopDistance(r)==null) return null;
+  const legs=[fixedFractionalShares(r), halfKellyShares(r), worstLossCapShares(r)].filter(v=>v!=null);
+  if(!legs.length) return null;
+  return Math.floor(Math.min(...legs));
+}
+function stopDistanceCell(r){
+  if(r.atr==null) return '<span class="muted">–</span>';
+  if(!trendingRegime(r)) return '<span class="muted" title="ATR stops apply only in a trending regime (Chan) — this name reads range-bound/mean-reverting on the RS-percentile proxy (30–70 band). A stop here would realize the loss, not avoid it.">mean-revert</span>';
+  return `$${fmt(stopDistance(r),2)} <span class="muted" style="font-size:11px">(${SIZING_K}×ATR)</span>`;
+}
+function suggestedSharesCell(r){
+  if(r.atr==null) return '<span class="muted">–</span>';
+  if(!trendingRegime(r)) return '<span class="muted" title="No ATR stop on a mean-reverting/range-bound name → no sized plan.">–</span>';
+  const shares=suggestedShares(r);
+  if(shares==null) return '<span class="muted">–</span>';
+  return `${fmt(shares,0)} sh <span class="muted" style="font-size:11px">(${money(shares*(r.price||0))})</span>`;
+}
+const MAX_DD_FLAG=40; // heuristic heavy-drawdown flag band, not history-fitted
+function maxDrawdownCell(r){
+  if(r.max_drawdown==null) return '<span class="muted">–</span>';
+  const c=r.max_drawdown>=MAX_DD_FLAG?'neg':'';
+  return `<span class="${c}">-${fmt(r.max_drawdown,1)}%</span>`;
 }
 // ── IV Rank / IV Percentile layer (issue #45) — the options normalizer ────
 // OIC: raw IV is meaningless cross-name (a biotech's 60% vs a utility's 18%) — IV
@@ -648,6 +753,20 @@ const SCREENER_COLS=[
   {key:'range52_pct', label:'52w Range%', num:true, tier:'ohlcv', sortVal:r=>range52Pct(r),
     tip:'Position within the 52-week low–high range (0% = at the 52w low, 100% = at the 52w high). Context for mean-reversion/breakout regime reads, not a standalone pick.',
     fmt:r=>range52Cell(r)},
+  // ── risk / sizing layer (issue #44) — turns a screen hit into a pre-sized trade
+  // plan: stop distance (k×ATR, gated on a trending regime), fixed-fractional +
+  // half-Kelly-capped suggested size, and the historical max drawdown that caps it.
+  // See the .risknote below and trendingRegime()/suggestedShares() above for the
+  // full derivation. Equity/risk%/k are user inputs — see the sizing panel.
+  {key:'stop_distance', label:'Stop Dist', num:true, tier:'ohlcv', sortVal:r=>stopDistance(r),
+    tip:'Stop distance = k × ATR (k is user-set, default 2). Gated on a trending regime (RS %ile in the 70+/30- band) — on a mean-reverting/range-bound name a stop just realizes the loss, so no distance is shown (Chan).',
+    fmt:r=>stopDistanceCell(r)},
+  {key:'suggested_shares', label:'Size', num:true, tier:'ohlcv', sortVal:r=>suggestedShares(r),
+    tip:'Suggested position size — the TIGHTEST of three legs: fixed-fractional (equity×risk% / stop distance, QuantInsti), half-Kelly (f=m/σ² via ATR%, Chan — never full Kelly), and the worst-historical-loss cap (equity×risk% / (price × max drawdown)). Same trending-regime gate as Stop Dist — no stop, no sized plan.',
+    fmt:r=>suggestedSharesCell(r)},
+  {key:'max_drawdown', label:'Max DD', num:true, tier:'ohlcv',
+    tip:'Historical max drawdown — the largest peak-to-SUBSEQUENT-trough decline observed (time order matters). The honest worst case to pre-accept up front, and the input the Size column\'s worst-historical-loss cap uses (Chan, QuantInsti).',
+    fmt:r=>maxDrawdownCell(r)},
   // ── IV Rank / IV Percentile layer (issue #45) — THE options normalizer. Ship both,
   // never raw IV alone (OIC). Snapshot definition is fixed (30d ATM IV) so the trailing
   // window is apples-to-apples; per-row 'warming' badge until enough nightly snapshots
@@ -735,6 +854,20 @@ async function renderScreener(){
       <option value="20000000">≥ $20M/day</option>
       <option value="100000000">≥ $100M/day</option>
     </select>
+    <span class="sizectl" title="Risk / sizing inputs (issue #44) — deliberate, round defaults, NOT fitted to any name's history. Drive the Stop Dist / Size columns.">
+      Equity $<input type="number" id="sizeEquity" min="0" step="1000" />
+      <select id="sizeRiskPct" title="Risk per trade, fixed-fractional (QuantInsti: 1-2%; 2% ≈ 50 consecutive losses to ruin)">
+        <option value="0.005">0.5% risk</option>
+        <option value="0.01">1% risk</option>
+        <option value="0.02">2% risk</option>
+      </select>
+      <select id="sizeK" title="Stop = k × ATR (k is a deliberate default, not history-fitted)">
+        <option value="1">1×ATR</option>
+        <option value="1.5">1.5×ATR</option>
+        <option value="2">2×ATR</option>
+        <option value="3">3×ATR</option>
+      </select>
+    </span>
     <details class="colpick"><summary>Columns ▾</summary><div class="colmenu" id="colmenu"></div></details>
     <span class="muted" id="count"></span></div>
     ${regimeBannerHTML()}
@@ -742,10 +875,13 @@ async function renderScreener(){
       <b>Liquidity = the first-class gate.</b> Dollar volume (ADV × price) is a free stand-in for a quote feed, proxying only <b>1 of Harris's 4 liquidity dimensions — depth</b>. Spread (width), immediacy &amp; resiliency need a paid quote feed → <b>not in v1</b> (see the flagged columns). <b>ETFs</b> gate on <b>basket liquidity</b> (Σ constituent $ADV × weight), not screen ADV — a low-volume ETF on a liquid basket is not rejected.
     </div>
     <div class="lagnote">
-      <b>Signals are as-of the prior close.</b> Every OHLCV-derived column (returns, momentum, RS %ile, ATR/realized-vol/beta/52w-range — and any future MA-cross/RSI/MACD) is computed on data through the <b>previous session's close only</b>, never same-day high/low/close, to avoid look-ahead bias (Chan). Validated by an A-vs-B truncation test — see <code>lookahead-gate/</code>.
+      <b>Signals are as-of the prior close.</b> Every OHLCV-derived column (returns, momentum, RS %ile, ATR/realized-vol/beta/52w-range/max-drawdown — and any future MA-cross/RSI/MACD) is computed on data through the <b>previous session's close only</b>, never same-day high/low/close, to avoid look-ahead bias (Chan). Validated by an A-vs-B truncation test — see <code>lookahead-gate/</code>.
     </div>
     <div class="volnote">
       <b>ATR, realized vol, beta &amp; 52w range — sizing/regime inputs, not stock-pickers.</b> ATR is the <b>load-bearing sizing input</b> (QuantInsti, Chan): it sets stop distance and cascades into position size (shares = risk% × equity / (k×ATR)), and is the practical volatility proxy for Kelly. Realized vol, beta and the 52-week range (Harris) encode the <b>fundamental-vs-transitory split</b> in a price move — use them to size positions and read the regime, never as a standalone buy/sell signal.
+    </div>
+    <div class="risknote">
+      <b>Stop Dist, Size &amp; Max DD — a pre-sized trade plan, not a suggestion (issue #44).</b> Fixed-fractional sizing (QuantInsti): shares = equity × risk% / (k×ATR) — equal <b>risk</b>, not equal dollars, per name. Size is further capped by <b>half-Kelly</b> (f=m/σ² via ATR%, Chan — never full Kelly, which underestimates tail risk) and by the <b>worst-historical-loss rule</b> (the shipped Max DD column). <b>ATR stops apply only in a trending regime</b> — on a mean-reverting/range-bound name (RS %ile 30–70) a stop realizes the loss rather than avoiding it, so Stop Dist/Size show <b>mean-revert</b> instead of a number. Equity/risk%/k are <b>deliberate, round defaults — not fitted to any name's history</b> (open-parameter caveat). Douglas: these are <b>pre-commitments to obey after a drawdown</b>, not numbers to widen or double up.
     </div>
     <div class="ivnote">
       <b>IV Rank &amp; IV Percentile — the options normalizer (paid feed).</b> Raw IV is meaningless across names (a biotech's 60% vs a utility's 18%) — IVR/IVP are shipped <b>side-by-side</b>, never IV alone, so a one-off spike shows up as a divergence between them instead of a misleading single number. Snapshot definition is fixed (<b>30-day ATM IV</b>) for a consistent trailing window. Columns are flagged <b>warming up</b> per ticker until ~3-6mo of nightly snapshots have accrued (IV Percentile) / ~1yr (IV Rank). IVR ≥70 hints <b>sell premium</b>, ≤30 hints <b>buy premium</b> — soft-gated under the macro VIX regime (see the Macro tab): a rich-IV sell hint carries an explicit caution when the regime is risk-off.
@@ -771,6 +907,11 @@ async function renderScreener(){
     const df=document.getElementById('dvolFloor');
     df.value=String(LIQ_FLOOR);
     df.onchange=()=>{ LIQ_FLOOR=Number(df.value)||0; drawScreener(); };
+    const se=document.getElementById('sizeEquity'), srp=document.getElementById('sizeRiskPct'), sk=document.getElementById('sizeK');
+    se.value=String(SIZING_EQUITY); srp.value=String(SIZING_RISK_PCT); sk.value=String(SIZING_K);
+    se.onchange=()=>{ SIZING_EQUITY=Math.max(0,Number(se.value)||0); drawScreener(); };
+    srp.onchange=()=>{ SIZING_RISK_PCT=Number(srp.value)||0.01; drawScreener(); };
+    sk.onchange=()=>{ SIZING_K=Number(sk.value)||2; drawScreener(); };
     renderColMenu();
     drawScreener();
   }catch(e){ v.querySelector('#tbl').innerHTML=`<div class="err">${e.message}<br>Is the API running? (uvicorn api:app)</div>`; }

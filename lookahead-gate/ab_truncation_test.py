@@ -18,7 +18,8 @@ Education/game/validate_model.py):
      (file A) and over histories truncated by N=10 and N=100 days (file B).
   3. Asserts every overlapping (ticker, date) row is IDENTICAL across A/B for
      every indicator: returns, momentum factor + RS rank, MA cross, RSI,
-     MACD, ATR, realized vol, beta. This is the gate — it must PASS.
+     MACD, ATR, realized vol, beta, max drawdown. This is the gate — it must
+     PASS.
   4. Proves the gate has teeth: re-runs the same check against deliberately
      leaky variants (centered/future-peeking SMA, a same-day-close RSI leak,
      and an RS-rank computed off a time-pooled/future-aware distribution) and
@@ -92,6 +93,7 @@ def compute_indicator_table(universe, mkt_key=MARKET):
                 "atr": lag.atr(bars, i),
                 "realized_vol": lag.realized_vol(closes, i),
                 "beta": lag.beta(closes, mkt_closes, i),
+                "max_drawdown": lag.max_drawdown(closes, i),
             }
     return table
 

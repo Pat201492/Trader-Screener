@@ -102,11 +102,16 @@ Strike out what you don't care about. Add rows for anything the reading surfaces
 | Other FRED series | [ ] | | | list: ____ |
 
 ### 2g. Risk / sizing  🟡
+> **Decided (issue #44):** stop distance, suggested position size and max drawdown shipped as screener
+> columns — a screen hit becomes a pre-sized trade plan. Fixed-fractional (QuantInsti) capped by half-Kelly
+> and the worst-historical-loss rule (Chan), never full Kelly. ATR stops gated on a trending regime (RS
+> %ile 70+/30- proxy, from the momentum block) — not applied to mean-reverting names. Equity/risk%/k are
+> user inputs with deliberate, non-history-fitted defaults (see `Project.md` § Risk / sizing layer).
 | Metric | Want? | Use | Priority | Notes |
 |---|---|---|---|---|
-| Suggested position size (ATR-based) | [ ] | | | from QuantInsti reading |
-| Stop distance (ATR multiple) | [ ] | | | |
-| Max drawdown (historical) | [ ] | | | |
+| Suggested position size (ATR-based) | ✅ | B | P1 | shipped as `suggested_shares` (issue #44); tightest of fixed-fractional/half-Kelly/worst-loss-cap legs; gated on trending regime |
+| Stop distance (ATR multiple) | ✅ | B | P1 | shipped as `stop_distance` (issue #44); `k × ATR`, trending-regime gated — `mean-revert` shown otherwise |
+| Max drawdown (historical) | ✅ | B | P2 | shipped as `max_drawdown` (issue #44); peak-to-subsequent-trough, feeds the worst-historical-loss size cap |
 
 ### 2h. Options / derivatives signals  🔴 (needs an options-chain feed — **decided (issue #45): Polygon.io**, paid)
 > Only relevant if §1 includes options. Background: [Derivatives — Types & Signals](../Education/Derivatives_Types_and_Trading_Signals.md) · [IV Rank/Percentile — OIC](../Education/summaries/iv-rank-iv-percentile-oic.md). Raw IV doesn't compare across names — **IV Rank/percentile is the must-have normalizer.**
