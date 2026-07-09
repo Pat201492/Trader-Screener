@@ -90,6 +90,9 @@
   /* discipline / cool-down banner (issue #47) — Douglas usage layer, reuses the red risk-off accent */
   .cooldownnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--red);border-radius:6px;background:#f851490d;color:var(--muted);font-size:12px;line-height:1.55}
   .cooldownnote b{color:var(--txt)}
+  /* tear-sheet coherence note (issue #48) — the per-instrument argument's read-order banner */
+  .tearnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #a371f7;border-radius:6px;background:#a371f70d;color:var(--muted);font-size:12px;line-height:1.55}
+  .tearnote b{color:var(--txt)}
 </style>
 </head>
 <body>
@@ -1469,33 +1472,273 @@ function exposureHTML(d){
   return html;
 }
 
+// ── Tear sheet — thesis × IV Rank → derivative recommendation rules engine (issue #48) ──
+// Fuses the smart-money moat (issue #41) with IV-regime-aware structure selection (issue
+// #46), gated by liquidity (issue #37) — the "readable, self-consistent argument" per
+// instrument that Education/How_to_Read_a_Tear_Sheet.md + Information_Sheet_Tearsheet.md
+// spec as the screener's target output. The thesis gives DIRECTION; IV Rank gives
+// STRUCTURE (same split those docs make: "the view sets the delta, IV Rank sets the
+// structure"). Direction reuses trendingRegime()'s already-shipped RS %ile 70/30 trend
+// proxy (issue #44) — a bullish/bearish call requires an ACTUAL trend, not just a sign
+// flip; the noisy 30-70 middle reads as range-bound, same definition already gating Stop
+// Dist/Size, so the tear sheet never contradicts the sizing block above it.
+const SKEW_RICH=1.15; // 25Δ put/call IV ratio heuristic band for "rich enough to fund a collar" — distinct from SKEW_FLATTEN (1.05, the flattening tell); same heuristic-band posture as skewCell (no skew-history table exists yet, issue #46).
+const STRUCTURE_NAMES={long_call:'Long Call', long_put:'Long Put', bull_call_spread:'Bull Call Spread', bear_put_spread:'Bear Put Spread', iron_condor:'Iron Condor', collar:'Collar (protective put + covered call)'};
+const fmtMoney=v=>v==null?'–':'$'+fmt(Math.abs(v),2);
+
+// Thesis: the DIRECTION call, from score/momentum. Fail-safe-closed like trendingRegime()
+// and optionsChainLiquid() — unknown RS %ile (ticker not ranked in the currently-loaded
+// screener universe) never gets an assumed direction, it gets "Unrated".
+function tearThesis(r){
+  if(r.rs_percentile==null){
+    return {dir:null, label:'Unrated', why:['No RS-percentile rank available for this ticker yet — open the Screener tab first so it\'s ranked against the current universe (rs_percentile is computed cross-sectionally, front-end, issue #40).']};
+  }
+  const why=[];
+  let dir;
+  if(r.rs_percentile>=70){
+    dir='bullish';
+    why.push(`RS %ile ${Math.round(r.rs_percentile)} — top-decile momentum trend (Fama-French prior(2,12) skip-month factor, issue #40).`);
+  } else if(r.rs_percentile<=30){
+    dir='bearish';
+    why.push(`RS %ile ${Math.round(r.rs_percentile)} — bottom-decile momentum trend.`);
+  } else {
+    dir='range';
+    why.push(`RS %ile ${Math.round(r.rs_percentile)} — noisy 30-70 middle band, no dominant trend (mean-reverting/range-bound — the same gate Stop Dist/Size use to withhold a stop, issue #44).`);
+  }
+  if(r.mom_factor!=null) why.push(`Momentum factor (t-12→t-2, skip-month) ${r.mom_factor>=0?'+':''}${fmt(r.mom_factor,1)}%.`);
+  if(r.score!=null) why.push(`Magic-Formula score ${fmt(r.score,0)}${r.score_label?' · '+r.score_label:''} (Greenblatt ROIC + EBIT/EV composite).`);
+  if(r.avg_upside!=null) why.push(`Valuation-model upside ${r.avg_upside>=0?'+':''}${fmt(r.avg_upside,1)}% (DCF/comps blend, fundamentals.json/model.json).`);
+  if(r.combined_signal) why.push(`Valuation-model signal: ${r.combined_signal}.`);
+  if(r.smart_money_dir&&r.smart_money_dir!=='neutral'){
+    const wantDir=dir==='bullish'?'buy':dir==='bearish'?'sell':null;
+    const confirms=wantDir&&r.smart_money_dir===wantDir;
+    why.push(`Smart money net ${r.smart_money_dir==='buy'?'buying':'selling'} (score ${r.smart_money_score>0?'+':''}${r.smart_money_score}) — ${wantDir?(confirms?'confirms':'CONTRADICTS'):'a data point on'} the trend read${wantDir?'':' (thesis is range-bound, so this is a crowding note, not a direction check)'}.`);
+  }
+  const label=dir==='bullish'?'BUY':dir==='bearish'?'SELL':'HOLD';
+  return {dir, label, why};
+}
+// 12-mo target: prefer the Street consensus, else derive from the valuation-model upside
+// blend already collected. Null (never fabricated) if neither is available — a rating with
+// no target is an opinion, not an argument (Education/How_to_Read_a_Tear_Sheet.md §1).
+function tearTarget(r){
+  if(r.analyst_mean!=null) return {target:r.analyst_mean, src:'analyst consensus mean (Street convention, ~12-mo)'};
+  if(r.avg_upside!=null && r.price!=null) return {target:r.price*(1+r.avg_upside/100), src:'derived from valuation-model upside (DCF/comps blend) — no fixed horizon collected, ~12-mo shown by analyst-target convention'};
+  return {target:null, src:null};
+}
+// Nearest-strike lookup + a contract's mid price (never invented — null when bid/ask both missing).
+function nearestContract(contracts,type,target){
+  const list=contracts.filter(c=>c.type===type && c.strike!=null);
+  if(!list.length) return null;
+  return list.reduce((best,c)=>(!best||Math.abs(c.strike-target)<Math.abs(best.strike-target))?c:best,null);
+}
+function contractMid(c){
+  if(!c) return null;
+  if(c.bid!=null&&c.ask!=null) return (c.bid+c.ask)/2;
+  if(c.last!=null) return c.last;
+  return null;
+}
+// Builds the actual structure from the REAL nearest-expiry chain (real strikes/bid/ask/Greeks) —
+// never a hypothetical number. Returns null (rather than guessing) if the needed strikes/prices
+// aren't present in the collected chain. Position delta/vega = Σ(direction × contract Greek),
+// direction +1 buy / −1 sell — the Greek-bias check below reads off these.
+function buildStructure(key, spot, contracts){
+  const callAt=t=>nearestContract(contracts,'call',t), putAt=t=>nearestContract(contracts,'put',t);
+  const mid=contractMid;
+  if(key==='long_call'){
+    const c=callAt(spot); if(!c) return null;
+    const premium=mid(c); if(premium==null) return null;
+    return {name:STRUCTURE_NAMES.long_call, legs:[{action:'Buy',c}],
+      maxLoss:premium, maxProfit:Infinity, breakeven:c.strike+premium,
+      netCost:premium, delta:c.delta??0, vega:c.vega??0};
+  }
+  if(key==='long_put'){
+    const c=putAt(spot); if(!c) return null;
+    const premium=mid(c); if(premium==null) return null;
+    return {name:STRUCTURE_NAMES.long_put, legs:[{action:'Buy',c}],
+      maxLoss:premium, maxProfit:Math.max(0,c.strike-premium), breakeven:c.strike-premium,
+      netCost:premium, delta:c.delta??0, vega:c.vega??0};
+  }
+  if(key==='bull_call_spread'){
+    const lc=callAt(spot); if(!lc) return null;
+    const calls=contracts.filter(c=>c.type==='call'&&c.strike>lc.strike).sort((a,b)=>a.strike-b.strike);
+    const sc=calls.find(c=>c.strike>=lc.strike*1.05)||calls[calls.length-1];
+    if(!sc) return null;
+    const lm=mid(lc), sm2=mid(sc); if(lm==null||sm2==null) return null;
+    const debit=lm-sm2; if(debit<=0) return null;
+    return {name:STRUCTURE_NAMES.bull_call_spread, legs:[{action:'Buy',c:lc},{action:'Sell',c:sc}],
+      maxLoss:debit, maxProfit:(sc.strike-lc.strike)-debit, breakeven:lc.strike+debit,
+      netCost:debit, delta:(lc.delta??0)-(sc.delta??0), vega:(lc.vega??0)-(sc.vega??0)};
+  }
+  if(key==='bear_put_spread'){
+    const lp=putAt(spot); if(!lp) return null;
+    const puts=contracts.filter(c=>c.type==='put'&&c.strike<lp.strike).sort((a,b)=>b.strike-a.strike);
+    const sp=puts.find(c=>c.strike<=lp.strike*0.95)||puts[puts.length-1];
+    if(!sp) return null;
+    const lm=mid(lp), sm2=mid(sp); if(lm==null||sm2==null) return null;
+    const debit=lm-sm2; if(debit<=0) return null;
+    return {name:STRUCTURE_NAMES.bear_put_spread, legs:[{action:'Buy',c:lp},{action:'Sell',c:sp}],
+      maxLoss:debit, maxProfit:(lp.strike-sp.strike)-debit, breakeven:lp.strike-debit,
+      netCost:debit, delta:(lp.delta??0)-(sp.delta??0), vega:(lp.vega??0)-(sp.vega??0)};
+  }
+  if(key==='iron_condor'){
+    const sc=callAt(spot*1.05), lc=callAt(spot*1.10), sp=putAt(spot*0.95), lp=putAt(spot*0.90);
+    if(!sc||!lc||!sp||!lp) return null;
+    const scM=mid(sc), lcM=mid(lc), spM=mid(sp), lpM=mid(lp);
+    if([scM,lcM,spM,lpM].some(v=>v==null)) return null;
+    const credit=(scM+spM)-(lcM+lpM); if(credit<=0) return null;
+    const maxLoss=Math.max(lc.strike-sc.strike, sp.strike-lp.strike)-credit;
+    if(maxLoss<=0) return null; // credit ≥ wing width — an internally-inconsistent quote, withhold rather than show a free lunch
+    return {name:STRUCTURE_NAMES.iron_condor, legs:[{action:'Sell',c:sc},{action:'Buy',c:lc},{action:'Sell',c:sp},{action:'Buy',c:lp}],
+      maxLoss, maxProfit:credit, breakeven:[sp.strike-credit, sc.strike+credit],
+      netCost:-credit, delta:-(sc.delta??0)+(lc.delta??0)-(sp.delta??0)+(lp.delta??0), vega:-(sc.vega??0)+(lc.vega??0)-(sp.vega??0)+(lp.vega??0)};
+  }
+  if(key==='collar'){
+    const sc=callAt(spot*1.05), lp=putAt(spot*0.95);
+    if(!sc||!lp) return null;
+    const scM=mid(sc), lpM=mid(lp); if(scM==null||lpM==null) return null;
+    const netCost=lpM-scM; // >0 net debit, <0 net credit — "costless" collars land near 0 (Example 2)
+    const collarLoss=(spot-lp.strike)+netCost, collarProfit=(sc.strike-spot)-netCost;
+    if(collarLoss<=0||collarProfit<=0) return null; // internally-inconsistent quote, withhold rather than show a free lunch
+    return {name:STRUCTURE_NAMES.collar, legs:[{action:'Sell',c:sc},{action:'Buy',c:lp}], isCollar:true,
+      maxLoss:collarLoss, maxProfit:collarProfit, breakeven:spot+netCost,
+      netCost, delta:1-(sc.delta??0)+(lp.delta??0), vega:-(sc.vega??0)+(lp.vega??0)};
+  }
+  return null;
+}
+// The rules engine: thesis × IV Rank → structure. Matches "Summary: matching action to
+// signal" (Education/Derivatives_Examples_Gallery.md) and the 4 combos the issue names —
+// bullish+low IV -> long call, bullish+high IV -> call spread, hedge+rich skew -> collar,
+// range-bound+high IV -> iron condor — extended with the bearish mirror (same table's
+// "down/hedge" row) and an explicit "no trade" verdict rather than forcing a structure
+// when the edge isn't there (Douglas: don't manufacture a signal that didn't fire).
+// Skew-driven collar takes priority over a bullish/range read: rich, chain-liquidity-gated
+// put skew is read as "this name is priced for a hedge" regardless of the underlying
+// speculative direction (Example 2's WTI collar) — never applied against a bearish thesis,
+// where a collar (capped upside) would contradict wanting price to fall.
+function chooseStructureKey(thesisDir, ivRank, skew, chainLiquid){
+  if(chainLiquid && skew!=null && skew>=SKEW_RICH && thesisDir!=null && thesisDir!=='bearish'){
+    return {key:'collar', reason:`Skew ${skew.toFixed(2)} ≥ ${SKEW_RICH} (chain-liquidity-gated) — richly priced downside protection funds a covered call, hedging the ${thesisDir} stance rather than paying full price for a lone directional option.`};
+  }
+  if(thesisDir==='range'){
+    if(ivRank!=null && ivRank>=70) return {key:'iron_condor', reason:`Range-bound (RS %ile mid-band) + IV Rank ${Math.round(ivRank)} (≥70, rich) — sell the overpriced premium, defined risk on both wings (Example 4).`};
+    return {key:null, reason:`Range-bound, but IV Rank ${ivRank!=null?Math.round(ivRank):'unavailable'} isn't rich enough to sell premium — no structure forced. Wait for a richer IV read or a directional break.`};
+  }
+  if(thesisDir==='bullish'){
+    if(ivRank!=null && ivRank<=30) return {key:'long_call', reason:`Bullish + IV Rank ${Math.round(ivRank)} (≤30, cheap) — buy the option outright; no need to sell premium to offset cost (Example 5's low-IVR logic, applied directionally).`};
+    if(ivRank!=null) return {key:'bull_call_spread', reason:`Bullish + IV Rank ${Math.round(ivRank)} (${ivRank>=70?'≥70, rich':'mid-band'}) — a lone call overpays vega; sell the upper strike to cap cost (Example 1; defined-risk is the default for anyone not running a desk).`};
+    return {key:null, reason:'Bullish, but no IV Rank read available (options data unavailable or the ticker is outside the paid-feed universe) — direction only, structure withheld.'};
+  }
+  if(thesisDir==='bearish'){
+    if(ivRank!=null && ivRank<=30) return {key:'long_put', reason:`Bearish + IV Rank ${Math.round(ivRank)} (≤30, cheap) — buy the put outright.`};
+    if(ivRank!=null) return {key:'bear_put_spread', reason:`Bearish + IV Rank ${Math.round(ivRank)} (${ivRank>=70?'≥70, rich':'mid-band'}) — sell the lower strike to cap cost (Example 3; defined-risk default).`};
+    return {key:null, reason:'Bearish, but no IV Rank read available — direction only, structure withheld.'};
+  }
+  return {key:null, reason:'No trend read (RS %ile unavailable) — no thesis, so no structure is recommended.'};
+}
+// Greek-bias coherence check (How to Read a Tear Sheet §7.5): the position's net Greeks
+// must agree with the thesis — a "big move" view that's accidentally −vega, or a bullish
+// call that's net −delta, contradicts itself. Condor/collar get their own expected sign
+// (delta-neutral+short-vol; hedge-muted-delta) instead of the plain direction check.
+function greekBiasAgrees(structureKey, thesisDir, delta, vega){
+  const d=delta||0, v=vega||0;
+  if(structureKey==='iron_condor'){
+    return {agrees:v<0, label:`net delta ${d>=0?'+':''}${d.toFixed(2)}, net vega ${v>=0?'+':''}${v.toFixed(2)} — expect ≈flat delta, −vega/+theta (short vol, collects decay).`};
+  }
+  if(structureKey==='collar'){
+    return {agrees:true, label:`net delta ${d.toFixed(2)} (muted long — the stock leg is reduced by the hedge), net vega ${v>=0?'+':''}${v.toFixed(2)} — trades upside for a protected floor, not a directional bet.`};
+  }
+  const wantPos=thesisDir==='bullish';
+  const agrees=wantPos?d>0:d<0;
+  return {agrees, label:`net delta ${d>=0?'+':''}${d.toFixed(2)} — ${agrees?'agrees with':'CONTRADICTS'} the ${thesisDir} thesis (expected ${wantPos?'positive':'negative'}).`};
+}
+// Renders the Derivative recommendation card — degrades in three explicit stages: no
+// thesis -> no structure -> no chain data, never silently substituting a guess for a
+// withheld number (acceptance: "equity-only sheet still coherent").
+function renderRecommendation(thesis, choice, structure, exp, chainLiquid, ivRank){
+  const gateNote=`<div class="muted" style="font-size:11px;margin-top:8px">Options-flow legs (skew-driven collar check) are gated on chain liquidity (≥${OPT_LIQ_MIN_OI} OI / ≥${OPT_LIQ_MIN_VOL} vol) — ${chainLiquid?'this chain clears the gate.':'this chain is thin or unmeasured, so the skew/collar check is withheld.'} Liquidity disclosure: dollar volume (Snapshot) proxies only <b>depth</b>, 1 of Harris's 4 dimensions — spread/immediacy/resiliency are not in v1.</div>`;
+  if(thesis.dir==null) return `<div class="card" style="max-width:760px"><div class="muted">${choice.reason}</div>${gateNote}</div>`;
+  if(!choice.key) return `<div class="card" style="max-width:760px"><div><b>${thesis.label}</b> — no structure recommended.</div><div class="muted" style="margin-top:6px">${choice.reason}</div>${gateNote}</div>`;
+  if(!structure) return `<div class="card" style="max-width:760px"><div><b>${thesis.label}</b> → suggested structure: <b>${STRUCTURE_NAMES[choice.key]}</b></div>
+    <div class="muted" style="margin-top:6px">${choice.reason}</div>
+    <div class="muted" style="margin-top:6px">Strikes/premiums unavailable in the collected chain${exp?` (expiry ${exp})`:''} — numbers withheld rather than guessed.</div>${gateNote}</div>`;
+  const bias=greekBiasAgrees(choice.key, thesis.dir, structure.delta, structure.vega);
+  const legsHtml=structure.legs.map(l=>`${l.action} ${l.c.type} $${fmt(l.c.strike)}`).join(' · ');
+  const breakevenHtml=Array.isArray(structure.breakeven)?`$${fmt(structure.breakeven[0])} / $${fmt(structure.breakeven[1])}`:`$${fmt(structure.breakeven)}`;
+  return `<div class="card" style="max-width:760px">
+    <div style="margin-bottom:6px"><b>${thesis.label}</b> → <b>${structure.name}</b>${exp?` · ~${exp} expiry`:''}</div>
+    <div class="muted" style="font-size:12px;margin-bottom:8px">${legsHtml}</div>
+    <table style="font-size:13px"><tbody>
+      <tr><td class="muted" style="border:none;padding:3px 12px 3px 0">Max loss <span class="muted" title="Always found first, per the coherence check">(found first)</span></td><td class="num" style="border:none;padding:3px 0">${fmtMoney(structure.maxLoss)}/share</td></tr>
+      <tr><td class="muted" style="border:none;padding:3px 12px 3px 0">Max profit</td><td class="num" style="border:none;padding:3px 0">${structure.maxProfit===Infinity?'uncapped':fmtMoney(structure.maxProfit)+'/share'}</td></tr>
+      <tr><td class="muted" style="border:none;padding:3px 12px 3px 0">Breakeven</td><td class="num" style="border:none;padding:3px 0">${breakevenHtml}</td></tr>
+      <tr><td class="muted" style="border:none;padding:3px 12px 3px 0">Net ${structure.netCost>=0?'debit':'credit'}</td><td class="num" style="border:none;padding:3px 0">${fmtMoney(structure.netCost)}/share</td></tr>
+    </tbody></table>
+    <div style="margin-top:8px;font-size:12px" class="${bias.agrees?'pos':'neg'}">Greek bias: ${bias.label}</div>
+    <div class="muted" style="font-size:11px;margin-top:6px">${choice.reason}</div>
+    ${!bias.agrees?`<div class="neg" style="font-size:11px;margin-top:4px">⚠ Greek bias does not agree with the thesis — the sheet contradicts itself here (Education/How_to_Read_a_Tear_Sheet.md coherence check); re-check before acting.</div>`:''}
+    ${gateNote}
+  </div>`;
+}
+
 // ── STOCK DETAIL (click a ticker) ─────────────────────────
+// Tear sheet (issue #48) — a readable, self-consistent per-instrument ARGUMENT, not a wall
+// of numbers: Header -> Snapshot (+ Valuation/fundamentals) -> Thesis -> Positioning/smart
+// money -> Technicals -> Derivative recommendation. Matches the block order + "check the
+// argument holds" reading discipline in Education/How_to_Read_a_Tear_Sheet.md and the
+// template in Education/Information_Sheet_Tearsheet.md, which the Reading tab (issue #57)
+// already documents as the screener's target output. Feed tier: collected (assembles
+// collected + ohlcv + paid blocks; degrades gracefully — see the recommendation card —
+// when the paid options block is unavailable).
 async function openStock(tk){
   TAB='screener';
   const v=document.getElementById('view');
   v.innerHTML=`<div class="loading">Loading ${tk}…</div>`;
   try{
     const s=await jget('/api/stocks/'+tk);
-    // header
+    // rs_percentile is NOT an upstream field (same reason as the screener table, issue #40) —
+    // it's a cross-sectional rank over the currently-loaded universe, computed front-end by
+    // computeMomentumRanks() during renderScreener()/drawScreener(). Merge it in from the
+    // already-ranked screenerRows pool if this ticker is in it; else the thesis engine
+    // degrades to "Unrated" (fail-safe-closed, same posture as trendingRegime()).
+    const ranked=screenerRows.find(r=>r.ticker===s.ticker);
+    if(ranked&&ranked.rs_percentile!=null) s.rs_percentile=ranked.rs_percentile;
+    // smart-money moat — composite score + component breakdown (issue #41). Computed on this
+    // single row (no cross-row ranking needed, unlike magic_rank) — feeds both the Positioning
+    // block below and the thesis engine's confirmation/crowding note.
+    computeSmartMoneyScores([s]);
+    const thesis=tearThesis(s), tgt=tearTarget(s);
+
+    // ── HEADER — rating + 12-mo target + horizon ─────────────────────────
     const score=s.score_composite, label=s.score_label, stars=s.score_stars;
+    const ratingCls=thesis.dir==='bullish'?'pos':thesis.dir==='bearish'?'neg':'muted';
     let html=`<button class="pill" style="cursor:pointer;border:1px solid var(--border)" onclick="renderScreener()">← Screener</button>
       <div style="display:flex;align-items:baseline;gap:12px;margin:12px 0 4px">
         <span class="big" style="font-size:24px">${s.ticker}</span>
         <span class="muted">${s.name||''}</span></div>
       <div class="muted" style="margin-bottom:10px">${s.sector||''} · ${s.industry||''} · ${s.cap_size||''} · rank #${s.rank??'–'}</div>
+      <div style="margin-bottom:4px">
+        <span class="pill ${ratingCls}" style="font-weight:600">${thesis.label}</span>
+        <span class="pill">12-mo target ${tgt.target!=null?'$'+fmt(tgt.target):'–'}</span>
+        <span class="pill muted">horizon ~12-mo</span>
+      </div>
+      <div class="muted" style="font-size:11px;margin-bottom:12px;max-width:760px">${tgt.src?`Target: ${tgt.src}.`:'No price target available (no analyst consensus or valuation-model upside collected) — a rating with no target is an opinion, not an argument.'}</div>
+      <div class="tearnote">
+        <b>Read this like a desk analyst (60-second scan):</b> rating+target+horizon → IV Rank → max loss → does direction match IV Rank → liquidity ($ vol) → biggest named risk. If those agree, the argument closes (Education/How_to_Read_a_Tear_Sheet.md).
+      </div>
       <div style="margin-bottom:14px">
         <span class="pill">$${fmt(s.price)}</span>
         <span class="pill">mkt cap ${s.mkt_cap!=null?'$'+fmt(s.mkt_cap)+'B':'–'}</span>
         ${score!=null?`<span class="pill">score ${fmt(score,0)} ${label?'· '+label:''} ${stars?'· '+'★'.repeat(Math.round(stars)):''}</span>`:'<span class="pill muted">score pending</span>'}
         ${s.avg_upside!=null?`<span class="pill">upside ${pct(s.avg_upside)}</span>`:''}
       </div>`;
-    // 52w range
+
+    // ── SNAPSHOT — price/cap/52w-range/$vol-gate/beta/realized-vol/ATR ───
+    html+=`<div class="group-title">Snapshot</div>`;
     if(s.low52!=null&&s.high52!=null&&s.high52>s.low52){
       const pos=((s.price-s.low52)/(s.high52-s.low52)*100).toFixed(0);
       html+=`<div class="muted" style="font-size:12px">52w range $${fmt(s.low52)} – $${fmt(s.high52)}</div>
         <div class="rangebar" style="max-width:320px;margin:6px 0 14px"><i style="left:${pos}%"></i></div>`;
     }
-    // liquidity strip — tradeability first, with the un-measured dimensions disclosed
     {
       const etf=isETF(s), basket=etf?basketDollarVol(s):null, screen=screenDollarVol(s);
       html+=`<div style="margin:0 0 8px">
@@ -1503,18 +1746,47 @@ async function openStock(tk){
         <span class="pill">$ vol ${money(screen)}</span>
         ${etf&&basket!=null?`<span class="pill" title="ETF capacity = Σ constituent $ADV × weight; screen ADV is a floor, never a ceiling">basket liq ${money(basket)}</span>`:''}
         ${etf?'<span class="pill muted" title="ETF gated on basket liquidity, not screen ADV">ETF · basket-gated</span>':''}
+        <span class="pill" title="Trailing 60d beta vs. SPY — how hard a market selloff hits you regardless of thesis">Beta ${s.beta!=null?fmt(s.beta,2):'–'}</span>
+        <span class="pill" title="30d annualized stdev of daily returns — the yardstick for judging IV richness">Realized vol ${s.realized_vol!=null?fmt(s.realized_vol,1)+'%':'–'}</span>
+        <span class="pill" title="14d Average True Range — sets stop distance, sizes the position">ATR ${s.atr!=null?'$'+fmt(s.atr):'–'}${s.atr_pct!=null?` (${fmt(s.atr_pct,2)}%)`:''}</span>
       </div>
       <div class="lqnote" style="max-width:760px">
         <b>Liquidity (v1 = depth only).</b> Dollar volume proxies just <b>1 of Harris's 4 liquidity dimensions — depth</b>. <b>Spread</b> (width), <b>immediacy</b> &amp; <b>resiliency</b> need a paid quote feed and are <b>not in v1</b>.${etf?' This ETF is gated on <b>basket liquidity</b> (underlying holdings), not its screen ADV.':''}
       </div>`;
     }
-    // smart-money moat — composite score + component breakdown + recent buy/sell flags
-    // (issue #41). Computed on this single row (no cross-row ranking needed, unlike magic_rank).
-    computeSmartMoneyScores([s]);
+    // valuation / fundamentals — from fundamentals.json/model.json, part of the Snapshot
+    // (How to Read a Tear Sheet §2 lists valuation as a snapshot subsection)
+    html+=`<div class="group-title">Valuation / fundamentals</div>`;
+    {
+      const blocks=[
+        ['Valuation',[['P/E',s.pe],['Fwd P/E',s.fwd_pe],['P/B',s.pb],['P/S',s.ps],['EV/EBITDA',s.ev_ebitda],['PEG',s.peg],['Div yield',s.div_yield,'%'],['Beta',s.beta]]],
+        ['Quality / margins',[['ROIC',s.roic,'%'],['ROE',s.roe,'%'],['Gross mgn',s.gross_margin,'%'],['Op mgn',s.op_margin,'%'],['Net mgn',s.net_margin,'%'],['FCF mgn',s.fcf_margin,'%'],['Debt/EBITDA',s.d_to_ebitda],['Curr ratio',s.curr_ratio]]],
+        ['Growth (CAGR)',[['Rev 5y',s.rev_cagr_5y,'%'],['EPS 5y',s.eps_cagr_5y,'%'],['FCF 5y',s.fcf_cagr_5y,'%'],['Rev 1y',s.rev_cagr_1y,'%'],['EPS ttm',s.eps_ttm],['EPS fwd',s.eps_fwd]]],
+        ['Valuation models',[['DCF intrinsic',s.dcf_intrinsic],['DCF upside',s.dcf_upside_pct,'%'],['Comps FV',s.comps_fair_value],['Comps upside',s.comps_upside_pct,'%'],['EPV',s.epv_value],['Graham',s.graham_value],['Signal',s.combined_signal]]],
+        ['Analysts',[['Mean tgt',s.analyst_mean],['Low',s.analyst_low],['High',s.analyst_high],['# analysts',s.num_analysts],['1y return',s.ret_1y,'%']]],
+      ];
+      html+=`<div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">`;
+      for(const [title,rows] of blocks){
+        html+=`<div class="card"><div class="name">${title}</div><table style="font-size:12px">`+
+          rows.map(([k,val,suf])=>`<tr><td class="muted" style="border:none;padding:3px 6px 3px 0">${k}</td>
+            <td class="num" style="border:none;padding:3px 0">${val==null||val===''?'–':(typeof val==='number'?fmt(val,2):val)}${(val!=null&&suf)?suf:''}</td></tr>`).join('')+
+          `</table></div>`;
+      }
+      html+=`</div>`;
+    }
+
+    // ── THESIS — score/momentum synthesis, every claim traces to a snapshot metric ──
+    html+=`<div class="group-title">Thesis</div>
+      <div class="card" style="max-width:760px;margin-bottom:14px">
+        ${thesis.why.map(w=>`<div style="font-size:13px;margin:3px 0">• ${w}</div>`).join('')}
+        <div class="muted" style="font-size:11px;margin-top:8px">No company-specific, time-bound catalyst is tracked yet — treat the ~12-mo horizon as a valuation-model/analyst convention, not a scheduled event. Being early is being wrong (Education/How_to_Read_a_Tear_Sheet.md §3).</div>
+      </div>`;
+
+    // ── POSITIONING / SMART MONEY — congress + insider + UOA (issue #41/#46) ──
     if(s.smart_money_score!=null){
       const b=s.smart_money_breakdown||{};
       const dirCls=s.smart_money_dir==='buy'?'pos':s.smart_money_dir==='sell'?'neg':'muted';
-      html+=`<div class="group-title">Smart money <span class="tier t-oos" title="Not out-of-sample validated yet (walk-forward/CSCV pending)">OOS✗</span></div>
+      html+=`<div class="group-title">Positioning / smart money <span class="tier t-oos" title="Not out-of-sample validated yet (walk-forward/CSCV pending)">OOS✗</span></div>
         <div class="card" style="max-width:640px;margin-bottom:14px">
           <span class="pill ${dirCls}">score ${s.smart_money_score>0?'+':''}${s.smart_money_score} · ${s.smart_money_dir}</span>
           <span class="pill muted">congress ${b.congress??'–'}</span>
@@ -1526,31 +1798,34 @@ async function openStock(tk){
           ${b.put_call_extreme?'<span class="pill">⚠ P/C extreme</span>':''}
           ${(s.congress_buys_90d!=null||s.congress_sells_90d!=null)?`<div class="muted" style="font-size:12px;margin-top:8px">Congress (90d): ${s.congress_buys_90d??0} buy${s.congress_buys_90d===1?'':'s'} · ${s.congress_sells_90d??0} sell${s.congress_sells_90d===1?'':'s'}</div>`:''}
           ${(s.insider_buys_90d!=null||s.insider_sells_90d!=null)?`<div class="muted" style="font-size:12px">Insider (90d): ${s.insider_buys_90d??0} buy${s.insider_buys_90d===1?'':'s'} · ${s.insider_sells_90d??0} sell${s.insider_sells_90d===1?'':'s'}</div>`:''}
-          <div class="muted" style="font-size:11px;margin-top:8px">Edge, not a certainty — filing-lagged &amp; noisy (Douglas / Harris). Not out-of-sample validated yet.</div>
+          <div class="muted" style="font-size:11px;margin-top:8px">Edge, not a certainty — filing-lagged &amp; noisy (Douglas / Harris). Read as confirmation AND a crowding warning. Not out-of-sample validated yet.</div>
         </div>`;
     } else {
-      html+=`<div class="group-title">Smart money</div><div class="muted" style="margin-bottom:14px">No congress/insider/news data collected for ${s.ticker}.</div>`;
+      html+=`<div class="group-title">Positioning / smart money</div><div class="muted" style="margin-bottom:14px">No congress/insider/news data collected for ${s.ticker}.</div>`;
     }
-    // metric blocks
-    const blocks=[
-      ['Valuation',[['P/E',s.pe],['Fwd P/E',s.fwd_pe],['P/B',s.pb],['P/S',s.ps],['EV/EBITDA',s.ev_ebitda],['PEG',s.peg],['Div yield',s.div_yield,'%'],['Beta',s.beta]]],
-      ['Quality / margins',[['ROIC',s.roic,'%'],['ROE',s.roe,'%'],['Gross mgn',s.gross_margin,'%'],['Op mgn',s.op_margin,'%'],['Net mgn',s.net_margin,'%'],['FCF mgn',s.fcf_margin,'%'],['Debt/EBITDA',s.d_to_ebitda],['Curr ratio',s.curr_ratio]]],
-      ['Growth (CAGR)',[['Rev 5y',s.rev_cagr_5y,'%'],['EPS 5y',s.eps_cagr_5y,'%'],['FCF 5y',s.fcf_cagr_5y,'%'],['Rev 1y',s.rev_cagr_1y,'%'],['EPS ttm',s.eps_ttm],['EPS fwd',s.eps_fwd]]],
-      ['Valuation models',[['DCF intrinsic',s.dcf_intrinsic],['DCF upside',s.dcf_upside_pct,'%'],['Comps FV',s.comps_fair_value],['Comps upside',s.comps_upside_pct,'%'],['EPV',s.epv_value],['Graham',s.graham_value],['Signal',s.combined_signal]]],
-      ['Analysts / technicals',[['Mean tgt',s.analyst_mean],['Low',s.analyst_low],['High',s.analyst_high],['# analysts',s.num_analysts],['1y return',s.ret_1y,'%'],['RSI',s.rsi],['Momentum',s.mom_signal]]],
-    ];
-    html+=`<div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">`;
-    for(const [title,rows] of blocks){
-      html+=`<div class="card"><div class="name">${title}</div><table style="font-size:12px">`+
-        rows.map(([k,val,suf])=>`<tr><td class="muted" style="border:none;padding:3px 6px 3px 0">${k}</td>
-          <td class="num" style="border:none;padding:3px 0">${val==null||val===''?'–':(typeof val==='number'?fmt(val,2):val)}${(val!=null&&suf)?suf:''}</td></tr>`).join('')+
-        `</table></div>`;
+
+    // ── TECHNICALS — trend/MA, support/resistance, RSI, RS rank ──────────
+    {
+      const trendLabel=thesis.dir==='bullish'?'Uptrend (trending)':thesis.dir==='bearish'?'Downtrend (trending)':thesis.dir==='range'?'Range-bound / mean-reverting':'Unrated';
+      html+=`<div class="group-title">Technicals</div>
+        <div class="card" style="max-width:760px;margin-bottom:14px">
+          <div style="font-size:13px;margin:3px 0">Trend: <b>${trendLabel}</b> <span class="muted">(RS %ile ${rsCell(s)} vs. universe — same 70/30 trending-regime gate Stop Dist/Size use, issue #44. 50/200-day MA cross not yet shipped upstream — see Project.md §2a.)</span></div>
+          <div style="font-size:13px;margin:3px 0">Momentum (RSI): ${s.rsi!=null?fmt(s.rsi,1):'–'}${s.mom_signal?' · '+s.mom_signal:''}</div>
+          <div style="font-size:13px;margin:3px 0">Support/resistance: 52w range $${fmt(s.low52)} – $${fmt(s.high52)}${s.low52!=null&&s.high52!=null&&s.high52>s.low52?` (${range52Cell(s)} of range)`:''} — plus the options-implied OI magnet in the Options block below, once it loads.</div>
+          <div style="font-size:13px;margin:3px 0">RS rank (vs. universe, issue #40): ${rsCell(s)}</div>
+        </div>`;
     }
-    html+=`</div>`;
-    // options + drivers placeholders, filled async
-    html+=`<div id="detOpt"></div><div id="detDrv"><div class="loading">Loading commodity drivers…</div></div>`;
+
+    // recommendation + options + drivers placeholders, filled async
+    html+=`<div class="group-title">Derivative recommendation</div><div id="detRec"><div class="loading">Loading options data…</div></div>
+      <div id="detOpt"></div><div id="detDrv"><div class="loading">Loading commodity drivers…</div></div>`;
     v.innerHTML=html;
-    // options summary (optional)
+
+    // ── DERIVATIVE RECOMMENDATION + Options detail (paid feed, optional) ──
+    // Fetches the summary + nearest-expiry chain ONCE and shares it between the rules
+    // engine (real strikes/bid-ask/Greeks, never a guessed number) and the existing
+    // per-position Greeks card. Degrades gracefully (acceptance: "equity-only sheet
+    // still coherent") when the paid options block is unavailable for this ticker.
     try{
       const o=await jget('/api/options/'+tk);
       const sm=o.summary||{};
@@ -1569,33 +1844,45 @@ async function openStock(tk){
         <span class="pill" title="largest single-strike OI — support/resistance magnet">OI Magnet ${oiMagnetCell(flowRow)}</span>
         <span class="pill" title="today's volume vs standing OI — feeds the Smart Money tab as the options-side twin">UOA ${uoaCell(flowRow)}</span>
         <span class="pill">OI ${fmt(sm.total_oi,0)}</span>`;
+      // fetch the nearest-expiry chain ONCE — shared by the recommendation rules engine
+      // and the per-position Greeks card below (issue #46)
+      const exp=o.expirations&&o.expirations[0];
+      let contracts=null;
+      if(exp&&sm.spot!=null){
+        try{ const ch=await jget(`/api/options/${tk}/${exp}`); contracts=ch.contracts; }catch{}
+      }
+      // rules engine (issue #48): thesis × IV Rank -> structure
+      const chainLiquid=optionsChainLiquid({total_oi:sm.total_oi, total_volume:sm.total_volume});
+      const choice=chooseStructureKey(thesis.dir, sm.iv_rank, sm.skew_25d, chainLiquid);
+      const structure=(choice.key&&contracts&&sm.spot!=null)?buildStructure(choice.key, sm.spot, contracts):null;
+      document.getElementById('detRec').innerHTML=renderRecommendation(thesis, choice, structure, exp, chainLiquid, sm.iv_rank);
       // per-position Greeks — a risk dashboard, not a screener column (issue #46). Nearest
       // expiry, ATM call + put (closest strike to spot) — the two most relevant "positions".
-      try{
-        const exp=o.expirations&&o.expirations[0];
-        if(exp&&sm.spot!=null){
-          const ch=await jget(`/api/options/${tk}/${exp}`);
-          const nearestAtm=side=>ch.contracts.filter(c=>c.type===side)
-            .reduce((best,c)=>(!best||Math.abs(c.strike-sm.spot)<Math.abs(best.strike-sm.spot))?c:best,null);
-          const callC=nearestAtm('call'), putC=nearestAtm('put');
-          const greekCard=(label,c)=>c?`<div class="card" style="padding:10px 12px">
-            <div class="name" style="font-size:12px">${label} $${fmt(c.strike)} · ${exp}</div>
-            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;font-size:12px">
-              <span title="Delta — directional exposure / hedge ratio">Δ ${c.delta??'–'}</span>
-              <span title="Gamma — delta acceleration, dealer-hedging flow">Γ ${c.gamma??'–'}</span>
-              <span title="Theta — time decay (seller tailwind, buyer drag)">Θ ${c.theta??'–'}</span>
-              <span title="Vega — IV-change exposure">V ${c.vega??'–'}</span>
-              <span title="Rho — rate sensitivity (minor for short-dated)">ρ ${c.rho??'–'}</span>
-            </div></div>`:'';
-          if(callC||putC){
-            optHtml+=`<div class="group-title">Greeks — nearest-ATM per-position risk read</div>
-              <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">${greekCard('Call',callC)}${greekCard('Put',putC)}</div>
-              <div class="muted" style="font-size:11px;margin-top:4px">Per-position dashboard, not a screener column — the Greek bias must agree with the thesis (a "big move" view that's accidentally −vega is self-contradictory).</div>`;
-          }
+      if(contracts&&sm.spot!=null){
+        const nearestAtm=side=>nearestContract(contracts,side,sm.spot);
+        const callC=nearestAtm('call'), putC=nearestAtm('put');
+        const greekCard=(label,c)=>c?`<div class="card" style="padding:10px 12px">
+          <div class="name" style="font-size:12px">${label} $${fmt(c.strike)} · ${exp}</div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;font-size:12px">
+            <span title="Delta — directional exposure / hedge ratio">Δ ${c.delta??'–'}</span>
+            <span title="Gamma — delta acceleration, dealer-hedging flow">Γ ${c.gamma??'–'}</span>
+            <span title="Theta — time decay (seller tailwind, buyer drag)">Θ ${c.theta??'–'}</span>
+            <span title="Vega — IV-change exposure">V ${c.vega??'–'}</span>
+            <span title="Rho — rate sensitivity (minor for short-dated)">ρ ${c.rho??'–'}</span>
+          </div></div>`:'';
+        if(callC||putC){
+          optHtml+=`<div class="group-title">Greeks — nearest-ATM per-position risk read</div>
+            <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">${greekCard('Call',callC)}${greekCard('Put',putC)}</div>
+            <div class="muted" style="font-size:11px;margin-top:4px">Per-position dashboard, not a screener column — the Greek bias must agree with the thesis (a "big move" view that's accidentally −vega is self-contradictory).</div>`;
         }
-      }catch{}
+      }
       document.getElementById('detOpt').innerHTML=optHtml;
-    }catch{ document.getElementById('detOpt').innerHTML=''; }
+    }catch{
+      document.getElementById('detOpt').innerHTML='';
+      document.getElementById('detRec').innerHTML=renderRecommendation(thesis,
+        {key:null, reason:'Options data unavailable for this ticker (not in the paid-feed universe, or the feed is unreachable) — equity-only view. Direction still comes from the thesis above; no structure/strikes are shown.'},
+        null, null, false, null);
+    }
     // commodity drivers
     try{
       const drv=await jget('/api/stocks/'+tk+'/commodities');
