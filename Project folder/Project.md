@@ -378,6 +378,37 @@ Depends on #38, #39, #40, #41, #43, #44 (orchestrates already-registered columns
 - **Discipline drift** (`driftPct()`): `(realized − suggested) / suggested`, flagged at ≥20% either direction — the concrete "realized vs suggested size" comparison the issue specifies.
 - **Cool-down flag** (`cooldownActive()`): trips after `COOLDOWN_LOSS_STREAK` (3, a deliberate round default, not fitted — same posture as `SIZING_K`/`SIZING_RISK_PCT`) consecutive logged losses; a win resets the streak, open/scratch trades are skipped. Surfaces as a `.cooldownnote` banner on both the Discipline tab and the Screener tab (linking back to Discipline), reminding the user to reduce risk% or sit out rather than widen a stop after a loss.
 
+## Tear sheet layer (issue #48) — the per-instrument readable argument
+
+Depends on #44, #46, #47 (**collected** feed tier — assembles collected + ohlcv + paid blocks already shipped by those issues; no new upstream data). Education/How_to_Read_a_Tear_Sheet.md + Education/Information_Sheet_Tearsheet.md: a tear sheet is a **logical argument**, not a data dump — Snapshot → Thesis → Positioning → Technicals → Recommendation, where the **thesis gives direction** and **IV Rank gives structure**. This issue extends the existing `openStock()` detail view (`web-dashboard/index.html`) into that shape instead of building a new page, so it inherits the liquidity gate, smart-money moat, and options-flow blocks those issues already shipped.
+
+**Block order** (`openStock()`): Header (rating + 12-mo target + horizon) → Snapshot (price/mkt cap/52w range/$ vol liquidity gate/beta/realized vol/ATR, plus the Valuation/fundamentals cards from `fundamentals.json`/`model.json`) → Thesis → Positioning/smart money (issue #41/#46, unchanged, moved to sit after the thesis) → Technicals → Derivative recommendation.
+
+**Thesis engine (`tearThesis()`).** The direction call, from score/momentum — reuses `trendingRegime()`'s already-shipped RS %ile 70/30 trend proxy (issue #44) rather than inventing a second trend definition: RS %ile ≥70 → bullish, ≤30 → bearish, the 30–70 middle → range-bound (mean-reverting). Corroborating evidence (momentum factor, Magic-Formula score, valuation-model upside/signal, smart-money direction) is listed as "why" bullets so every claim traces to a snapshot metric, per the coherence test. `rs_percentile` is **not** an upstream field (same reason as the screener table, issue #40) — `openStock()` merges it in from the currently-loaded `screenerRows` pool by ticker; if the ticker hasn't been ranked yet (opened outside a Screener session), the thesis fails **closed** to `Unrated`, same fail-safe posture as `trendingRegime()`/`optionsChainLiquid()` — never an assumed direction.
+
+**12-mo target (`tearTarget()`):** prefers the analyst consensus mean; else derives `price × (1 + avg_upside/100)` from the already-collected valuation-model blend; else `null` (never fabricated) — "a rating with no target is an opinion, not an argument."
+
+**Derivative recommendation rules engine (`chooseStructureKey()` + `buildStructure()`).** Crosses thesis × IV Rank → structure, matching the Examples Gallery's "matching action to signal" table and the issue's four named combos, extended with the bearish mirror from the same table:
+
+| Thesis | IV Rank | Structure |
+|---|---|---|
+| bullish or range, rich chain-liquidity-gated skew (`skew_25d≥1.15`) | any | **Collar** (priority — richly-priced protection funds a covered call; never applied against a bearish thesis) |
+| range-bound | ≥70 | **Iron Condor** |
+| range-bound | <70 | no structure — IV isn't rich enough to sell, not forced |
+| bullish | ≤30 | **Long Call** |
+| bullish | mid/≥70 | **Bull Call Spread** (defined-risk default) |
+| bearish | ≤30 | **Long Put** |
+| bearish | mid/≥70 | **Bear Put Spread** (defined-risk default) |
+| unrated (no RS %ile) or no IV Rank | — | no structure — direction-only or fully withheld |
+
+`buildStructure()` picks real strikes from the already-fetched nearest-expiry chain (`nearestContract()`, nearest-to-target strike) and prices legs off real bid/ask mid, **never a hypothetical number** — returns `null` (rendered as "strikes/premiums unavailable, numbers withheld rather than guessed") when the chain lacks the needed contracts, or when a resulting max-loss would be internally inconsistent (credit ≥ wing width). Max loss is computed and shown **first** in the recommendation card, per the "find max loss first" discipline, alongside max profit, breakeven(s), and net debit/credit.
+
+**Greek-bias coherence check (`greekBiasAgrees()`):** sums position Greeks (Σ direction × contract delta/vega) and checks agreement with the thesis — bullish structures expect net +delta, bearish net −delta, the iron condor expects ≈flat delta / −vega, the collar expects a muted long delta from the hedge. A disagreement renders an explicit `⚠` warning ("the sheet contradicts itself here") rather than silently shipping an incoherent recommendation.
+
+**Graceful degradation (acceptance: "equity-only sheet still coherent").** Three explicit stages, in `renderRecommendation()`: no thesis (RS %ile unavailable) → no structure (no IV Rank / range-bound-but-cheap / bearish collar guard) → no chain data (structure fields withheld). The whole options fetch failing (ticker outside the paid-feed universe, or the feed unreachable) still renders a direction-only recommendation card off the thesis alone — the equity-only sheet stays coherent, it just stops one block earlier.
+
+**Liquidity-dimension disclosure:** the existing `.lqnote` (issue #37, unchanged) plus a recommendation-card footer noting the skew/collar check's own chain-liquidity gate (`optionsChainLiquid()`, ≥500 OI / ≥100 vol, issue #46) — both surfaces state depth is the only measured liquidity dimension.
+
 ## ⚠️ Open Items
 - [ ] **Define the screener spec** — which instruments, which columns, which filters/sorts. ("We will have to iron out the project screener — figure out later.")
 - [ ] **Decide the data-sharing mechanism** — shared JSON/volume, shared DB, or new app calls old app's `/api/stocks`. Drives the hosting design.
