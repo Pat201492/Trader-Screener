@@ -353,6 +353,31 @@ Depends on #45 (options feed + IV Rank/Percentile) and #41 (smart-money moat). D
 - **Greeks (Δ/Γ/Θ/V/ρ):** shipped as a **per-position risk dashboard**, not a screener column — the full per-contract grid in the Options tab chain table, plus a nearest-ATM call/put Greeks card on the stock detail page (`openStock()`'s `detOpt` block). Never aggregated into `SCREENER_COLS`.
 - Documented per-column in the header tooltip (`tip` field) plus a dedicated disclosure box (`.oflownote`) in the Screener controls, same convention as the liquidity/IV/macro layers.
 
+## Default view / promotion gate layer (issue #47) — top-10 columns, default sort, discipline log
+
+Depends on #38, #39, #40, #41, #43, #44 (orchestrates already-registered columns + the macro flag — **collected** feed tier, no new upstream data). Bailey et al. (Backtest Overfitting): nothing becomes a default column, default sort, or default filter until it is **deflated for search effort and validated out-of-sample**, and a Sharpe/edge without its trial-count N is not a result — so this issue is a **gate**, not just a column pick.
+
+**Promotion gate (`PROMOTION_GATE`, `web-dashboard/index.html`).** The single registry that logs, per candidate default column: `n` (trial count — parameter/threshold combinations actually tried), `params` (free-parameter count, Chan: keep ≤5), `oos` (walk-forward/CSCV verdict), and `deflatedSharpe` where a backtest applies. `gatePassed(key)` is the enforced rule:
+
+| Column kind | Rule | Why |
+|---|---|---|
+| `exempt:true` | always passes | raw/observed field (ticker, name, sector, price, `dollar_volume`) — not a fitted signal, nothing to overfit |
+| `formula:true` | passes iff `params<=5` | deterministic sizing/risk formula (issue #44's `suggested_shares`) or an observed historical stat (`max_drawdown`) — deliberately not fitted to any history, so there's no trial count to deflate |
+| everything else | passes iff `oos===true && n!=null && params<=5` | a fitted/ranked signal — must show its work |
+
+**Default top-10 columns** (`DEFAULT_CANDIDATES`, filtered through `gatePassed` into `DEFAULT_COLS`): `ticker, name, sector, price, dollar_volume, score, ebit_ev_yield, rs_percentile, suggested_shares, max_drawdown`. `smart_money_score` (issue #41) is **deliberately excluded** — its own `oosPending` flag means it fails the same gate (`oos:false`, 37 weight/threshold combinations already tried and logged, none validated) — this is the concrete case the gate exists to catch, not an oversight. Every other non-default column stays reachable via **Columns ▾**, never deleted.
+
+**Default sort:** `score` descending (the Magic-Formula composite) — passes the gate (`n:1`, one fixed formula, no in-house sweep; the published Greenblatt/Fama-French out-of-sample record is the deflation evidence). A `console.warn` fires at load if `sortKey` is ever pointed at a column that fails its own logged gate, so the invariant can't silently drift.
+
+**Publishing N + deflated Sharpe (`gateBadge()`):** every gated default column carries a green `N=…` badge (with deflated Sharpe in its tooltip) in both the table header and the column picker; a column that fails carries a red `gate✗` badge instead (same visual language as the existing `t-oos`/`t-v1` badges). `formula`-tier columns carry a `formula` badge explaining there's nothing to deflate. Same "never a performance figure without its N" rule the Education tab (issue #34) already documented in prose — this makes it enforced, not just asserted.
+
+**Macro regime pre-set (issue #39, already shipped):** `applyRegimeDefaults()` nudges `LIQ_FLOOR`/`CAP_FLOOR` tighter on a risk-off VIX/yield-curve read, soft and user-overridable — unchanged by this issue, listed here because it's the "default filters" leg of the acceptance criteria.
+
+**Rule-adherence log + drawdown cool-down flag** (`TRADE_LOG`, new **Discipline** tab under Stock) — the Douglas-shaped feature the issue calls for explicitly as a **usage/discipline layer, not a metric column**:
+- Per-trade log (ticker, `suggestedShares` — auto-filled from the live Size column, issue #44 — `realizedShares`, outcome, note, date), persisted to `localStorage` only (no backend, no ranking).
+- **Discipline drift** (`driftPct()`): `(realized − suggested) / suggested`, flagged at ≥20% either direction — the concrete "realized vs suggested size" comparison the issue specifies.
+- **Cool-down flag** (`cooldownActive()`): trips after `COOLDOWN_LOSS_STREAK` (3, a deliberate round default, not fitted — same posture as `SIZING_K`/`SIZING_RISK_PCT`) consecutive logged losses; a win resets the streak, open/scratch trades are skipped. Surfaces as a `.cooldownnote` banner on both the Discipline tab and the Screener tab (linking back to Discipline), reminding the user to reduce risk% or sit out rather than widen a stop after a loss.
+
 ## ⚠️ Open Items
 - [ ] **Define the screener spec** — which instruments, which columns, which filters/sorts. ("We will have to iron out the project screener — figure out later.")
 - [ ] **Decide the data-sharing mechanism** — shared JSON/volume, shared DB, or new app calls old app's `/api/stocks`. Drives the hosting design.

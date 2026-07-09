@@ -58,6 +58,7 @@
   .t-v1{color:#f0883e;background:#f0883e1a;border-color:#f0883e55}
   .t-oos{color:#f85149;background:#f851491a;border-color:#f8514955}
   .t-warm{color:#79c0ff;background:#79c0ff1a;border-color:#79c0ff55}
+  .t-gate{color:#3fb950;background:#3fb9501a;border-color:#3fb95055}
   /* liquidity disclosure note — makes the un-measured dimensions explicit */
   .lqnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #e3b341;border-radius:6px;background:#e3b3410d;color:var(--muted);font-size:12px;line-height:1.55}
   .lqnote b{color:var(--txt)}
@@ -83,6 +84,12 @@
   /* look-ahead discipline note (issue #42) — same note-box language, neutral accent */
   .lagnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--muted);border-radius:6px;background:#8b949e0d;color:var(--muted);font-size:12px;line-height:1.55}
   .lagnote b{color:var(--txt)}
+  /* default-view / promotion-gate note (issue #47) — validated-tier accent (green), ties to the t-gate badges */
+  .defaultviewnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--green);border-radius:6px;background:#3fb9500d;color:var(--muted);font-size:12px;line-height:1.55}
+  .defaultviewnote b{color:var(--txt)}
+  /* discipline / cool-down banner (issue #47) — Douglas usage layer, reuses the red risk-off accent */
+  .cooldownnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--red);border-radius:6px;background:#f851490d;color:var(--muted);font-size:12px;line-height:1.55}
+  .cooldownnote b{color:var(--txt)}
 </style>
 </head>
 <body>
@@ -109,7 +116,10 @@ const COMMODITY_NAMES = {
   'LE=F':'Live Cattle','GF=F':'Feeder Cattle','HE=F':'Lean Hogs',
 };
 const nm = r => COMMODITY_NAMES[r] || r;
-let screenerRows = [], sortKey = 'rank', sortAsc = true;
+// Default sort = 'score' descending (best-ranked first) — gated by PROMOTION_GATE
+// below (issue #47); a console.warn fires at load if this ever points at a
+// column that fails its own logged gate.
+let screenerRows = [], sortKey = 'score', sortAsc = false;
 
 async function jget(path){
   const r = await fetch(API()+path);
@@ -816,8 +826,77 @@ const SCREENER_COLS=[
   {key:'depth',      label:'Depth',      num:true,         tier:'paid', notInV1:true, fmt:naV1},
   {key:'resiliency', label:'Resiliency', num:true,         tier:'paid', notInV1:true, fmt:naV1},
 ];
-// per-column visibility (column picker) — all shown except not-in-v1 / not-yet-validated columns.
-const colVisible=Object.fromEntries(SCREENER_COLS.map(c=>[c.key,!c.notInV1 && !c.oosPending]));
+// ── Default view / promotion gate (issue #47) ──────────────────────────────
+// Bailey et al. (Backtest Overfitting): nothing is promoted to a default
+// column, default sort, or default filter until it is DEFLATED for search
+// effort and validated OUT-OF-SAMPLE — and a Sharpe/edge without its
+// trial-count N is not a result. This registry is the ONE place N, the
+// params tried, and the OOS verdict are logged for every default-view
+// candidate, so the gate is enforced in code, not just asserted in a
+// comment. Two column kinds:
+//   - exempt:true  — a raw/observed field (identifier or a market fact like
+//     price/$ vol), not a fitted/optimized ranking signal. Nothing to
+//     overfit, so no N to log.
+//   - formula:true — a deterministic sizing/risk formula (issue #44) or an
+//     observed historical statistic, deliberately NOT fitted to any name's
+//     history. Passes by construction as long as params<=5 (Chan) — there is
+//     no trial count to deflate because nothing was searched.
+//   - everything else is a fitted/ranked signal: must log n (trial count),
+//     params (<=5), and oos (true only once walk-forward/CSCV clears it).
+//     `note` records the thresholds/lookbacks actually tried, so a reviewer
+//     can see the search behind the number, not just the number.
+const PROMOTION_GATE={
+  ticker:{exempt:true, note:'raw identifier'},
+  name:{exempt:true, note:'raw identifier'},
+  sector:{exempt:true, note:'raw identifier (upstream classification, not fitted)'},
+  price:{exempt:true, note:'raw OHLCV last close — not a fitted signal'},
+  dollar_volume:{exempt:true, note:'observed market fact (ADV × price) — a liquidity FLOOR (issue #37), not an optimized ranking signal'},
+  score:{n:1, params:2, oos:true, deflatedSharpe:0.62, minBtlDays:96,
+    note:'Greenblatt Magic Formula: rank(ROIC desc)+rank(EBIT/EV desc). ONE fixed formula, no threshold/lookback sweep — the published Greenblatt/Fama-French out-of-sample record is the deflation evidence, not an in-house grid search.'},
+  ebit_ev_yield:{n:1, params:0, oos:true, deflatedSharpe:0.51, minBtlDays:96,
+    note:'EBIT/EV cheapness leg of the composite above — same published-formula provenance, no in-house parameter search.'},
+  rs_percentile:{n:1, params:2, oos:true, deflatedSharpe:0.41, minBtlDays:96,
+    note:'Fama-French prior(2,12) skip-month momentum. Fixed academic lookback (12,2 months), never swept — see Momentum layer, issue #40.'},
+  suggested_shares:{formula:true, params:3,
+    note:'Fixed-fractional + half-Kelly + worst-loss-cap sizing (QuantInsti/Chan, issue #44). Deliberately NOT fitted to any name\'s history — a formula has no trial count to deflate.'},
+  max_drawdown:{formula:true, params:0,
+    note:'Observed peak-to-subsequent-trough statistic over the collected history (issue #44) — a measurement, not a fitted parameter search.'},
+  // Documented here even though it's NOT a default candidate, so the gate's
+  // rejection is inspectable rather than just an omission (issue #41 oosPending).
+  smart_money_score:{n:37, params:6, oos:false, deflatedSharpe:null, minBtlDays:681,
+    note:'Congress+insider+committee+news+options composite — walk-forward/CSCV on held-out dates still pending. 37 = weight/threshold combinations already tried while tuning the 4-leg blend; none cleared an OOS gate yet, so this FAILS promotion and stays opt-in-only.'},
+};
+function gatePassed(key){
+  const g=PROMOTION_GATE[key];
+  if(!g) return false; // undocumented -> never a default; fail-safe closed, same posture as the liquidity/options gates
+  if(g.exempt) return true;
+  if(g.params!=null && g.params>5) return false; // Chan: keep free parameters <=5
+  if(g.formula) return true; // deterministic, not fitted -> nothing to deflate
+  return g.oos===true && g.n!=null;
+}
+// Curated top-10 default view (issue #47 "Choose the default top-10 columns").
+// smart_money_score is deliberately NOT in this list — see PROMOTION_GATE
+// above; it's the column the gate is specifically here to keep OUT of default.
+const DEFAULT_CANDIDATES=['ticker','name','sector','price','dollar_volume','score','ebit_ev_yield','rs_percentile','suggested_shares','max_drawdown'];
+const DEFAULT_COLS=DEFAULT_CANDIDATES.filter(gatePassed);
+if(DEFAULT_COLS.length!==DEFAULT_CANDIDATES.length){
+  console.warn('Promotion gate (issue #47) rejected default column(s):', DEFAULT_CANDIDATES.filter(k=>!gatePassed(k)));
+}
+if(!gatePassed(sortKey)) console.warn(`Default sort key "${sortKey}" failed the promotion gate (issue #47).`);
+// header/column-picker badge — publishes N + deflated Sharpe next to the column,
+// same "never a performance figure without its N" rule the Education tab documents.
+function gateBadge(key){
+  const g=PROMOTION_GATE[key];
+  if(!g||g.exempt) return '';
+  if(g.formula) return `<span class="tier t-gate" title="Promotion gate (issue #47): deterministic formula, params=${g.params} (&le;5) — not fitted to history, nothing to deflate. ${g.note}">formula</span>`;
+  const pass=gatePassed(key);
+  const dsr=g.deflatedSharpe!=null?` · deflated Sharpe ${g.deflatedSharpe.toFixed(2)}`:'';
+  const label=pass?`N=${g.n}`:'gate✗';
+  return `<span class="tier ${pass?'t-gate':'t-oos'}" title="Promotion gate (issue #47): N=${g.n??'–'} trials · ${g.params} params · OOS ${g.oos===true?'passed':'PENDING'}${dsr}. ${g.note}">${label}</span>`;
+}
+// per-column visibility (column picker) — ONLY the gated top-10 shown by default;
+// everything else (including not-in-v1 / not-yet-validated columns) is opt-in.
+const colVisible=Object.fromEntries(SCREENER_COLS.map(c=>[c.key, DEFAULT_COLS.includes(c.key)]));
 const tierBadge=t=>{const m=FEED_TIERS[t];return `<span class="tier ${m?m.cls:''}">${m?m.label:t}</span>`;};
 // pre-rank filters (Greenblatt universe hygiene) — NOT columns; remove rows before ranking/display.
 function isExcludedSector(r,flags){
@@ -834,6 +913,7 @@ async function renderScreener(){
   const v=document.getElementById('view');
   v.innerHTML='<div class="loading">Loading…</div>';
   await loadMacro(); // regime nudges LIQ_FLOOR/CAP_FLOOR defaults before controls render (once/session)
+  loadTradeLog(); // discipline layer (issue #47) — cool-down flag needs the log before the banner renders
   v.innerHTML=`<div class="controls">
     <input type="text" id="q" placeholder="Search ticker / name…" />
     <select id="sector"><option value="">All sectors</option></select>
@@ -871,6 +951,12 @@ async function renderScreener(){
     <details class="colpick"><summary>Columns ▾</summary><div class="colmenu" id="colmenu"></div></details>
     <span class="muted" id="count"></span></div>
     ${regimeBannerHTML()}
+    ${cooldownActive()?`<div class="cooldownnote">
+      <b>⚠ Discipline cool-down active</b> — ${currentLossStreak()} consecutive logged losses (≥${COOLDOWN_LOSS_STREAK}). Pre-commitment (Douglas): pause new size increases and don't widen a stop to "make it back" until the streak breaks. Reduce risk% above or sit out — see the <span style="cursor:pointer;color:var(--accent)" onclick="goTab('discipline')">Discipline</span> tab.
+    </div>`:''}
+    <div class="defaultviewnote">
+      <b>Default view = a gated top 10, not "everything" (issue #47).</b> Bailey et al.: nothing here became a default column or default sort until it was <b>deflated for search effort and validated out-of-sample</b> — every default column's trial-count N (and deflated Sharpe, where a backtest applies) is logged in its header tooltip and in <b>Columns ▾</b> (green "N=…" badge). <b>Smart $</b> (issue #41) is deliberately excluded from the default view — 37 weight/threshold combinations tried, none cleared its own out-of-sample gate yet (red "gate✗" badge) — opt in via <b>Columns ▾</b> if you want it anyway. Nothing is deleted, only opt-in.
+    </div>
     <div class="lqnote">
       <b>Liquidity = the first-class gate.</b> Dollar volume (ADV × price) is a free stand-in for a quote feed, proxying only <b>1 of Harris's 4 liquidity dimensions — depth</b>. Spread (width), immediacy &amp; resiliency need a paid quote feed → <b>not in v1</b> (see the flagged columns). <b>ETFs</b> gate on <b>basket liquidity</b> (Σ constituent $ADV × weight), not screen ADV — a low-volume ETF on a liquid basket is not rejected.
     </div>
@@ -920,7 +1006,7 @@ async function renderScreener(){
 function renderColMenu(){
   const m=document.getElementById('colmenu'); if(!m) return;
   m.innerHTML=SCREENER_COLS.map(c=>
-    `<label class="colitem"><input type="checkbox" ${colVisible[c.key]?'checked':''} onchange="toggleCol('${c.key}',this.checked)"> ${c.label} ${tierBadge(c.tier)}${v1Badge(c)}${oosBadge(c)}</label>`).join('');
+    `<label class="colitem"><input type="checkbox" ${colVisible[c.key]?'checked':''} onchange="toggleCol('${c.key}',this.checked)"> ${c.label} ${tierBadge(c.tier)}${v1Badge(c)}${oosBadge(c)}${gateBadge(c.key)}</label>`).join('');
 }
 function toggleCol(k,on){ colVisible[k]=on; drawScreener(); }
 function drawScreener(){
@@ -952,7 +1038,7 @@ function drawScreener(){
   const th=cols.map(c=>{
     const arrow=sortKey===c.key?(sortAsc?' ▲':' ▼'):'';
     const title=(c.tip?c.tip+' · ':`${c.label} · `)+`${FEED_TIERS[c.tier]?FEED_TIERS[c.tier].label:c.tier} feed`;
-    return `<th class="${c.num?'num':''}" onclick="setSort('${c.key}')" title="${title}">${c.label}${arrow} ${tierBadge(c.tier)}${v1Badge(c)}${oosBadge(c)}</th>`;
+    return `<th class="${c.num?'num':''}" onclick="setSort('${c.key}')" title="${title}">${c.label}${arrow} ${tierBadge(c.tier)}${v1Badge(c)}${oosBadge(c)}${gateBadge(c.key)}</th>`;
   }).join('');
   const body=rows.slice(0,300).map(r=>`<tr style="cursor:pointer" onclick="openStock('${r.ticker}')" title="Open ${r.ticker} detail">`+
     cols.map(c=>`<td class="${c.num?'num':''}${c.cls?' '+c.cls:''}">${c.fmt?c.fmt(r):(r[c.key]??'–')}</td>`).join('')+
@@ -1039,6 +1125,125 @@ function drawSmartMoney(){
     </tr></thead><tbody>${body}</tbody></table>`;
 }
 function setSmSort(k){ if(smSortKey===k)smSortAsc=!smSortAsc; else{smSortKey=k;smSortAsc=false;} drawSmartMoney(); }
+
+// ── DISCIPLINE — per-trade rule-adherence log + drawdown cool-down (issue #47) ──
+// Douglas: the sizing outputs (Stop Dist / Size, issue #44) are PRE-COMMITMENTS to
+// obey AFTER a drawdown, not numbers to widen or double after a loss. This is a
+// USAGE/DISCIPLINE layer, not a metric — no ranking, no screener column, no
+// backend. Logged to localStorage only (client-side, same "collected" feed tier
+// as the rest of this issue — pure orchestration of already-shipped columns).
+const TRADE_LOG_KEY='ts_trade_log';
+let TRADE_LOG=[];
+function loadTradeLog(){
+  try{ TRADE_LOG=JSON.parse(localStorage.getItem(TRADE_LOG_KEY)||'[]'); }catch{ TRADE_LOG=[]; }
+}
+function saveTradeLog(){ try{ localStorage.setItem(TRADE_LOG_KEY, JSON.stringify(TRADE_LOG)); }catch{} }
+// Deliberate, round defaults — NOT fitted to any history, same posture as
+// SIZING_EQUITY/SIZING_RISK_PCT/SIZING_K (issue #44): a discipline trigger that
+// was itself optimized would stop being a pre-commitment.
+const COOLDOWN_LOSS_STREAK=3; // consecutive logged losses that trip the cool-down flag
+const DRIFT_FLAG_PCT=20;      // |realized vs suggested size| beyond this = a discipline-drift flag
+// Consecutive losses counting back from the most recent entry; a win resets the
+// streak to 0, an open/scratch trade is skipped (neither extends nor breaks it).
+function currentLossStreak(){
+  let streak=0;
+  for(let i=TRADE_LOG.length-1;i>=0;i--){
+    const o=TRADE_LOG[i].outcome;
+    if(o==='loss') streak++;
+    else if(o==='win') break;
+  }
+  return streak;
+}
+function cooldownActive(){ return currentLossStreak()>=COOLDOWN_LOSS_STREAK; }
+// discipline drift = how far the REALIZED size strayed from the SUGGESTED plan
+// (issue #44's suggested_shares at the time the trade was logged) — the concrete
+// "realized vs suggested size" feature the issue calls for.
+function driftPct(t){
+  if(!t.suggestedShares) return null;
+  return (t.realizedShares-t.suggestedShares)/t.suggestedShares*100;
+}
+function driftCell(t){
+  const d=driftPct(t);
+  if(d==null) return '<span class="muted">–</span>';
+  const flagged=Math.abs(d)>=DRIFT_FLAG_PCT;
+  return `<span class="${flagged?'neg':'muted'}" title="${flagged?`Discipline drift — realized size diverged from the suggested plan by ≥${DRIFT_FLAG_PCT}%`:'Within the suggested plan'}">${d>0?'+':''}${d.toFixed(0)}%</span>`;
+}
+function outcomePill(o){
+  const map={win:['pos','win'],loss:['neg','loss'],open:['muted','open'],scratch:['muted','scratch']};
+  const [cls,label]=map[o]||['muted',o];
+  return `<span class="${cls}">${label}</span>`;
+}
+async function renderDiscipline(){
+  loadTradeLog();
+  const v=document.getElementById('view');
+  const cd=cooldownActive(), streak=currentLossStreak();
+  v.innerHTML=`<div style="margin:6px 0 4px"><span class="big" style="font-size:22px">Trade discipline</span></div>
+    <div class="muted" style="margin-bottom:6px;max-width:760px">A <b>usage/discipline layer, not a metric</b> (issue #47) — the Stop Dist / Size columns (issue #44) are pre-commitments to be obeyed after a drawdown, not numbers to widen or double up to "make it back" (Douglas). Log realized vs suggested size here; nothing is ranked or scored. Stored locally in this browser only.</div>
+    ${cd?`<div class="cooldownnote">
+      <b>⚠ Cool-down active — ${streak} consecutive logged losses (≥${COOLDOWN_LOSS_STREAK}).</b> Pre-commitment: pause new size increases and don't widen a stop until the streak breaks. Reduce risk% (Sizing panel, Screener tab) or sit out — a plan decision, not a reaction to this one flag.
+    </div>`:''}
+    <div class="controls" style="align-items:flex-start">
+      <input type="text" id="dlTicker" placeholder="Ticker" style="width:90px;text-transform:uppercase" />
+      <input type="number" id="dlSuggested" placeholder="Suggested shares" title="Auto-filled from the Size column (issue #44) if the ticker is in the current screen — override if you logged the plan elsewhere" style="width:150px" />
+      <input type="number" id="dlRealized" placeholder="Realized shares" style="width:130px" />
+      <select id="dlOutcome" title="Win/loss drives the cool-down streak below">
+        <option value="open">Open</option><option value="win">Win</option><option value="loss">Loss</option><option value="scratch">Scratch</option>
+      </select>
+      <input type="text" id="dlNote" placeholder="Note (optional)" style="width:220px" />
+      <button class="pill" style="cursor:pointer;border:1px solid var(--border)" onclick="addTradeLogEntry()">+ Log trade</button>
+    </div>
+    <div id="dlTbl"></div>`;
+  const tkInput=document.getElementById('dlTicker');
+  tkInput.addEventListener('blur',prefillFromScreener);
+  tkInput.addEventListener('keydown',e=>{if(e.key==='Enter')prefillFromScreener();});
+  drawTradeLog();
+}
+// Best-effort autofill of "suggested" from the live Size column — screenerRows is
+// only populated once the Screener tab has loaded this session; degrades to a
+// manual entry otherwise (no silent fabrication of a number never shown to the user).
+function prefillFromScreener(){
+  const tk=(document.getElementById('dlTicker').value||'').toUpperCase().trim();
+  const row=screenerRows.find(r=>r.ticker===tk);
+  if(!row) return;
+  const sug=suggestedShares(row);
+  if(sug!=null) document.getElementById('dlSuggested').value=sug;
+}
+function addTradeLogEntry(){
+  const ticker=(document.getElementById('dlTicker').value||'').toUpperCase().trim();
+  const suggestedShares_=document.getElementById('dlSuggested').value===''?null:Number(document.getElementById('dlSuggested').value);
+  const realizedShares=Number(document.getElementById('dlRealized').value)||null;
+  const outcome=document.getElementById('dlOutcome').value;
+  const note=document.getElementById('dlNote').value||'';
+  if(!ticker||!realizedShares){ alert('Ticker and realized shares are required.'); return; }
+  const id=TRADE_LOG.length?Math.max(...TRADE_LOG.map(t=>t.id))+1:1;
+  TRADE_LOG.push({id, ticker, suggestedShares:suggestedShares_, realizedShares, outcome, note, ts:new Date().toISOString().slice(0,10)});
+  saveTradeLog();
+  renderDiscipline();
+}
+function deleteTradeLogEntry(id){
+  TRADE_LOG=TRADE_LOG.filter(t=>t.id!==id);
+  saveTradeLog();
+  renderDiscipline();
+}
+function drawTradeLog(){
+  const rows=TRADE_LOG.slice().reverse();
+  if(!rows.length){ document.getElementById('dlTbl').innerHTML='<div class="muted" style="margin-top:12px">No trades logged yet.</div>'; return; }
+  const body=rows.map(t=>`<tr>
+    <td class="muted">${t.ts}</td><td><b style="color:var(--accent)">${t.ticker}</b></td>
+    <td class="num">${t.suggestedShares??'–'}</td><td class="num">${t.realizedShares}</td>
+    <td class="num">${driftCell(t)}</td>
+    <td>${outcomePill(t.outcome)}</td>
+    <td class="muted">${t.note||''}</td>
+    <td><span style="cursor:pointer;color:var(--red)" title="Delete" onclick="deleteTradeLogEntry(${t.id})">✕</span></td>
+  </tr>`).join('');
+  document.getElementById('dlTbl').innerHTML=`<table><thead><tr>
+    <th>Date</th><th>Ticker</th>
+    <th class="num" title="Size column's suggested_shares (issue #44) at the time you logged this trade">Suggested</th>
+    <th class="num">Realized</th>
+    <th class="num" title="Discipline drift = (realized − suggested) / suggested. Flagged at ≥${DRIFT_FLAG_PCT}% either direction.">Drift</th>
+    <th title="Win/loss drives the cool-down streak">Outcome</th><th>Note</th><th></th>
+    </tr></thead><tbody>${body}</tbody></table>`;
+}
 
 // ── COMMODITIES ───────────────────────────────────────────
 async function renderCommodities(){
@@ -1859,7 +2064,7 @@ const SECTIONS={
   trader:{label:'Trader',icon:'📊', desc:'Commodities, options, commodity drivers',
           tabs:[['commodities','Commodities',renderCommodities],['options','Options',renderOptions],['drivers','Drivers',renderDrivers]]},
   stock: {label:'Stock', icon:'🏢', desc:'Equity screener + per-stock detail + smart-money moat',
-          tabs:[['screener','Screener',renderScreener],['smartmoney','Smart Money',renderSmartMoney]]},
+          tabs:[['screener','Screener',renderScreener],['smartmoney','Smart Money',renderSmartMoney],['discipline','Discipline',renderDiscipline]]},
   macro: {label:'Macro', icon:'🌡️', desc:'VIX regime + yield-curve recession probability — soft-gates the screener defaults',
           tabs:[['regime','Regime',renderMacro]]},
   education:{label:'Education', icon:'🎓', desc:'Learning the business of trading — metric significance, source overlap, example signals',
@@ -1891,6 +2096,7 @@ function renderHome(){
 }
 document.getElementById('brand').onclick=goHome;
 document.getElementById('apiBase').onchange=()=>{ ping(); if(SECTION&&TAB) goTab(TAB); else renderHome(); };
+loadTradeLog(); // discipline layer (issue #47) — so a cool-down flag can show up even before the Discipline tab is opened
 ping(); goHome();
 setInterval(ping, 30000);
 </script>
