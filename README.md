@@ -4,6 +4,13 @@ Trader-oriented screener + research terminal, built on the shared data pipeline 
 
 **Start here:** [ARCHITECTURE.md](ARCHITECTURE.md) — hosting, and how data is shared between the old app and this one (collect once, serve both).
 
+## Live demo (no backend)
+
+The dashboard runs fully in the browser on **synthetic sample data** — no pipeline or API needed. It exercises the real UI (magic-formula ranks, smart-money moat, sizing, IV rank, options-flow columns, macro regime, data-integrity) and is banner-labelled "synthetic data, not real markets."
+
+- **Locally:** open [`web-dashboard/index.html?demo=1`](web-dashboard/index.html?demo=1), or serve the repo root and visit `/` (redirects into the demo).
+- **On the web (optional):** enable GitHub Pages → served at `https://pat201492.github.io/Trader-Screener/`. ⚠️ Pages on a **private** repo needs a paid plan and makes the served static files public (including `Project folder/`, `Research/`, the `.md`s). To publish only the demo, use a `gh-pages` branch (or a separate public repo) containing just `web-dashboard/`.
+
 ## Pillars
 - **[Education](Education/Education.md)** — learning the business of trading: economics, instruments, tools, recent examples, a structured path.
 - **[Project](Project%20folder/Project.md)** — the screener; closest sibling to the old stock screener, reusing its data-collection pipeline.
