@@ -106,7 +106,22 @@
 </header>
 <main id="view"><div class="loading">Loading…</div></main>
 
+<script src="demo-data.js"></script>
 <script>
+// Demo mode: on GitHub Pages (static host, no API) or with ?demo in the URL,
+// serve synthetic schema-valid data from demo-data.js instead of a live API,
+// so the dashboard is fully clickable with no backend.
+const DEMO_ON = /[?&]demo\b/i.test(location.search) || /github\.io$/i.test(location.hostname);
+if (DEMO_ON) {
+  const ab = document.getElementById('apiBase');
+  if (ab) { ab.value = 'demo'; ab.readOnly = true; ab.title = 'Demo mode — synthetic data, no live API'; }
+  document.addEventListener('DOMContentLoaded', () => {
+    const b = document.createElement('div');
+    b.innerHTML = 'DEMO — synthetic data, not real markets. Source: <a style="color:#ffd24a" href="https://github.com/Pat201492/Trader-Screener">github.com/Pat201492/Trader-Screener</a>';
+    b.style.cssText = 'background:#3a2f00;color:#ffd24a;padding:6px 12px;font-size:12px;text-align:center;border-bottom:1px solid #5a4a00';
+    document.body.insertBefore(b, document.body.firstChild);
+  });
+}
 const API = () => document.getElementById('apiBase').value.replace(/\/$/,'');
 let TAB = 'screener';
 // commodity futures symbol -> spelled-out name
@@ -125,6 +140,7 @@ const nm = r => COMMODITY_NAMES[r] || r;
 let screenerRows = [], sortKey = 'score', sortAsc = false;
 
 async function jget(path){
+  if(DEMO_ON && window.__DEMO__) return window.__DEMO__(path);
   const r = await fetch(API()+path);
   if(!r.ok) throw new Error(path+' → '+r.status);
   return r.json();
