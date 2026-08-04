@@ -24,7 +24,7 @@ ollama --version  # verify
 
 ### 2. Run hardware probe
 ```bash
-python tools/edgar-scrubber/hardware_probe.py
+python tools/edgar_scrubber/hardware_probe.py
 ```
 
 Example output:

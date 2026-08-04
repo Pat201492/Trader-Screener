@@ -100,7 +100,7 @@ Use this only after benchmarking (issue #108) confirms quality is acceptable for
 Run the probe on your target machine to auto-detect VRAM and select batch/context:
 
 ```bash
-python tools/edgar-scrubber/hardware_probe.py
+python tools/edgar_scrubber/hardware_probe.py
 ```
 
 Example output (RTX 4070 Ti):
