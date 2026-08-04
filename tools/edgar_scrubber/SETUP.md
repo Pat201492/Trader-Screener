@@ -186,8 +186,8 @@ Expected on RTX 4070 Ti at batch 8:
 If throughput is slower:
 1. Check if VSCode/browser is consuming memory → `tasklist` / Task Manager.
 2. Verify batch size:
-   - **Windows:** `tasklist /fi "imagename eq ollama.exe"` (should show `ollama.exe` with batch 8)
-   - **Linux/Mac:** `ps aux | grep ollama` (should show `OLLAMA_NUM_PARALLEL=8`)
+   - **Windows:** `tasklist /fi "imagename eq ollama.exe"` (should show `ollama.exe` running at batch 8)
+   - **Linux/Mac:** `ps aux | grep ollama` (should show process with `OLLAMA_NUM_PARALLEL=8` env var)
 3. Run `hardware_probe.py` again to confirm profile didn't downgrade.
 
 ## Expected VRAM Resident (RTX 4070 Ti, batch 8, 8k ctx, q8_0)

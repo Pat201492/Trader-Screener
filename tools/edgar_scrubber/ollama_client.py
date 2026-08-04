@@ -57,11 +57,10 @@ class OllamaClient:
 
     def __init__(self, config: OllamaConfig):
         self.config = config
-        # Remove trailing slash; the base_url may or may not end with /v1,
-        # but chat_completion appends /chat/completions, so normalize here.
-        # For e.g., "http://localhost:11434" → "/chat/completions" works fine.
-        # For e.g., "http://localhost:11434/v1" → "/chat/completions" also works
-        # (Ollama's /v1 prefix is optional for most endpoints).
+        # Normalize base_url by removing trailing slashes (but keep the /v1 prefix if present).
+        # base_url should end with either "" (http://localhost:11434) or "/v1" (http://localhost:11434/v1).
+        # Both forms work with OpenAI-compatible endpoints, but we standardize on stripping only
+        # trailing slashes to preserve the /v1 prefix if explicitly set.
         self.base_url = config.base_url.rstrip("/")
 
     def chat_completion(
