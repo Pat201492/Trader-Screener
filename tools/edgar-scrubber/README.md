@@ -43,10 +43,10 @@ ollama pull qwen2.5:7b-instruct-q4_K_M
 
 ### 4. Use in your code
 ```python
-from tools.edgar_scrubber.config import ScubberConfig
+from tools.edgar_scrubber.config import ScrubberConfig
 from tools.edgar_scrubber.ollama_client import OllamaClient
 
-config = ScubberConfig()  # probes hardware, saves config
+config = ScrubberConfig()  # probes hardware, saves config
 client = OllamaClient(config.ollama_config)
 
 response = client.chat_completion(

@@ -28,7 +28,7 @@ PARAMETER num_predict 2048
 PARAMETER temperature 0.3
 
 # Top-p: disable for deterministic output
-PARAMETER top_p 0.9
+PARAMETER top_p 1.0
 
 # System prompt tailored for EDGAR document extraction
 SYSTEM """You are an expert document analyst specializing in SEC EDGAR filings. Extract structured information from the text provided.

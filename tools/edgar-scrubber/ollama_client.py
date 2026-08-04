@@ -6,6 +6,7 @@ or Claude escalation (#104) via base_url swap.
 """
 
 import os
+import requests
 from typing import Optional
 from dataclasses import dataclass
 
@@ -79,8 +80,6 @@ class OllamaClient:
         Returns:
             Response dict with choices[0].message.content
         """
-        import requests
-
         payload = {
             "model": model or self.config.model,
             "messages": messages,
@@ -108,11 +107,10 @@ class OllamaClient:
 
 def test_connection(config: OllamaConfig) -> bool:
     """Check if Ollama is reachable."""
-    import requests
-
     try:
+        base_url = config.base_url.rstrip('/v1') if config.base_url.endswith('/v1') else config.base_url.rstrip('/')
         response = requests.get(
-            f"{config.base_url.rstrip('/v1')}/api/tags",
+            f"{base_url}/api/tags",
             timeout=2,
         )
         return response.status_code == 200

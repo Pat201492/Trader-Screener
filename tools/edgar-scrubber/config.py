@@ -9,11 +9,11 @@ from pathlib import Path
 from dataclasses import asdict
 from typing import Optional
 
-from hardware_probe import get_nvidia_vram, select_profile, HardwareProfile
-from ollama_client import OllamaConfig
+from .hardware_probe import get_nvidia_vram, select_profile, HardwareProfile
+from .ollama_client import OllamaConfig
 
 
-class ScubberConfig:
+class ScrubberConfig:
     """Centralized scrubber configuration."""
 
     def __init__(self, config_path: Optional[str] = None):
@@ -80,4 +80,4 @@ class ScubberConfig:
         return "\n".join(lines)
 
     def __repr__(self) -> str:
-        return f"<ScubberConfig model={self.hardware_profile.model} batch={self.hardware_profile.batch_size}>"
+        return f"<ScrubberConfig model={self.hardware_profile.model} batch={self.hardware_profile.batch_size}>"

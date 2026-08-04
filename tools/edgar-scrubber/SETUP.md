@@ -140,8 +140,9 @@ export OLLAMA_NUM_PARALLEL=8
 
 Configure Ollama at runtime. Store these in your shell profile or `.env` file:
 
+### Bash (Linux / Mac)
+
 ```bash
-# Linux / Mac / PowerShell
 export OLLAMA_NUM_PARALLEL=8           # From probe result
 export OLLAMA_NUM_CTX=8192             # From probe result
 export OLLAMA_BASE_URL=http://localhost:11434/v1
@@ -195,7 +196,7 @@ Expected on RTX 4070 Ti at batch 8:
 
 If throughput is slower:
 1. Check if VSCode/browser is consuming memory → `tasklist` / Task Manager.
-2. Verify batch size in `ps aux | grep ollama` (should show `OLLAMA_NUM_PARALLEL=8`).
+2. Verify batch size: **Windows:** `tasklist /fi "imagename eq ollama.exe"` **Linux/Mac:** `ps aux | grep ollama` (should show `OLLAMA_NUM_PARALLEL=8`).
 3. Run `hardware_probe.py` again to confirm profile didn't downgrade.
 
 ## Expected VRAM Resident (RTX 4070 Ti, batch 8, 8k ctx, q8_0)

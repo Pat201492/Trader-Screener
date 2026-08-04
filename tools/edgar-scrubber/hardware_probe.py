@@ -8,7 +8,7 @@ import subprocess
 import json
 import sys
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -33,7 +33,7 @@ class HardwareProfile:
         )
 
 
-def get_nvidia_vram() -> tuple[float, float]:
+def get_nvidia_vram() -> Tuple[float, float]:
     """
     Query NVIDIA GPU VRAM using nvidia-smi.
     Returns (total_gb, free_gb) or (0, 0) if no GPU or nvidia-smi unavailable.

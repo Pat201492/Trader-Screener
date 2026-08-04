@@ -5,17 +5,17 @@ Shows hardware probe → config → inference pattern.
 """
 
 import json
-from config import ScubberConfig
-from ollama_client import OllamaClient
+from .config import ScrubberConfig
+from .ollama_client import OllamaClient
 
 
-def extract_company_info(text: str, config: ScubberConfig) -> dict:
+def extract_company_info(text: str, config: ScrubberConfig) -> dict:
     """
     Extract company name, CIK, filing type from EDGAR document text.
 
     Args:
         text: raw EDGAR filing text (excerpt)
-        config: ScubberConfig (hardware profile + Ollama connection)
+        config: ScrubberConfig (hardware profile + Ollama connection)
 
     Returns:
         dict with extracted fields (name, cik, filing_type, confidence)
@@ -65,7 +65,7 @@ def main():
     print("=" * 60)
 
     # 1. Load or probe configuration
-    config = ScubberConfig()
+    config = ScrubberConfig()
     print(config.report())
 
     # 2. Example EDGAR text (simplified)
