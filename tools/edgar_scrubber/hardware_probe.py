@@ -72,6 +72,14 @@ def select_profile(total_vram: float, free_vram: float) -> HardwareProfile:
     # Conservatively assume 1.5GB held by system.
     usable = max(0, free_vram - 1.5)
 
+    # KV cache math: 7B has 28 KB/token with q8_0 quantization.
+    # 8k context at batch N: 8192 * 0.028 * N / 1024 ≈ 0.224 * N GB
+    # Batch 8, 8k: ~1.8 GB; Batch 4, 8k: ~0.9 GB; Batch 2, 4k: ~0.22 GB
+    # Weights (7B Q4_K_M): ~4.7 GB; overhead: ~0.5 GB
+    def kv_cache_gb(batch_size: int, context_length: int) -> float:
+        """Estimate KV cache size (q8_0 quantization, 7B model)."""
+        return batch_size * context_length * 0.028 / 1024
+
     if total_vram < 4:
         # Below 4GB total: CPU inference, no model selection.
         return HardwareProfile(
@@ -84,8 +92,8 @@ def select_profile(total_vram: float, free_vram: float) -> HardwareProfile:
             max_tokens=512,
         )
 
-    if usable >= 8.0:
-        # 7B fits comfortably: batch 8, 8k context, q8_0 quantization.
+    # Try batch 8, 8k context: 4.7 + 1.8 + 0.5 ≈ 7 GB
+    if usable >= 8.0 and (4.7 + kv_cache_gb(8, 8192) + 0.5) <= usable:
         return HardwareProfile(
             total_vram_gb=total_vram,
             free_vram_gb=free_vram,
@@ -96,8 +104,8 @@ def select_profile(total_vram: float, free_vram: float) -> HardwareProfile:
             max_tokens=2048,
         )
 
-    if usable >= 5.0:
-        # 7B fits with reduced batch: batch 4, 8k context.
+    # Try batch 4, 8k context: 4.7 + 0.9 + 0.5 ≈ 6.1 GB
+    if usable >= 5.0 and (4.7 + kv_cache_gb(4, 8192) + 0.5) <= usable:
         return HardwareProfile(
             total_vram_gb=total_vram,
             free_vram_gb=free_vram,
@@ -108,8 +116,8 @@ def select_profile(total_vram: float, free_vram: float) -> HardwareProfile:
             max_tokens=2048,
         )
 
-    if usable >= 4.0:
-        # 7B fits with further batch reduction: batch 2, 4k context.
+    # Try batch 2, 4k context: 4.7 + 0.22 + 0.5 ≈ 5.4 GB
+    if usable >= 4.0 and (4.7 + kv_cache_gb(2, 4096) + 0.5) <= usable:
         return HardwareProfile(
             total_vram_gb=total_vram,
             free_vram_gb=free_vram,

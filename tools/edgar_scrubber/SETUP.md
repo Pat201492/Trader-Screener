@@ -122,7 +122,7 @@ VRAM: 9.2GB free / 12.0GB total
 Configuration for OLLAMA_NUM_PARALLEL and num_ctx:
 ============================================================
 export OLLAMA_NUM_PARALLEL=8
-# Modelfile num_ctx should be set to 8192
+# Modelfile PARAMETER num_ctx should be set to 8192 (not env var)
 ```
 
 ### Interpret the probe result
@@ -138,30 +138,29 @@ export OLLAMA_NUM_PARALLEL=8
 
 ## Step 4: Set Environment Variables
 
-Configure Ollama at runtime. Store these in your shell profile or `.env` file:
+Configure Ollama at runtime. Store these in your shell profile or `.env` file.
+
+**Note:** `OLLAMA_NUM_CTX` is read from the Modelfile (`PARAMETER num_ctx 8192`), not from env vars. Set `OLLAMA_NUM_PARALLEL` to match batch size; env vars do not override Modelfile.
 
 ### Bash (Linux / Mac)
 
 ```bash
 export OLLAMA_NUM_PARALLEL=8           # From probe result
-export OLLAMA_NUM_CTX=8192             # From probe result
 export OLLAMA_BASE_URL=http://localhost:11434/v1
 export OLLAMA_MODEL=qwen2.5:7b-instruct-q4_K_M
-
-# For KV-cache quantization (config handled by Modelfile, exported for reference)
-export OLLAMA_KV_CACHE_QUANTIZATION=q8_0
 ```
 
 ### PowerShell (Windows)
 
 ```powershell
 $env:OLLAMA_NUM_PARALLEL = "8"
-$env:OLLAMA_NUM_CTX = "8192"
 $env:OLLAMA_BASE_URL = "http://localhost:11434/v1"
 $env:OLLAMA_MODEL = "qwen2.5:7b-instruct-q4_K_M"
 ```
 
 Or create `.env` and source it in your scrubber script.
+
+**Context length:** Set in `Modelfile.qwen2.5-7b` via `PARAMETER num_ctx 8192`. The env var `OLLAMA_NUM_CTX` is not read by Ollama; Modelfile is authoritative.
 
 ## Step 5: Verify Extraction & Throughput
 
