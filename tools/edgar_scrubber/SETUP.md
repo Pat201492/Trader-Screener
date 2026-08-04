@@ -121,7 +121,7 @@ VRAM: 9.2GB free / 12.0GB total
 ============================================================
 Configuration for OLLAMA_NUM_PARALLEL and num_ctx:
 ============================================================
-export OLLAMA_NUM_PARALLEL=8
+OLLAMA_NUM_PARALLEL=8
 # Modelfile PARAMETER num_ctx should be set to 8192 (not env var)
 ```
 
