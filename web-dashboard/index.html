@@ -107,6 +107,7 @@
 <main id="view"><div class="loading">Loading…</div></main>
 
 <script src="demo-data.js"></script>
+<script src="../schema-registry.js"></script>
 <script>
 // Demo mode: on GitHub Pages (static host, no API) or with ?demo in the URL,
 // serve synthetic schema-valid data from demo-data.js instead of a live API,
@@ -738,6 +739,8 @@ function uoaCell(r){
 //   oosPending – present but NOT out-of-sample validated yet (walk-forward/CSCV pending);
 //                hidden by default + flagged, same idea as notInV1 but for backtest-
 //                overfitting risk rather than a missing feed (see computeSmartMoneyScores)
+// NOTE: SCREENER_COLS schema will be moved to schema-registry.js per issue #87
+// (canonical field-schema registry). This definition stays until that migration.
 const SCREENER_COLS=[
   {key:'rank',   label:'#',        num:true, cls:'muted', tier:'collected', fmt:r=>r.rank??'–'},
   {key:'ticker', label:'Ticker',                          tier:'collected', fmt:r=>`<b style="color:var(--accent)">${r.ticker}</b>`},
