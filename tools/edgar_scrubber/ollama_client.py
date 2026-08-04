@@ -57,6 +57,11 @@ class OllamaClient:
 
     def __init__(self, config: OllamaConfig):
         self.config = config
+        # Remove trailing slash; the base_url may or may not end with /v1,
+        # but chat_completion appends /chat/completions, so normalize here.
+        # For e.g., "http://localhost:11434" → "/chat/completions" works fine.
+        # For e.g., "http://localhost:11434/v1" → "/chat/completions" also works
+        # (Ollama's /v1 prefix is optional for most endpoints).
         self.base_url = config.base_url.rstrip("/")
 
     def chat_completion(
