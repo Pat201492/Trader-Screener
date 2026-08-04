@@ -1,0 +1,136 @@
+{
+  "spec_id": "424b2.shelf_takedown",
+  "form_type": "424B2",
+  "population": "shelf_takedown",
+  "version": "1.0.0",
+  "description": "Plain debt / equity takedowns off a shelf, filed under Rule 424(b)(2). Lower signal individually, but repeat equity takedowns off the same shelf are a dilution pattern worth having. This is the default population when the structured-note markers are absent.",
+
+  "detection": {
+    "min_score": 2,
+    "signals": [
+      { "pattern": "price to public", "weight": 2 },
+      { "pattern": "underwriting discount", "weight": 2 },
+      { "pattern": "net proceeds", "weight": 2 },
+      { "pattern": "use of proceeds", "weight": 1 },
+      { "pattern": "over-allotment", "weight": 1 },
+      { "pattern": "prospectus supplement", "weight": 1 },
+      { "pattern": "shares of common stock", "weight": 1 },
+      { "pattern": "senior notes due", "weight": 1 }
+    ]
+  },
+
+  "sections": [
+    "cover",
+    "offering_summary",
+    "use_of_proceeds",
+    "underwriting",
+    "description_of_securities"
+  ],
+
+  "cross_checks": [
+    { "rule": "lte", "field": "net_proceeds", "reference": "aggregate_offering_amount", "severity": "warn", "message": "net_proceeds should not exceed aggregate_offering_amount" }
+  ],
+
+  "fields": [
+    {
+      "name": "security_type",
+      "type": "enum",
+      "enum": ["common stock", "preferred stock", "senior notes", "subordinated notes", "debentures", "warrants", "depositary shares", "other"],
+      "extraction_path": "variable",
+      "required": true,
+      "sections": ["cover", "offering_summary", "description_of_securities"],
+      "wire_key": "sec",
+      "description": "What is being sold. Phrasing varies — needs the model."
+    },
+    {
+      "name": "aggregate_offering_amount",
+      "type": "number",
+      "unit": "usd",
+      "extraction_path": "fixed-anchor",
+      "required": true,
+      "sections": ["cover", "offering_summary"],
+      "wire_key": "agg",
+      "anchors": ["Aggregate Offering Amount:", "aggregate offering price", "Total Offering:"],
+      "bounds": { "min": 0 }
+    },
+    {
+      "name": "price_to_public",
+      "type": "number",
+      "unit": "usd_or_percent",
+      "extraction_path": "table-resident",
+      "sections": ["cover", "offering_summary"],
+      "wire_key": "ptp",
+      "anchors": ["Price to Public", "Public Offering Price", "Price to the public"],
+      "bounds": { "min": 0 },
+      "description": "Per-share/per-note offering price (equity) or percent of principal (debt)."
+    },
+    {
+      "name": "underwriting_discount",
+      "type": "number",
+      "unit": "usd_or_percent",
+      "extraction_path": "table-resident",
+      "sections": ["cover", "underwriting"],
+      "wire_key": "udisc",
+      "anchors": ["Underwriting Discount", "Underwriting Discounts and Commissions", "Underwriting commission"],
+      "bounds": { "min": 0 }
+    },
+    {
+      "name": "net_proceeds",
+      "type": "number",
+      "unit": "usd",
+      "extraction_path": "fixed-anchor",
+      "sections": ["cover", "offering_summary", "use_of_proceeds"],
+      "wire_key": "net",
+      "anchors": ["Net Proceeds", "Proceeds to the Company", "net proceeds to us"],
+      "bounds": { "min": 0 }
+    },
+    {
+      "name": "use_of_proceeds",
+      "type": "string",
+      "extraction_path": "variable",
+      "sections": ["use_of_proceeds"],
+      "wire_key": "uop",
+      "anchors": ["Use of Proceeds", "we intend to use the net proceeds"],
+      "description": "Free-text stated use; needs the model to summarize."
+    },
+    {
+      "name": "over_allotment_shares",
+      "type": "number",
+      "unit": "shares",
+      "extraction_path": "table-resident",
+      "sections": ["underwriting", "cover"],
+      "wire_key": "oas",
+      "anchors": ["over-allotment", "option to purchase up to", "additional shares"],
+      "bounds": { "min": 0 }
+    },
+    {
+      "name": "coupon_rate",
+      "type": "percent",
+      "unit": "percent_per_annum",
+      "extraction_path": "fixed-anchor",
+      "sections": ["cover", "description_of_securities"],
+      "wire_key": "cpn",
+      "anchors": ["interest rate of", "Coupon:", "notes will bear interest at"],
+      "bounds": { "min": 0, "max": 30 },
+      "description": "Stated coupon on debt takedowns; absent for pure equity."
+    },
+    {
+      "name": "maturity",
+      "type": "date",
+      "extraction_path": "fixed-anchor",
+      "sections": ["cover", "description_of_securities"],
+      "wire_key": "mat",
+      "anchors": ["due", "Maturity:", "will mature on"],
+      "description": "Debt maturity date, ISO YYYY-MM-DD; absent for equity."
+    },
+    {
+      "name": "ranking",
+      "type": "enum",
+      "enum": ["senior secured", "senior unsecured", "senior", "subordinated", "junior subordinated", "unsecured", "secured"],
+      "extraction_path": "variable",
+      "sections": ["description_of_securities"],
+      "wire_key": "rank",
+      "anchors": ["will be our senior", "rank equally", "subordinated in right of payment"]
+    }
+  ]
+}

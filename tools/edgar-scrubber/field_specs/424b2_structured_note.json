@@ -1,0 +1,349 @@
+{
+  "spec_id": "424b2.structured_note",
+  "form_type": "424B2",
+  "population": "structured_note",
+  "version": "1.0.0",
+  "description": "Structured / market-linked notes filed under Rule 424(b)(2). The high-signal population: estimated_value_per_1000 is the issuer markup the SEC forces onto the page, and underlyings[] + aggregate_principal aggregate into structured-note issuance by underlying (dealer hedging proxy, #110).",
+
+  "detection": {
+    "min_score": 3,
+    "signals": [
+      { "pattern": "estimated value of the notes", "weight": 3 },
+      { "pattern": "our estimated value", "weight": 3 },
+      { "pattern": "contingent coupon", "weight": 2 },
+      { "pattern": "automatically called", "weight": 2 },
+      { "pattern": "autocall", "weight": 2 },
+      { "pattern": "worst performing", "weight": 2 },
+      { "pattern": "worst-of", "weight": 2 },
+      { "pattern": "buffer amount", "weight": 2 },
+      { "pattern": "downside leverage", "weight": 2 },
+      { "pattern": "barrier", "weight": 1 },
+      { "pattern": "participation rate", "weight": 1 },
+      { "pattern": "the underlying", "weight": 1 },
+      { "pattern": "calculation agent", "weight": 1 },
+      { "pattern": "not a deposit", "weight": 1 }
+    ]
+  },
+
+  "sections": [
+    "cover",
+    "key_terms",
+    "coupon_terms",
+    "call_terms",
+    "downside_terms",
+    "dates",
+    "estimated_value",
+    "fees",
+    "calculation_agent"
+  ],
+
+  "cross_checks": [
+    { "rule": "date_after", "field": "maturity_date", "reference": "pricing_date", "severity": "error", "message": "maturity_date must be after pricing_date" },
+    { "rule": "date_after_or_equal", "field": "issue_date", "reference": "pricing_date", "severity": "warn", "message": "issue_date should be on or after pricing_date" },
+    { "rule": "date_after_or_equal", "field": "maturity_date", "reference": "final_valuation_date", "severity": "warn", "message": "maturity_date should be on or after final_valuation_date" },
+    { "rule": "external_equals", "field": "aggregate_principal", "source": "ex107", "source_field": "aggregate_principal", "tolerance_pct": 0.5, "severity": "error", "message": "aggregate_principal must match the EX-107 fee exhibit (#101)" }
+  ],
+
+  "fields": [
+    {
+      "name": "issuer",
+      "type": "string",
+      "extraction_path": "fixed-anchor",
+      "required": true,
+      "sections": ["cover"],
+      "wire_key": "iss",
+      "anchors": ["Issuer:", "Issuer "],
+      "description": "Legal issuing entity, e.g. JPMorgan Chase Financial Company LLC."
+    },
+    {
+      "name": "guarantor",
+      "type": "string",
+      "extraction_path": "fixed-anchor",
+      "sections": ["cover"],
+      "wire_key": "gtr",
+      "anchors": ["Guarantor:", "fully and unconditionally guaranteed by"],
+      "description": "Parent guarantor, e.g. JPMorgan Chase & Co."
+    },
+    {
+      "name": "cusip",
+      "type": "string",
+      "extraction_path": "fixed-anchor",
+      "required": true,
+      "sections": ["cover", "key_terms"],
+      "anchors": ["CUSIP:", "CUSIP "],
+      "description": "9-character CUSIP."
+    },
+    {
+      "name": "isin",
+      "type": "string",
+      "extraction_path": "fixed-anchor",
+      "sections": ["cover", "key_terms"],
+      "anchors": ["ISIN:", "ISIN "],
+      "description": "12-character ISIN."
+    },
+    {
+      "name": "underlyings",
+      "type": "array",
+      "item_type": "object",
+      "extraction_path": "variable",
+      "required": true,
+      "sections": ["cover", "key_terms"],
+      "wire_key": "und",
+      "description": "One entry per reference asset: {name, kind}. kind in index|etf|single_stock|basket|worst_of. Aggregated across issuers this is the dealer-hedging proxy (#110)."
+    },
+    {
+      "name": "product_type",
+      "type": "enum",
+      "enum": [
+        "autocallable contingent coupon",
+        "buffered return enhanced",
+        "digital",
+        "dual directional",
+        "capped leveraged",
+        "review notes",
+        "trigger notes",
+        "other"
+      ],
+      "extraction_path": "variable",
+      "required": true,
+      "sections": ["cover", "key_terms"],
+      "wire_key": "ptype",
+      "description": "Payoff family. Genuinely needs the model — issuers phrase it many ways."
+    },
+    {
+      "name": "pricing_date",
+      "type": "date",
+      "extraction_path": "fixed-anchor",
+      "required": true,
+      "sections": ["cover", "dates"],
+      "wire_key": "pdate",
+      "anchors": ["Pricing Date:", "Pricing date", "Trade Date:"],
+      "description": "ISO YYYY-MM-DD."
+    },
+    {
+      "name": "issue_date",
+      "type": "date",
+      "extraction_path": "fixed-anchor",
+      "sections": ["cover", "dates"],
+      "wire_key": "idate",
+      "anchors": ["Issue Date:", "Original Issue Date:", "Settlement Date:"]
+    },
+    {
+      "name": "maturity_date",
+      "type": "date",
+      "extraction_path": "fixed-anchor",
+      "required": true,
+      "sections": ["cover", "dates"],
+      "wire_key": "mdate",
+      "anchors": ["Maturity Date:", "Maturity date", "Stated Maturity:"]
+    },
+    {
+      "name": "observation_dates",
+      "type": "array",
+      "item_type": "date",
+      "extraction_path": "variable",
+      "sections": ["dates", "coupon_terms"],
+      "wire_key": "obs",
+      "description": "Coupon / barrier observation schedule; often irregular — needs the model."
+    },
+    {
+      "name": "final_valuation_date",
+      "type": "date",
+      "extraction_path": "table-resident",
+      "sections": ["dates", "key_terms"],
+      "wire_key": "fvdate",
+      "anchors": ["Final Valuation Date:", "Valuation Date:", "Observation Date:"]
+    },
+    {
+      "name": "denomination",
+      "type": "number",
+      "unit": "usd",
+      "extraction_path": "fixed-anchor",
+      "sections": ["cover", "key_terms"],
+      "anchors": ["Denomination", "minimum denomination", "$1,000"],
+      "bounds": { "min": 1, "max": 1000000 },
+      "description": "Note denomination, almost always $1,000."
+    },
+    {
+      "name": "aggregate_principal",
+      "type": "number",
+      "unit": "usd",
+      "extraction_path": "fixed-anchor",
+      "sections": ["cover", "fees"],
+      "wire_key": "agg",
+      "anchors": ["Aggregate Principal Amount:", "Principal Amount:", "Aggregate principal amount"],
+      "bounds": { "min": 0 },
+      "description": "Total notional. Cross-checked against the EX-107 fee exhibit. Aggregates into issuance-by-underlying (#110)."
+    },
+    {
+      "name": "contingent_coupon_rate",
+      "type": "percent",
+      "unit": "percent_per_annum",
+      "extraction_path": "table-resident",
+      "sections": ["coupon_terms", "key_terms"],
+      "wire_key": "ccpn",
+      "anchors": ["Contingent Coupon Rate:", "Contingent Interest Rate:", "Coupon Rate:"],
+      "bounds": { "min": 0, "max": 100 }
+    },
+    {
+      "name": "coupon_frequency",
+      "type": "enum",
+      "enum": ["monthly", "quarterly", "semiannual", "annual", "at maturity"],
+      "extraction_path": "table-resident",
+      "sections": ["coupon_terms", "key_terms"],
+      "wire_key": "cfreq",
+      "anchors": ["Coupon Frequency:", "payable", "Observation Period"]
+    },
+    {
+      "name": "coupon_barrier_pct",
+      "type": "percent",
+      "unit": "percent_of_initial",
+      "extraction_path": "table-resident",
+      "sections": ["coupon_terms", "key_terms"],
+      "wire_key": "cbar",
+      "anchors": ["Coupon Barrier:", "Coupon Barrier Level:", "Interest Barrier:"],
+      "bounds": { "min": 0, "max": 100 }
+    },
+    {
+      "name": "autocall_dates",
+      "type": "array",
+      "item_type": "date",
+      "extraction_path": "variable",
+      "sections": ["call_terms", "dates"],
+      "wire_key": "acd",
+      "description": "Scheduled call observation dates; often irregular."
+    },
+    {
+      "name": "autocall_barrier_pct",
+      "type": "percent",
+      "unit": "percent_of_initial",
+      "extraction_path": "table-resident",
+      "sections": ["call_terms", "key_terms"],
+      "wire_key": "acbar",
+      "anchors": ["Call Barrier:", "Autocall Barrier:", "Call Level:"],
+      "bounds": { "min": 0, "max": 200 }
+    },
+    {
+      "name": "call_premium",
+      "type": "percent",
+      "unit": "percent",
+      "extraction_path": "table-resident",
+      "sections": ["call_terms", "key_terms"],
+      "wire_key": "cprem",
+      "anchors": ["Call Premium:", "Call Return:"],
+      "bounds": { "min": 0, "max": 100 }
+    },
+    {
+      "name": "buffer_pct",
+      "type": "percent",
+      "unit": "percent",
+      "extraction_path": "table-resident",
+      "sections": ["downside_terms", "key_terms"],
+      "wire_key": "buf",
+      "anchors": ["Buffer:", "Buffer Amount:", "Buffer Percentage:"],
+      "bounds": { "min": 0, "max": 100 }
+    },
+    {
+      "name": "barrier_pct",
+      "type": "percent",
+      "unit": "percent_of_initial",
+      "extraction_path": "table-resident",
+      "sections": ["downside_terms", "key_terms"],
+      "wire_key": "bar",
+      "anchors": ["Barrier:", "Barrier Level:", "Downside Threshold:", "Trigger Level:"],
+      "bounds": { "min": 0, "max": 100 }
+    },
+    {
+      "name": "downside_leverage",
+      "type": "number",
+      "unit": "multiple",
+      "extraction_path": "table-resident",
+      "sections": ["downside_terms", "key_terms"],
+      "wire_key": "dlev",
+      "anchors": ["Downside Leverage Factor:", "Downside Leverage:"],
+      "bounds": { "min": 0, "max": 10 }
+    },
+    {
+      "name": "participation_rate",
+      "type": "percent",
+      "unit": "percent",
+      "extraction_path": "table-resident",
+      "sections": ["key_terms"],
+      "wire_key": "prate",
+      "anchors": ["Participation Rate:", "Upside Participation Rate:", "Leverage Factor:"],
+      "bounds": { "min": 0, "max": 500 },
+      "description": "Upside participation; can exceed 100% on leveraged notes."
+    },
+    {
+      "name": "cap_pct",
+      "type": "percent",
+      "unit": "percent",
+      "extraction_path": "table-resident",
+      "sections": ["key_terms"],
+      "wire_key": "cap",
+      "anchors": ["Maximum Return:", "Cap:", "Capped Value:", "Maximum Gain:"],
+      "bounds": { "min": 0, "max": 1000 }
+    },
+    {
+      "name": "digital_return",
+      "type": "percent",
+      "unit": "percent",
+      "extraction_path": "table-resident",
+      "sections": ["key_terms"],
+      "wire_key": "dig",
+      "anchors": ["Digital Return:", "Fixed Return:", "Digital Percentage:"],
+      "bounds": { "min": 0, "max": 200 }
+    },
+    {
+      "name": "initial_underlying_value",
+      "type": "number",
+      "unit": "index_level",
+      "extraction_path": "table-resident",
+      "sections": ["key_terms"],
+      "wire_key": "init",
+      "anchors": ["Initial Value:", "Initial Underlying Value:", "Initial Level:", "Strike Value:"],
+      "bounds": { "min": 0 }
+    },
+    {
+      "name": "estimated_value_per_1000",
+      "type": "number",
+      "unit": "usd_per_1000",
+      "extraction_path": "fixed-anchor",
+      "required": true,
+      "sections": ["cover", "estimated_value"],
+      "wire_key": "ev1000",
+      "anchors": ["our estimated value", "estimated value of the notes", "Estimated Value:"],
+      "bounds": { "min": 900, "max": 1000 },
+      "description": "SEC-mandated 'our estimated value of the notes'. Against the $1,000 issue price this is the issuer markup. Outside 900-1000 the model almost certainly grabbed the wrong number."
+    },
+    {
+      "name": "agent_commission_pct",
+      "type": "percent",
+      "unit": "percent",
+      "extraction_path": "fixed-anchor",
+      "sections": ["fees", "cover"],
+      "wire_key": "acom",
+      "anchors": ["Agent's commission", "Selling commission", "Underwriting Discount:"],
+      "bounds": { "min": 0, "max": 10 }
+    },
+    {
+      "name": "structuring_fee_pct",
+      "type": "percent",
+      "unit": "percent",
+      "extraction_path": "table-resident",
+      "sections": ["fees"],
+      "wire_key": "sfee",
+      "anchors": ["structuring fee", "Structuring Fee:"],
+      "bounds": { "min": 0, "max": 10 }
+    },
+    {
+      "name": "calculation_agent",
+      "type": "string",
+      "extraction_path": "fixed-anchor",
+      "sections": ["calculation_agent", "key_terms"],
+      "wire_key": "calc",
+      "anchors": ["Calculation Agent:", "calculation agent will be"],
+      "description": "Entity computing payoffs, usually an issuer affiliate."
+    }
+  ]
+}
