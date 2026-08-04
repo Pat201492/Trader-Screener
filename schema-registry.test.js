@@ -110,6 +110,43 @@ test('ToolManifestValidator: invalid kind enum', () => {
   assert(result.errors.some(e => e.includes('kind')), 'Expected kind error');
 });
 
+test('ToolManifestValidator: lastRun null accepted (never-run tool)', () => {
+  const validator = new ToolManifestValidator();
+  const tool = {
+    id: 'test_gather_never_run',
+    name: 'Test Gather Tool',
+    kind: 'gather',
+    status: 'planned',
+    purpose: 'Test data collection',
+    doc: 'path/to/doc',
+    source: 'yfinance',
+    cadence: 'nightly',
+    outputPath: 'path/to/output',
+    lastRun: null,
+  };
+  const result = validator.validate(tool);
+  assert(result.valid, `Expected valid with lastRun: null, got errors: ${result.errors.join('; ')}`);
+});
+
+test('ToolManifestValidator: graduatedTo null accepted (not yet graduated)', () => {
+  const validator = new ToolManifestValidator();
+  const tool = {
+    id: 'test_gather_not_graduated',
+    name: 'Test Gather Tool',
+    kind: 'gather',
+    status: 'working',
+    purpose: 'Test data collection',
+    doc: 'path/to/doc',
+    source: 'yfinance',
+    cadence: 'nightly',
+    outputPath: 'path/to/output',
+    graduatedTo: null,
+    lastRun: '2026-08-03T12:00:00Z',
+  };
+  const result = validator.validate(tool);
+  assert(result.valid, `Expected valid with graduatedTo: null, got errors: ${result.errors.join('; ')}`);
+});
+
 // ── Research Project Tests ────────────────────────────────────────────
 
 test('ResearchProjectValidator: valid project', () => {
@@ -201,6 +238,75 @@ test('ResearchProjectValidator: multiple tool references (mixed valid/dangling)'
   assert(
     result.errors.some(e => e.includes('dangling_tool_id')),
     'Expected error mentioning dangling tool'
+  );
+});
+
+test('ResearchProjectValidator: verdict/startedAt/concludedAt null accepted (nullable required fields)', () => {
+  const registry = new SchemaRegistry();
+  registry.addTool({
+    id: 'nullable_test_tool',
+    name: 'Nullable Test Tool',
+    kind: 'gather',
+    status: 'working',
+    purpose: 'Test',
+    doc: 'path',
+    source: 'test',
+    cadence: 'nightly',
+    outputPath: 'out',
+  });
+
+  const validator = new ResearchProjectValidator(registry.tools);
+  const project = {
+    id: 'nullable_proj',
+    title: 'Nullable Fields Project',
+    hypothesis: 'Test hypothesis',
+    falsifier: 'Test falsifier',
+    tools: ['nullable_test_tool'],
+    trialCount: 5,
+    lookaheadPosture: 'none',
+    status: 'planned',
+    verdict: null,
+    startedAt: null,
+    concludedAt: null,
+  };
+  const result = validator.validate(project);
+  assert(result.valid, `Expected valid with null verdict/startedAt/concludedAt, got errors: ${result.errors.join('; ')}`);
+});
+
+test('ResearchProjectValidator: missing verdict key is a hard error (required, nullable != optional)', () => {
+  const registry = new SchemaRegistry();
+  registry.addTool({
+    id: 'missing_verdict_tool',
+    name: 'Tool',
+    kind: 'gather',
+    status: 'working',
+    purpose: 'Test',
+    doc: 'path',
+    source: 'test',
+    cadence: 'nightly',
+    outputPath: 'out',
+  });
+
+  const validator = new ResearchProjectValidator(registry.tools);
+  const project = {
+    id: 'missing_verdict_proj',
+    title: 'Missing Verdict Project',
+    hypothesis: 'Test',
+    falsifier: 'Test',
+    tools: ['missing_verdict_tool'],
+    trialCount: 5,
+    lookaheadPosture: 'none',
+    status: 'planned',
+    // verdict key omitted entirely — must fail even though verdict is nullable,
+    // because "nullable" means the value may be null, not that the key is optional
+    startedAt: null,
+    concludedAt: null,
+  };
+  const result = validator.validate(project);
+  assert(!result.valid, 'Expected invalid due to missing required verdict field');
+  assert(
+    result.errors.some(e => e.includes('Missing required field: verdict')),
+    'Expected missing verdict field error'
   );
 });
 

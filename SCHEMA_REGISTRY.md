@@ -131,7 +131,7 @@ registry.addTool(toolData);  // Validates against the canonical schema
 The registry uses a composable validator hierarchy:
 
 - **`SchemaValidator`** — Base class with `validate(obj)` returning `{valid, errors}`
-- **`ObjectValidator`** — Generic field-level validation (type, required, enum, custom)
+- **`ObjectValidator`** — Generic field-level validation (type, required, nullable, enum, custom). `required` and `nullable` are independent: `required: true, nullable: true` means the key must be present but its value may be `null` (e.g. `verdict`, `startedAt`, `concludedAt`, `lastRun`).
 - **`ToolManifestValidator`** — Extends `ObjectValidator`, enforces gather/model field rules
 - **`ResearchProjectValidator`** — Extends `ObjectValidator`, enforces dangling-reference check
 

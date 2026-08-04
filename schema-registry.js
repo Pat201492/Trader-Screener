@@ -40,33 +40,44 @@ class ObjectValidator extends SchemaValidator {
 
     for (const [name, spec] of Object.entries(this.fields)) {
       const val = obj[name];
-      const isPresent = val !== undefined && val !== null;
+      const isMissing = val === undefined;
+      const isNull = val === null;
 
-      if (spec.required && !isPresent) {
+      if (spec.required && isMissing) {
         errors.push(`Missing required field: ${name}`);
         continue;
       }
 
-      if (isPresent) {
-        // Type check
-        if (spec.type && typeof val !== spec.type) {
-          if (!(spec.type === 'array' && Array.isArray(val))) {
-            errors.push(`Field ${name}: expected ${spec.type}, got ${typeof val}`);
-            continue;
-          }
-        }
+      if (isMissing) {
+        continue; // optional field, absent — nothing more to validate
+      }
 
-        // Enum check
-        if (spec.enum && !spec.enum.includes(val)) {
-          errors.push(`Field ${name}: value '${val}' not in [${spec.enum.join(', ')}]`);
+      if (isNull) {
+        if (spec.nullable) {
+          continue; // explicit null allowed for nullable fields
         }
+        errors.push(`Field ${name}: null not allowed (field is not nullable)`);
+        continue;
+      }
 
-        // Custom validator
-        if (spec.validator) {
-          const subResult = spec.validator.validate(val);
-          if (!subResult.valid) {
-            errors.push(`Field ${name}: ${subResult.errors.join('; ')}`);
-          }
+      // Type check
+      if (spec.type && typeof val !== spec.type) {
+        if (!(spec.type === 'array' && Array.isArray(val))) {
+          errors.push(`Field ${name}: expected ${spec.type}, got ${typeof val}`);
+          continue;
+        }
+      }
+
+      // Enum check
+      if (spec.enum && !spec.enum.includes(val)) {
+        errors.push(`Field ${name}: value '${val}' not in [${spec.enum.join(', ')}]`);
+      }
+
+      // Custom validator
+      if (spec.validator) {
+        const subResult = spec.validator.validate(val);
+        if (!subResult.valid) {
+          errors.push(`Field ${name}: ${subResult.errors.join('; ')}`);
         }
       }
     }
@@ -108,13 +119,13 @@ const TOOL_MANIFEST_FIELDS = {
   status: { type: 'string', required: true, enum: ['planned', 'building', 'working', 'graduated', 'retired'] },
   purpose: { type: 'string', required: true },
   doc: { type: 'string', required: true },
-  lastRun: { type: 'string', required: false }, // ISO 8601 or null
+  lastRun: { type: 'string', required: false, nullable: true }, // ISO 8601 or null
 
   // gather-only
   source: { type: 'string', required: false },
   cadence: { type: 'string', required: false },
   outputPath: { type: 'string', required: false },
-  graduatedTo: { type: 'string', required: false },
+  graduatedTo: { type: 'string', required: false, nullable: true },
 
   // model-only
   inputs: { type: 'array', required: false },
@@ -185,9 +196,9 @@ const RESEARCH_PROJECT_FIELDS = {
   trialCount: { type: 'number', required: true },
   lookaheadPosture: { type: 'string', required: true, enum: ['none', 'lag-prior-close', 'lag-period'] },
   status: { type: 'string', required: true, enum: ['planned', 'running', 'concluded'] },
-  verdict: { type: 'boolean', required: false }, // null is allowed
-  startedAt: { type: 'string', required: false },
-  concludedAt: { type: 'string', required: false },
+  verdict: { type: 'boolean', required: true, nullable: true }, // true | false | null
+  startedAt: { type: 'string', required: true, nullable: true }, // ISO 8601 or null
+  concludedAt: { type: 'string', required: true, nullable: true }, // ISO 8601 or null
 };
 
 class ResearchProjectValidator extends ObjectValidator {
