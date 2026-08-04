@@ -93,6 +93,20 @@
   /* tear-sheet coherence note (issue #48) — the per-instrument argument's read-order banner */
   .tearnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #a371f7;border-radius:6px;background:#a371f70d;color:var(--muted);font-size:12px;line-height:1.55}
   .tearnote b{color:var(--txt)}
+  /* research discipline banner (issue #95) — falsifiable-hypothesis gate; red risk accent (no pre-declared trial count => fishing trip) */
+  .hyponote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--red);border-radius:6px;background:#f851490d;color:var(--muted);font-size:12px;line-height:1.55}
+  .hyponote b{color:var(--txt)}
+  /* tools boundary banner (issue #95) — exploratory/project-local scrubber graduates upstream; amber caution, don't calcify into a 2nd ingest path */
+  .boundarynote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #e3b341;border-radius:6px;background:#e3b3410d;color:var(--muted);font-size:12px;line-height:1.55}
+  .boundarynote b{color:var(--txt)}
+  /* generic note box (issue #95 scrubber panels) — override border-left-color/background inline per accent */
+  .notebox{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--muted);border-radius:6px;background:#8b949e0d;color:var(--muted);font-size:12px;line-height:1.55}
+  .notebox b{color:var(--txt)}
+  /* research verdict / gate badges (issue #95) — reuse the .tier badge shape */
+  .v-supported{color:var(--green);background:#3fb9501a;border-color:#3fb95055}
+  .v-refuted{color:var(--red);background:#f851491a;border-color:#f8514955}
+  .v-inconclusive{color:#e3b341;background:#e3b3411a;border-color:#e3b34155}
+  .v-open{color:#58a6ff;background:#388bfd1a;border-color:#1f6feb55}
 </style>
 </head>
 <body>
@@ -2360,6 +2374,307 @@ async function renderEducation(){
   v.innerHTML=html;
 }
 
+// ── RESEARCH workspace (issue #95) — hypothesis projects ──
+// A Research project is a FALSIFIABLE HYPOTHESIS, not a folder. Each states a
+// prediction up front, names the data it needs, names the Tools that supply that
+// data, declares its trial count BEFORE it runs, and ends in a verdict. Discipline
+// is enforced, not optional: the repo already owns the look-ahead gate (#42,
+// lookahead-gate/) and the out-of-sample + deflation + trial-count gate (#47) — a
+// project that can't state its trial count before it starts is a fishing trip.
+// Projects reference Tools; Tools never reference projects (one-directional).
+// Schema per project: {id,title,hypothesis,verdict,trialCount,lookaheadGate,
+//   oosGate,dataNeeded[],tools[],note}. verdict ∈ {open,supported,refuted,inconclusive}.
+const RESEARCH_PROJECTS=[
+  {id:'p-424b2-vol', title:'424B2 issuance surge front-runs single-name vol',
+   verdict:'open', trialCount:4, lookaheadGate:'pending', oosGate:'pending',
+   hypothesis:'When 424B2 structured-note issuance referencing a single underlying spikes &gt;2σ above its trailing-4-quarter mean, that underlying’s realized vol over the next 60 sessions exceeds its trailing-year median. <b>Pre-registered before looking:</b> effect one-sided, ≤3 vol points — anything larger is treated as a data error, not a win.',
+   dataNeeded:['424B2 reference underlying','principal amount','issue date','issuer CIK'],
+   tools:['edgar-scrubber'],
+   note:'The proof project — first hypothesis consuming the EDGAR scrubber. 4 trials = {2 issuance thresholds} × {2 vol horizons}, declared here so the deflation gate has a real N to correct against. Not yet run: both gates pending.'},
+  {id:'p-magic-decile', title:'Magic-Formula decile spread survives deflation',
+   verdict:'supported', trialCount:6, lookaheadGate:'pass', oosGate:'pass',
+   hypothesis:'Top-decile Greenblatt rank out-earns bottom-decile over 12-month holds, and the spread stays significant after deflating the Sharpe for the 6 rank variants tried.',
+   dataNeeded:['roic','ebit_ev_yield','forward returns'],
+   tools:['magic-formula-ranker'],
+   note:'Deflated Sharpe still clears after correcting for 6 trials; look-ahead gate passes (ranks use only point-in-time fundamentals). Already graduated — the ranker is a live screener column.'},
+  {id:'p-committee', title:'Committee-conflict congress trades beat their sector',
+   verdict:'refuted', trialCount:12, lookaheadGate:'pass', oosGate:'fail',
+   hypothesis:'Congress trades where the member sits on the committee overseeing the issuer beat the issuer’s sector by ≥5%/quarter.',
+   dataNeeded:['congress trades','committee membership','sector returns'],
+   tools:['smart-money-scorer'],
+   note:'Refuted — and that is the point. The in-sample edge evaporated out-of-sample; deflating for 12 committee/window cross-tabs (Backtest Overfitting: the best cell is just the max of many noisy tabs) leaves nothing significant. Discipline killed a good story.'},
+  {id:'p-fishing', title:'“Something interesting in the options data”',
+   verdict:'inconclusive', trialCount:null, lookaheadGate:'—', oosGate:'—',
+   hypothesis:'<i>No falsifiable prediction stated. No pre-declared trial count.</i>',
+   dataNeeded:['(unspecified)'],
+   tools:[],
+   note:'Rejected at intake — the counterexample. A project that can’t state its trial count before it starts is a fishing trip; it gets no compute until it names a prediction and an N.'},
+];
+
+// ── TOOLS workspace (issue #95) — data-gathering / analysis modules ──
+// A Tool is standalone and reusable. kind:'gather' pulls raw data in;
+// kind:'analyze' consumes gathered data and emits a number / rank / classification.
+// home ∈ {local,pipeline}: 'pipeline' tools already live upstream (the pipeline is
+// the only writer — ARCHITECTURE.md); 'local' tools are exploratory, human-
+// supervised, project-local and GRADUATE upstream once a field proves out.
+const TOOLS=[
+  {id:'edgar-scrubber', kind:'gather', home:'local', name:'EDGAR scrubber — 424B2 pilot',
+   emits:'extracted field set, per filing document', inputs:['form','date range','full-text query','field spec'],
+   status:'pilot · human-supervised', detail:'openEdgarScrubber',
+   desc:'Crawls every 424B2 filing matching an EDGAR search, opens <b>every document</b> in each filing, and extracts a user-designated field set. A local model does the extraction; you hand-validate the first N documents so it learns your field definitions before it runs unattended.'},
+  {id:'fred-puller', kind:'gather', home:'pipeline', name:'FRED macro puller',
+   emits:'VIX / yield-curve series', inputs:['series id'], status:'graduated · upstream',
+   desc:'Already lives in the shared pipeline (<code>fred.py</code>). Not re-implemented here — the boundary rule forbids a second ingest path. Listed so its home is explicit.'},
+  {id:'options-chain-puller', kind:'gather', home:'pipeline', name:'Options-chain puller',
+   emits:'chains + IV / Greeks / OI', inputs:['ticker'], status:'graduated · upstream',
+   desc:'Lives upstream (<code>options.py</code>). Referenced by projects via the pipeline output, not re-scraped locally.'},
+  {id:'magic-formula-ranker', kind:'analyze', home:'pipeline', name:'Magic-Formula ranker',
+   emits:'ordinal rank', inputs:['roic','ebit_ev_yield'], status:'live screener column',
+   desc:'Greenblatt composite: rank(ROIC) + rank(EBIT/EV). Standalone and reusable — the Stock screener and the decile-spread project both consume it.'},
+  {id:'smart-money-scorer', kind:'analyze', home:'pipeline', name:'Smart-money scorer',
+   emits:'signed −100..100 score', inputs:['congress','insider','news','options flow'], status:'live column · OOS pending',
+   desc:'Folds informed-flow legs into one score (#41). Reused by the Smart-Money tab and the committee-conflict project.'},
+  {id:'vix-regime-classifier', kind:'analyze', home:'pipeline', name:'VIX regime classifier',
+   emits:'class {calm|normal|elevated|stress}', inputs:['vix','vix3m'], status:'live',
+   desc:'Buckets the VIX level + term-structure into a regime label that soft-gates the screener defaults.'},
+  {id:'recession-probit', kind:'analyze', home:'pipeline', name:'Recession probit',
+   emits:'P(recession, 12m)', inputs:['T10Y3M spread'], status:'live',
+   desc:'Estrella–Mishkin probit on the yield-curve spread → a probability. Standalone; the Macro tab and any macro-timed project can call it.'},
+];
+const toolById=id=>TOOLS.find(t=>t.id===id);
+
+function verdictBadge(v){
+  const m={supported:['v-supported','supported'],refuted:['v-refuted','refuted'],inconclusive:['v-inconclusive','inconclusive'],open:['v-open','open']};
+  const [cls,lab]=m[v]||m.open; return `<span class="tier ${cls}">${lab}</span>`;
+}
+function gatePill(label,state){
+  const c=state==='pass'?'var(--green)':state==='fail'?'var(--red)':state==='pending'?'#e3b341':'var(--muted)';
+  return `<span class="pill" style="border:1px solid ${c};color:${c};font-size:11px">${label}: ${state}</span>`;
+}
+function researchCard(p){
+  const fishing=p.trialCount==null;
+  const trial=fishing
+    ? '<span class="neg">not declared — fishing trip</span>'
+    : `<b>${p.trialCount}</b> trial${p.trialCount===1?'':'s'} <span class="muted">(declared before start)</span>`;
+  const tools=p.tools.length
+    ? p.tools.map(id=>{const t=toolById(id);return `<span class="pill" style="border:1px solid var(--accent);color:var(--accent);font-size:11px;cursor:pointer" onclick="goSection('tools')" title="Open Tools">${t?t.name:id}</span>`;}).join('')
+    : '<span class="muted">none</span>';
+  return `<div class="card" style="padding:14px${fishing?';border-color:#f8514955':''}">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">
+      <div class="name">${p.title}</div>${verdictBadge(p.verdict)}
+    </div>
+    <div class="muted" style="font-size:12.5px;line-height:1.55;margin:8px 0 10px">${p.hypothesis}</div>
+    <table style="font-size:12px">
+      <tr><td class="muted" style="border:none;padding:3px 12px 3px 0">Trial count</td><td style="border:none;padding:3px 0">${trial}</td></tr>
+      <tr><td class="muted" style="border:none;padding:3px 12px 3px 0;vertical-align:top">Discipline gates</td><td style="border:none;padding:3px 0">${gatePill('look-ahead #42',p.lookaheadGate)} ${gatePill('OOS+deflation #47',p.oosGate)}</td></tr>
+      <tr><td class="muted" style="border:none;padding:3px 12px 3px 0;vertical-align:top">Data needed</td><td style="border:none;padding:3px 0">${p.dataNeeded.map(d=>`<span class="pill" style="font-size:11px">${d}</span>`).join('')}</td></tr>
+      <tr><td class="muted" style="border:none;padding:3px 12px 3px 0;vertical-align:top">Tools</td><td style="border:none;padding:3px 0">${tools}</td></tr>
+    </table>
+    <div class="muted" style="font-size:11.5px;line-height:1.5;margin-top:8px">${p.note}</div>
+  </div>`;
+}
+function renderResearch(){
+  const v=document.getElementById('view');
+  const c=RESEARCH_PROJECTS.reduce((a,p)=>{a[p.verdict]=(a[p.verdict]||0)+1;return a;},{});
+  v.innerHTML=`<div style="margin:6px 0 4px"><span class="big" style="font-size:22px">Research — hypothesis projects</span></div>
+    <div class="muted" style="margin-bottom:12px;max-width:820px">A project is a <b>falsifiable hypothesis</b>, not a folder. Each states a prediction, names the data it needs, names the Tools that supply it, declares its trial count <b>before</b> it runs, and ends in a verdict — supported, refuted, or inconclusive. This is the Research pillar’s first app surface (closes #92 by stubbing it for real).</div>
+    <div class="hyponote">🎣 <b>Discipline is not optional.</b> The repo already owns the machinery: the look-ahead gate (<b>#42</b>, <code>lookahead-gate/</code>) and out-of-sample + deflation + trial-count gating (<b>#47</b>). <b>A project that can’t state its trial count before it starts is a fishing trip</b> — it gets no compute until it names a prediction and an N.</div>
+    <div style="margin-bottom:12px;font-size:12px">
+      ${verdictBadge('open')} ${c.open||0} &nbsp; ${verdictBadge('supported')} ${c.supported||0} &nbsp; ${verdictBadge('refuted')} ${c.refuted||0} &nbsp; ${verdictBadge('inconclusive')} ${c.inconclusive||0}
+    </div>
+    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(360px,1fr))">
+      ${RESEARCH_PROJECTS.map(researchCard).join('')}
+    </div>`;
+}
+
+function toolCard(t){
+  const homePill=t.home==='pipeline'
+    ? '<span class="pill" style="border:1px solid var(--green);color:var(--green);font-size:11px">upstream · pipeline</span>'
+    : '<span class="pill" style="border:1px solid #e3b341;color:#e3b341;font-size:11px">local · project-local</span>';
+  const open=t.detail?`<div style="margin-top:10px"><button class="pill" style="cursor:pointer;border:1px solid var(--accent);color:var(--accent)" onclick="${t.detail}()">Open scrubber →</button></div>`:'';
+  return `<div class="card" style="padding:14px">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">
+      <div class="name">${t.name}</div>${homePill}
+    </div>
+    <div class="muted" style="font-size:12.5px;line-height:1.5;margin:8px 0 10px">${t.desc}</div>
+    <table style="font-size:12px">
+      <tr><td class="muted" style="border:none;padding:3px 12px 3px 0;vertical-align:top">Inputs</td><td style="border:none;padding:3px 0">${t.inputs.map(i=>`<span class="pill" style="font-size:11px">${i}</span>`).join('')}</td></tr>
+      <tr><td class="muted" style="border:none;padding:3px 12px 3px 0">Emits</td><td style="border:none;padding:3px 0">${t.emits}</td></tr>
+      <tr><td class="muted" style="border:none;padding:3px 12px 3px 0">Status</td><td style="border:none;padding:3px 0">${t.status}</td></tr>
+    </table>${open}
+  </div>`;
+}
+function renderToolsGathering(){
+  const v=document.getElementById('view');
+  const items=TOOLS.filter(t=>t.kind==='gather');
+  v.innerHTML=`<div style="margin:6px 0 4px"><span class="big" style="font-size:22px">Tools — data gathering</span></div>
+    <div class="muted" style="margin-bottom:12px;max-width:820px">Modules that pull raw data <b>in</b>. Standalone and reusable — Research projects reference them; tools never reference projects.</div>
+    <div class="boundarynote">🚧 <b>Boundary rule (non-negotiable).</b> <code>ARCHITECTURE.md</code>: the pipeline is the only writer and “don’t fork the ingest scripts,” and Stock-Data-Pipeline <b>already ingests EDGAR</b>. Local gatherers here are therefore <b>exploratory, human-supervised, project-local</b>. When a field proves out inside a Research project it <b>graduates upstream</b> into the pipeline and the local extractor is retired — otherwise the tool calcifies into a second permanent ingest path (the failure mode in #90 / #91).</div>
+    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(360px,1fr))">
+      ${items.map(toolCard).join('')}
+    </div>`;
+}
+function renderToolsModels(){
+  const v=document.getElementById('view');
+  const items=TOOLS.filter(t=>t.kind==='analyze');
+  v.innerHTML=`<div style="margin:6px 0 4px"><span class="big" style="font-size:22px">Tools — analysis models</span></div>
+    <div class="muted" style="margin-bottom:12px;max-width:820px">Modules that <b>consume</b> gathered data and emit a number, rank, or classification. Each is standalone — the same model backs a live screener column and any Research project that references it.</div>
+    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(360px,1fr))">
+      ${items.map(toolCard).join('')}
+    </div>`;
+}
+
+// ── EDGAR scrubber detail (issue #95) — the pilot data-gathering tool ──
+// Design corrections baked in: (1) NO browser automation — SEC ships JSON APIs,
+// search + fetch are deterministic code, the model only extracts; (2) "the model
+// learns what I want" is NOT fine-tuning — a 14B local model doesn't weight-update
+// from ten examples, so what learns is (a) a few-shot exemplar store, then (b) rule
+// induction, then (c) a LoRA (backlogged). Scope is project-local + graduates upstream.
+const EDGAR_ENDPOINTS=[
+  ['full-text search (2001→present)','https://efts.sec.gov/LATEST/search-index?q=&forms=424B2&startdt=&enddt=&from='],
+  ['filing history per company','https://data.sec.gov/submissions/CIK##########.json'],
+  ['every document in one filing','https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/index.json'],
+  ['pre-parsed XBRL facts','https://data.sec.gov/api/xbrl/{companyfacts,companyconcept,frames}'],
+  ['quarterly form index','https://www.sec.gov/Archives/edgar/full-index/{yyyy}/QTR{n}/form.idx'],
+];
+// user-designated field set for the 424B2 pilot (structured / market-linked notes)
+const EDGAR_FIELDSPEC=[
+  {field:'issuer', desc:'Issuing entity + CIK', anchor:'cover-page header'},
+  {field:'reference_underlying', desc:'Linked asset(s) — index / single name / basket', anchor:'“linked to” clause'},
+  {field:'principal_amount', desc:'Aggregate principal of the takedown', anchor:'“Aggregate principal amount”'},
+  {field:'contingent_coupon', desc:'Coupon rate + barrier condition', anchor:'“Contingent Coupon”'},
+  {field:'barrier_buffer', desc:'Downside barrier / buffer (% of initial)', anchor:'“Barrier Level” / “Buffer”'},
+  {field:'autocall_schedule', desc:'Automatic-call dates + thresholds', anchor:'“Automatic Call”'},
+  {field:'maturity_date', desc:'Stated maturity', anchor:'cover-page terms table'},
+  {field:'cusip', desc:'9-char CUSIP', anchor:'“CUSIP”'},
+];
+// "validate the first N by hand" surface. Accepting a span promotes it to a
+// few-shot exemplar keyed (form, issuer, field). Mock, deterministic (offline demo).
+let EDGAR_DOCS=[
+  {doc:'424b2_0001.htm', issuer:'GS Finance Corp', field:'reference_underlying', span:'the S&amp;P 500® Index', status:'unreviewed'},
+  {doc:'424b2_0001.htm', issuer:'GS Finance Corp', field:'contingent_coupon', span:'9.10% per annum', status:'unreviewed'},
+  {doc:'424b2_0002.htm', issuer:'GS Finance Corp', field:'barrier_buffer', span:'70% of the Initial Level', status:'unreviewed'},
+  {doc:'424b2_0003.htm', issuer:'Citigroup Global Markets', field:'reference_underlying', span:'the Russell 2000® Index', status:'unreviewed'},
+  {doc:'424b2_0003.htm', issuer:'Citigroup Global Markets', field:'principal_amount', span:'$2,417,000', status:'unreviewed'},
+];
+let EDGAR_QUERY={q:'contingent coupon', startdt:'2024-01-01', enddt:'2024-12-31', from:0};
+let EDGAR_PLANNED=false;
+function edgarReview(i,ok){ if(EDGAR_DOCS[i]) EDGAR_DOCS[i].status=ok?'accepted':'corrected'; renderEdgarScrubber(); }
+function edgarPlanCrawl(){
+  const g=id=>{const el=document.getElementById(id);return el?el.value:'';};
+  EDGAR_QUERY={q:g('edgar-q'), startdt:g('edgar-start'), enddt:g('edgar-end'), from:g('edgar-from')||0};
+  EDGAR_PLANNED=true; renderEdgarScrubber();
+}
+function openEdgarScrubber(){ SECTION='tools'; TAB='gathering'; renderNav(); renderEdgarScrubber(); }
+function renderEdgarScrubber(){
+  const v=document.getElementById('view');
+  const accepted=EDGAR_DOCS.filter(d=>d.status==='accepted').length;
+  const reviewed=EDGAR_DOCS.filter(d=>d.status!=='unreviewed').length;
+  const eftsURL=`https://efts.sec.gov/LATEST/search-index?q=${encodeURIComponent('"'+EDGAR_QUERY.q+'"')}&forms=424B2&startdt=${EDGAR_QUERY.startdt}&enddt=${EDGAR_QUERY.enddt}&from=${EDGAR_QUERY.from}`;
+  const learnCard=(tag,title,accent,when,body)=>`<div class="card" style="padding:14px;border-left:3px solid ${accent}">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">
+      <div class="name">${tag}. ${title}</div><span class="pill" style="font-size:11px;border:1px solid ${accent};color:${accent}">${when}</span>
+    </div>
+    <div class="muted" style="font-size:12px;line-height:1.5;margin-top:8px">${body}</div></div>`;
+
+  let html=`<button class="pill" style="cursor:pointer;border:1px solid var(--border)" onclick="renderToolsGathering()">← Data Gathering</button>
+    <div style="margin:10px 0 4px"><span class="big" style="font-size:22px">EDGAR scrubber</span> <span class="tier v-open" style="margin-left:6px">424B2 pilot</span> <span class="pill" style="border:1px solid #e3b341;color:#e3b341;font-size:11px">local · human-supervised</span></div>
+    <div class="muted" style="margin-bottom:12px;max-width:840px">Enter EDGAR search criteria → crawl every matching filing → open <b>every document</b> in each filing → extract a user-designated field set. A local model does the extraction; you validate the first N documents by hand so it learns your field definitions before it runs unattended. <b>424B2</b> is the pilot form — prospectus supplements / structured-note issuance, thousands a year, heavily templated per issuer: the exact shape where hand-validated exemplars pay off fastest.</div>`;
+
+  // A. crawl — search criteria + no-browser-automation note
+  html+=`<div class="group-title">1 · Crawl — search criteria</div>
+    <div class="notebox" style="border-left-color:#1f6feb;background:#1f6feb0d">🔌 <b>No browser automation.</b> SEC ships JSON APIs, so search and fetch are <b>deterministic code</b> — only extraction uses a model. The crawl runs full-text search → filing list → per-filing <code>index.json</code> → every document in the filing.</div>
+    <div class="controls">
+      <select disabled title="Pilot form — fixed to 424B2"><option>424B2</option></select>
+      <input type="text" id="edgar-q" value="${EDGAR_QUERY.q}" placeholder="full-text query" style="min-width:220px" />
+      <input type="text" id="edgar-start" value="${EDGAR_QUERY.startdt}" placeholder="startdt YYYY-MM-DD" />
+      <input type="text" id="edgar-end" value="${EDGAR_QUERY.enddt}" placeholder="enddt YYYY-MM-DD" />
+      <input type="text" id="edgar-from" value="${EDGAR_QUERY.from}" placeholder="from" style="width:80px" />
+      <button class="pill" style="cursor:pointer;border:1px solid var(--accent);color:var(--accent)" onclick="edgarPlanCrawl()">Plan crawl</button>
+    </div>`;
+  if(EDGAR_PLANNED){
+    html+=`<div class="card" style="padding:12px;margin-bottom:14px">
+      <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Deterministic request (built from the form)</div>
+      <code style="display:block;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:11.5px;font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--txt);white-space:pre-wrap;word-break:break-all">${eftsURL}</code>
+      <div class="muted" style="font-size:12px;margin-top:8px">→ page the <code>from</code> offset until exhausted → for each hit GET <code>…/index.json</code> → open every document → queue for extraction. <i>Offline demo — no live SEC call is made here; a live run needs the local runtime and a declared User-Agent (below).</i></div>
+    </div>`;
+  }
+
+  // B. client core — endpoints + access rules
+  html+=`<div class="group-title">2 · Client core — SEC JSON endpoints</div>
+    <div class="card" style="padding:0;overflow:hidden"><table style="font-size:12px">
+      <tr><th style="width:34%">purpose</th><th>endpoint</th></tr>
+      ${EDGAR_ENDPOINTS.map(([p,u])=>`<tr><td class="muted">${p}</td><td><code style="font-size:11px;word-break:break-all">${u}</code></td></tr>`).join('')}
+    </table></div>
+    <div class="notebox" style="border-left-color:#f85149;background:#f851490d">⚠ <b>Access rules (hard requirements — SEC blocks on violation).</b> Declare <code>User-Agent: &lt;name&gt; &lt;email&gt;</code> on every request, and stay <b>at or under 10 requests/second</b>. The client core is a shared rate-limited fetcher; every crawl / expansion / XBRL call routes through it.</div>`;
+
+  // C. field spec
+  html+=`<div class="group-title">3 · Field spec — the user-designated field set (424B2)</div>
+    <div class="card" style="padding:0;overflow:hidden"><table style="font-size:12px">
+      <tr><th>field</th><th>definition</th><th>typical anchor</th></tr>
+      ${EDGAR_FIELDSPEC.map(f=>`<tr><td><code style="font-size:11px">${f.field}</code></td><td class="muted">${f.desc}</td><td class="muted">${f.anchor}</td></tr>`).join('')}
+    </table></div>
+    <div class="muted" style="font-size:11.5px;margin:6px 0 14px">Field set is per-project and editable — the scrubber extracts exactly these, nothing more. The <i>anchor</i> column is where each field usually lands in the prose; rule induction (§5) watches it.</div>`;
+
+  // D. local runtime + provider ladder
+  html+=`<div class="group-title">4 · Local runtime + provider ladder</div>
+    <div class="card" style="padding:14px">
+      <div class="muted" style="font-size:12.5px;line-height:1.55">A <b>local ~14B model</b> does the extraction. The provider ladder falls forward only when it must, cheapest first:</div>
+      <ol class="muted" style="font-size:12.5px;line-height:1.6;margin:8px 0 0;padding-left:20px">
+        <li><b>Deterministic rule</b> (§5) — if an induced extractor exists for this (issuer, field), use it. Free, exact, no model call.</li>
+        <li><b>Local 14B</b> — few-shot prompted with exemplars from the store (§5a). Handles the vast majority.</li>
+        <li><b>Remote fallback</b> — only for spans the local model flags low-confidence; logged so they become the next batch to hand-validate.</li>
+      </ol>
+    </div>`;
+
+  // E. how the model "learns" — a/b/c build order (the second design correction)
+  html+=`<div class="group-title">5 · How the model learns your fields — build order</div>
+    <div class="notebox" style="border-left-color:#a371f7;background:#a371f70d">🧠 <b>“The model learns what I want” is not fine-tuning.</b> A 14B local model does not weight-update from ten examples. What actually learns, in the order it is built:</div>
+    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(340px,1fr))">
+      ${learnCard('a','Few-shot exemplar store','var(--green)','built first — works from example #1',
+        'Validated spans (§6) become prompt exemplars keyed by <b>(form, issuer, field)</b>. The local model is prompted with the closest exemplars for the filing in front of it. This is the mechanism that delivers what you asked for — from the very first hand-validated document.')}
+      ${learnCard('b','Rule induction','#e3b341','built second — free + exact thereafter',
+        'When a field lands at the <b>same anchor across N filings from one issuer</b>, promote it to a <b>deterministic extractor</b>. Free and exact from then on; the model demotes to fallback for that (issuer, field). Templated 424B2 issuers converge fast.')}
+      ${learnCard('c','LoRA fine-tune','var(--muted)','backlogged — not built now',
+        'A real weight update needs <b>~500+ labels</b>. Backlogged behind (a) and (b), which already cover the pilot. Listed so the roadmap is honest — this is the piece people mistake for “the model learned from my ten examples.”')}
+    </div>`;
+
+  // F. validation UI — the interactive "validate first N by hand" surface
+  const total=EDGAR_DOCS.length;
+  html+=`<div class="group-title">6 · Validation — hand-check the first N documents</div>
+    <div class="card" style="padding:0;overflow:hidden"><table style="font-size:12px">
+      <tr><th>document</th><th>exemplar key (form, issuer, field)</th><th>extracted span</th><th>review</th></tr>
+      ${EDGAR_DOCS.map((d,i)=>{
+        const st=d.status==='accepted'?'<span class="pos">✓ accepted → exemplar</span>':d.status==='corrected'?'<span class="neg">✎ corrected → exemplar</span>':'<span class="muted">unreviewed</span>';
+        return `<tr>
+          <td><code style="font-size:11px">${d.doc}</code></td>
+          <td class="muted" style="font-size:11px">(424B2, ${d.issuer}, ${d.field})</td>
+          <td>${d.span}</td>
+          <td>${st} &nbsp;<button class="pill" style="cursor:pointer;border:1px solid var(--green);color:var(--green);font-size:11px" onclick="edgarReview(${i},true)">accept</button><button class="pill" style="cursor:pointer;border:1px solid var(--red);color:var(--red);font-size:11px" onclick="edgarReview(${i},false)">correct</button></td>
+        </tr>`;
+      }).join('')}
+    </table></div>
+    <div class="muted" style="font-size:12px;margin:8px 0 14px">Reviewed <b>${reviewed}/${total}</b> · exemplar store holds <b>${accepted}</b> accepted span${accepted===1?'':'s'}. Every accepted/corrected span is keyed <code>(form, issuer, field)</code> and fed straight into §5a. Unattended runs unlock once the eval harness (§7) clears its threshold on a held-out set.</div>`;
+
+  // G. eval harness
+  html+=`<div class="group-title">7 · Eval harness — gate to unattended</div>
+    <div class="card" style="padding:14px">
+      <div class="muted" style="font-size:12.5px;line-height:1.55;margin-bottom:8px">A held-out labeled set scores each field on exact-match / precision / recall. The scrubber only runs unattended once every field clears its threshold; below it, it stays in hand-validation. (Mock numbers — illustrative.)</div>
+      <table style="font-size:12px">
+        <tr><th>field</th><th class="num">exact-match</th><th class="num">precision</th><th class="num">recall</th><th>gate</th></tr>
+        <tr><td><code style="font-size:11px">reference_underlying</code></td><td class="num">0.98</td><td class="num">0.99</td><td class="num">0.98</td><td><span class="pos">pass</span></td></tr>
+        <tr><td><code style="font-size:11px">contingent_coupon</code></td><td class="num">0.95</td><td class="num">0.97</td><td class="num">0.94</td><td><span class="pos">pass</span></td></tr>
+        <tr><td><code style="font-size:11px">barrier_buffer</code></td><td class="num">0.88</td><td class="num">0.91</td><td class="num">0.86</td><td><span class="neg">below — keep validating</span></td></tr>
+      </table>
+    </div>`;
+
+  // H. graduation path + boundary
+  html+=`<div class="group-title">8 · Graduation path</div>
+    <div class="boundarynote">🎓 <b>Graduate upstream, then retire the local extractor.</b> When a field proves out inside a Research project, it moves into <b>Stock-Data-Pipeline</b>’s EDGAR ingest — the pipeline is the only writer (<code>ARCHITECTURE.md</code>) — and the local extractor is switched off. This keeps the scrubber exploratory and prevents it becoming a second permanent ingest path that calcifies like the artifacts in #90 / #91.</div>`;
+
+  v.innerHTML=html;
+}
+
 // ── workspaces / routing ──────────────────────────────────
 const SECTIONS={
   data:  {label:'Data',  icon:'🗄️', desc:'Data integrity — freshness, coverage, quality, gaps',
@@ -2370,6 +2685,10 @@ const SECTIONS={
           tabs:[['screener','Screener',renderScreener],['smartmoney','Smart Money',renderSmartMoney],['discipline','Discipline',renderDiscipline]]},
   macro: {label:'Macro', icon:'🌡️', desc:'VIX regime + yield-curve recession probability — soft-gates the screener defaults',
           tabs:[['regime','Regime',renderMacro]]},
+  research:{label:'Research', icon:'🔬', desc:'Hypothesis projects — a falsifiable prediction, its data + tools, a pre-declared trial count, a verdict',
+          tabs:[['projects','Projects',renderResearch]]},
+  tools:{label:'Tools', icon:'🛠️', desc:'Reusable modules — data-gathering (EDGAR scrubber) + analysis models',
+          tabs:[['gathering','Data Gathering',renderToolsGathering],['models','Analysis Models',renderToolsModels]]},
   education:{label:'Education', icon:'🎓', desc:'Learning the business of trading — metric significance, source overlap, example signals',
           tabs:[['learn','Learn',renderEducation]]},
 };
