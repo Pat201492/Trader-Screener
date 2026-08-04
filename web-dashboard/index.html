@@ -2360,6 +2360,81 @@ async function renderEducation(){
   v.innerHTML=html;
 }
 
+// ── TOOLS ──────────────────────────────────────────────────
+function statusBadge(status){
+  const colors={
+    planned:{bg:'#8b949e1a',txt:'#8b949e',label:'planned'},
+    building:{bg:'#e3b3411a',txt:'#e3b341',label:'building'},
+    working:{bg:'#3fb9501a',txt:'#3fb950',label:'working'},
+    graduated:{bg:'#58a6ff1a',txt:'#58a6ff',label:'graduated'},
+    retired:{bg:'#f851491a',txt:'#f85149',label:'retired'},
+  };
+  const s=colors[status]||colors.planned;
+  return `<span style="background:${s.bg};color:${s.txt};padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600;text-transform:capitalize">${s.label}</span>`;
+}
+
+async function renderToolsGather(){
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading data gathering tools…</div>';
+  try{
+    const manifest=await (DEMO_ON ? Promise.resolve(window.__DEMO_TOOLS_GATHER__()) : fetch('tools-manifest.json').then(r=>r.json()));
+    const gather=manifest.filter(t=>t.kind==='gather');
+    if(!gather.length){
+      v.innerHTML='<div style="padding:30px;text-align:center"><div class="muted">No data gathering tools yet.</div></div>';
+      return;
+    }
+    let html='<div class="cards">';
+    gather.forEach(t=>{
+      const lastRun=t.last_run?new Date(t.last_run).toLocaleDateString():'–';
+      html+=`<div class="card" style="cursor:pointer;transition:border-color .2s" onclick="location.href='${t.doc_link}'">
+        <div class="name">${t.name}</div>
+        <div class="muted" style="font-size:12px;line-height:1.4;margin:6px 0">${t.purpose}</div>
+        <div style="margin:8px 0;display:flex;gap:6px;flex-wrap:wrap">
+          ${statusBadge(t.status)}
+          <span style="font-size:11px;color:var(--muted)">${t.source}</span>
+        </div>
+        <div class="muted" style="font-size:11px">Cadence: ${t.refresh_cadence}</div>
+        <div class="muted" style="font-size:11px">Last run: ${lastRun}</div>
+      </div>`;
+    });
+    html+='</div>';
+    v.innerHTML=html;
+  }catch(e){
+    v.innerHTML=`<div class="err">Failed to load tools manifest: ${e.message}</div>`;
+  }
+}
+
+async function renderToolsModels(){
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading analysis models…</div>';
+  try{
+    const manifest=await (DEMO_ON ? Promise.resolve(window.__DEMO_TOOLS_MODELS__()) : fetch('tools-manifest.json').then(r=>r.json()));
+    const models=manifest.filter(t=>t.kind==='model');
+    if(!models.length){
+      v.innerHTML='<div style="padding:30px;text-align:center"><div class="muted">No analysis models yet.</div></div>';
+      return;
+    }
+    let html='<div class="cards">';
+    models.forEach(t=>{
+      const lastRun=t.last_run?new Date(t.last_run).toLocaleDateString():'–';
+      html+=`<div class="card" style="cursor:pointer;transition:border-color .2s" onclick="location.href='${t.doc_link}'">
+        <div class="name">${t.name}</div>
+        <div class="muted" style="font-size:12px;line-height:1.4;margin:6px 0">${t.purpose}</div>
+        <div style="margin:8px 0;display:flex;gap:6px;flex-wrap:wrap">
+          ${statusBadge(t.status)}
+          <span style="font-size:11px;color:var(--muted)">→ ${t.output_field}</span>
+        </div>
+        <div class="muted" style="font-size:11px">Inputs: ${t.inputs.join(', ')}</div>
+        <div class="muted" style="font-size:11px">Last run: ${lastRun}</div>
+      </div>`;
+    });
+    html+='</div>';
+    v.innerHTML=html;
+  }catch(e){
+    v.innerHTML=`<div class="err">Failed to load tools manifest: ${e.message}</div>`;
+  }
+}
+
 // ── workspaces / routing ──────────────────────────────────
 const SECTIONS={
   data:  {label:'Data',  icon:'🗄️', desc:'Data integrity — freshness, coverage, quality, gaps',
@@ -2372,6 +2447,8 @@ const SECTIONS={
           tabs:[['regime','Regime',renderMacro]]},
   education:{label:'Education', icon:'🎓', desc:'Learning the business of trading — metric significance, source overlap, example signals',
           tabs:[['learn','Learn',renderEducation]]},
+  tools: {label:'Tools', icon:'🧰', desc:'Modules that gather data or analyze it',
+          tabs:[['gather','Data Gathering',renderToolsGather],['models','Analysis Models',renderToolsModels]]},
 };
 let SECTION=null;
 function renderNav(){
