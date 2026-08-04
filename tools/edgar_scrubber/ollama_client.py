@@ -7,7 +7,7 @@ or Claude escalation (#104) via base_url swap.
 
 import os
 import requests
-from typing import Optional
+from typing import Optional, List, Dict
 from dataclasses import dataclass
 
 
@@ -61,12 +61,12 @@ class OllamaClient:
 
     def chat_completion(
         self,
-        messages: list[dict],
+        messages: List[Dict],
         model: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
-    ) -> dict:
+    ) -> Dict:
         """
         POST to /v1/chat/completions (OpenAI-compatible).
 
@@ -108,9 +108,14 @@ class OllamaClient:
 def test_connection(config: OllamaConfig) -> bool:
     """Check if Ollama is reachable."""
     try:
-        base_url = config.base_url.rstrip('/v1') if config.base_url.endswith('/v1') else config.base_url.rstrip('/')
+        # Normalize base_url: ensure it ends with /v1 for the API path.
+        # If already ends with /v1, use it; otherwise append /v1.
+        if config.base_url.endswith('/v1'):
+            api_base = config.base_url.rstrip('/')
+        else:
+            api_base = config.base_url.rstrip('/') + '/v1'
         response = requests.get(
-            f"{base_url}/api/tags",
+            f"{api_base}/api/tags",
             timeout=2,
         )
         return response.status_code == 200

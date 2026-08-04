@@ -2,7 +2,7 @@
 
 from .hardware_probe import HardwareProfile, get_nvidia_vram, select_profile
 from .ollama_client import OllamaClient, OllamaConfig
-from .config import ScubberConfig
+from .config import ScrubberConfig
 
 __all__ = [
     "HardwareProfile",
@@ -10,5 +10,5 @@ __all__ = [
     "select_profile",
     "OllamaClient",
     "OllamaConfig",
-    "ScubberConfig",
+    "ScrubberConfig",
 ]
