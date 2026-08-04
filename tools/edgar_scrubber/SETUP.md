@@ -140,15 +140,7 @@ export OLLAMA_NUM_PARALLEL=8
 
 Configure Ollama at runtime. Store these in your shell profile or `.env` file.
 
-**Note:** `OLLAMA_NUM_CTX` is read from the Modelfile (`PARAMETER num_ctx 8192`), not from env vars. Set `OLLAMA_NUM_PARALLEL` to match batch size; env vars do not override Modelfile.
-
-### Bash (Linux / Mac)
-
-```bash
-export OLLAMA_NUM_PARALLEL=8           # From probe result
-export OLLAMA_BASE_URL=http://localhost:11434/v1
-export OLLAMA_MODEL=qwen2.5:7b-instruct-q4_K_M
-```
+**Note:** Modelfile is authoritative—`PARAMETER num_ctx 8192` sets context length. Env var `OLLAMA_NUM_CTX` is ignored; use `OLLAMA_NUM_PARALLEL` to match batch size.
 
 ### PowerShell (Windows)
 
@@ -159,8 +151,6 @@ $env:OLLAMA_MODEL = "qwen2.5:7b-instruct-q4_K_M"
 ```
 
 Or create `.env` and source it in your scrubber script.
-
-**Context length:** Set in `Modelfile.qwen2.5-7b` via `PARAMETER num_ctx 8192`. The env var `OLLAMA_NUM_CTX` is not read by Ollama; Modelfile is authoritative.
 
 ## Step 5: Verify Extraction & Throughput
 
@@ -195,7 +185,9 @@ Expected on RTX 4070 Ti at batch 8:
 
 If throughput is slower:
 1. Check if VSCode/browser is consuming memory → `tasklist` / Task Manager.
-2. Verify batch size: **Windows:** `tasklist /fi "imagename eq ollama.exe"` **Linux/Mac:** `ps aux | grep ollama` (should show `OLLAMA_NUM_PARALLEL=8`).
+2. Verify batch size:
+   - **Windows:** `tasklist /fi "imagename eq ollama.exe"` (should show `ollama.exe` with batch 8)
+   - **Linux/Mac:** `ps aux | grep ollama` (should show `OLLAMA_NUM_PARALLEL=8`)
 3. Run `hardware_probe.py` again to confirm profile didn't downgrade.
 
 ## Expected VRAM Resident (RTX 4070 Ti, batch 8, 8k ctx, q8_0)
