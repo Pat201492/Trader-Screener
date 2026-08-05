@@ -148,6 +148,27 @@ def test_span_resolution_failure_escalates():
 
 
 # --------------------------------------------------------------------------- #
+def test_span_beats_cross_check_when_both_fail():
+    section("Gate priority: span (2nd) outranks cross_check (3rd) when both fail (#104)")
+    AGG_FIELD = NOTE_SPEC.field("aggregate_principal")
+    # aggregate_principal (field_specs/424b2_structured_note.json:44) carries an
+    # external_equals cross-check against ex107. Drive evaluate_gate() directly
+    # (extract()'s rung-2 shortcut would otherwise short-circuit whenever ex107
+    # already holds this field, masking the scenario): value in bounds (min: 0),
+    # no locatable span, and a value that disagrees with EX-107 beyond
+    # tolerance_pct. Priority order (bounds, span, cross_check, ...) says the
+    # gate reason must be "span", not "cross_check".
+    gate = el.evaluate_gate(AGG_FIELD, 2_500_000, None, ex107={"aggregate_principal": 2_000_000},
+                             spec=NOTE_SPEC, model_confidence=0.9)
+    by_name = {s.name: s.passed for s in gate.signals}
+    check("bounds passed", by_name["bounds"] is True)
+    check("span failed", by_name["span"] is False)
+    check("cross_check failed", by_name["cross_check"] is False)
+    check("gate escalates", gate.escalate is True)
+    check("gate reason is span, not cross_check", gate.reason == "span")
+
+
+# --------------------------------------------------------------------------- #
 def test_self_consistency_disagreement_escalates():
     section("Self-consistency gate signal: two sampled passes disagree -> escalate")
     local = FakeChatClient([
@@ -297,6 +318,7 @@ def main():
     test_local_confident_no_escalation()
     test_out_of_bounds_escalates_to_claude()
     test_span_resolution_failure_escalates()
+    test_span_beats_cross_check_when_both_fail()
     test_self_consistency_disagreement_escalates()
     test_local_only_mode_flags_instead_of_failing()
     test_malformed_output_retry_measured()

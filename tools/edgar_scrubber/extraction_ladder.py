@@ -297,11 +297,12 @@ class GateResult:
 def evaluate_gate(field_def, value, span, *, ex107=None, spec=None, samples=None,
                    model_confidence=None, confidence_floor=0.35):
     """Gate on checkable signals, in the priority #104 specifies: field-spec
-    bound/cross-check violations need no judgment call and come first; then
-    span resolution; then self-consistency across sampled passes; self-reported
-    model confidence is weighted LAST -- it decides `reason` only when nothing
-    else already did, though a confidence far below floor can still be the
-    sole trigger for `escalate` when everything else checks out.
+    bound violations need no judgment call and come first; then span
+    resolution; then cross-check against EX-107; then self-consistency
+    across sampled passes; self-reported model confidence is weighted LAST
+    -- it decides `reason` only when nothing else already did, though a
+    confidence far below floor can still be the sole trigger for `escalate`
+    when everything else checks out.
     """
     signals = []
 
@@ -309,10 +310,11 @@ def evaluate_gate(field_def, value, span, *, ex107=None, spec=None, samples=None
     bounds_bad = [f for f in flags if f.code != "cross_check_failed"]
     cross_bad = [f for f in flags if f.code == "cross_check_failed"]
     signals.append(GateSignal("bounds", not bounds_bad, "; ".join(f.message for f in bounds_bad)))
-    signals.append(GateSignal("cross_check", not cross_bad, "; ".join(f.message for f in cross_bad)))
 
     span_ok = span is not None
     signals.append(GateSignal("span", span_ok, "" if span_ok else "no locatable source span"))
+
+    signals.append(GateSignal("cross_check", not cross_bad, "; ".join(f.message for f in cross_bad)))
 
     if samples and len(samples) > 1:
         consistent = all(s == samples[0] for s in samples[1:])

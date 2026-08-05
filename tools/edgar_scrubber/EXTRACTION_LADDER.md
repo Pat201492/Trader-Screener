@@ -64,8 +64,8 @@ alone is close to worthless. `evaluate_gate()` checks, in priority order:
 
 1. **Field-spec bound violations** (#102) — `estimated_value_per_1000 = 4200` is
    definitionally wrong; no judgment needed.
-2. **Cross-check disagreement** — the prose value vs the EX-107 XBRL value.
-3. **Span resolution failure** — no locatable source span.
+2. **Span resolution failure** — no locatable source span.
+3. **Cross-check disagreement** — the prose value vs the EX-107 XBRL value.
 4. **Self-consistency** — two sampled passes (`self_consistency_samples=2`)
    disagree.
 5. **Model-reported confidence** — weighted **last**: it only decides `reason`
