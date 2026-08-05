@@ -59,6 +59,18 @@ class ScrubberConfig:
         os.environ.setdefault("OLLAMA_BASE_URL", "http://localhost:11434/v1")
         os.environ.setdefault("OLLAMA_MODEL", self.hardware_profile.model)
 
+        # KV-cache quantization is a SERVER setting, not a Modelfile PARAMETER.
+        # `PARAMETER quantize q8_0` is silently ignored by Ollama (`quantize` is a
+        # flag on `ollama create`, and it quantizes weights, not the KV cache), so
+        # without these two the server runs fp16 KV at 56 KB/token while the probe
+        # budgets 28 KB/token -- a 2x error in the headroom that sizes batch_size.
+        # q8_0 KV requires flash attention; setting the type without it is a no-op.
+        if self.hardware_profile.kv_cache_quantization != "f16":
+            os.environ.setdefault("OLLAMA_FLASH_ATTENTION", "1")
+            os.environ.setdefault(
+                "OLLAMA_KV_CACHE_TYPE", self.hardware_profile.kv_cache_quantization
+            )
+
         self.ollama_config = OllamaConfig.from_env(asdict(self.hardware_profile))
 
     def report(self) -> str:
@@ -75,6 +87,8 @@ class ScrubberConfig:
             f"  OLLAMA_MODEL={os.getenv('OLLAMA_MODEL')}",
             f"  OLLAMA_NUM_PARALLEL={os.getenv('OLLAMA_NUM_PARALLEL')}",
             f"  OLLAMA_NUM_CTX={os.getenv('OLLAMA_NUM_CTX')}",
+            f"  OLLAMA_FLASH_ATTENTION={os.getenv('OLLAMA_FLASH_ATTENTION')}",
+            f"  OLLAMA_KV_CACHE_TYPE={os.getenv('OLLAMA_KV_CACHE_TYPE')}",
             "",
         ]
         return "\n".join(lines)

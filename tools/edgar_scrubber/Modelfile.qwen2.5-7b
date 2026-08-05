@@ -4,10 +4,18 @@
 
 FROM qwen2.5:7b-instruct-q4_K_M
 
-# KV-cache quantization: q8_0 halves KV footprint with negligible quality loss
-# Spend the freed VRAM on batch size, not context length
-# (decode-bound after token reduction, scales with batch not prefill)
-PARAMETER quantize q8_0
+# KV-cache quantization is NOT settable here. `quantize` is not a valid Modelfile
+# PARAMETER (Ollama supports mirostat*, num_ctx, repeat_last_n, repeat_penalty,
+# temperature, seed, stop, num_predict, top_k, top_p, min_p) and `ollama create
+# --quantize` quantizes weights, not the KV cache. An invalid PARAMETER is
+# silently ignored, which is why this looked configured but was not.
+#
+# q8_0 KV cache is a server-side setting, exported by config._setup_environment():
+#   OLLAMA_FLASH_ATTENTION=1     (required -- q8_0 KV needs flash attention)
+#   OLLAMA_KV_CACHE_TYPE=q8_0
+#
+# Spend the freed VRAM on batch size, not context length: after the #111 token
+# reductions the run is decode-bound, and decode scales with batch, prefill does not.
 
 # Context window: 8192 tokens (8k)
 # 28 layers × 4 KV heads × 128 dim × 2 (K+V) × 1 byte (q8_0) ≈ 28 KB/token
@@ -24,8 +32,10 @@ PARAMETER num_ctx 8192
 # Single extraction should not exceed 2048 tokens
 PARAMETER num_predict 2048
 
-# Temperature: deterministic for extraction (no sampling noise)
-PARAMETER temperature 0.3
+# Temperature: 0 for extraction. 0.3 is low but still samples, so two passes over
+# the same document can disagree -- which would make #104's self-consistency check
+# fire on model noise rather than on genuine ambiguity in the filing.
+PARAMETER temperature 0
 
 # Top-p: disable for deterministic output
 PARAMETER top_p 1.0
