@@ -2375,6 +2375,27 @@ function statusBadge(status){
   const s=colors[status]||colors.planned;
   return `<span style="background:${s.bg};color:${s.txt};padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600;text-transform:capitalize">${s.label}</span>`;
 }
+// Ownership boundary (issue #109). An exploratory gather tool writes only to its
+// LOCAL store until a field graduates upstream into the pipeline. graduatedTo
+// (camel per the #98 schema; snake tolerated) null = still local.
+function ownershipBadge(t){
+  const grad=t.graduatedTo||t.graduated_to;
+  if(grad) return `<span title="Graduated upstream into the pipeline — local extractor retired (#109)" style="background:#58a6ff1a;color:#58a6ff;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600">graduated → ${grad}</span>`;
+  return `<span title="Exploratory, project-local — writes only to its local tool store, never the pipeline (#109)" style="background:#8b949e1a;color:#8b949e;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600">local</span>`;
+}
+// Age since last use, with a drift flag. A local tool sitting unused for a long
+// time is drift, not exploration (#109) — surface it rather than let it be
+// inferred. Graduated tools are exempt (the pipeline drives them now).
+const DRIFT_DAYS=90;
+function usageAge(t){
+  if(!t.last_run) return '<span class="muted">never used</span>';
+  const days=(Date.now()-new Date(t.last_run).getTime())/8.64e7;
+  const lab=days<1?'today':days<2?'yesterday':`${days.toFixed(0)}d ago`;
+  const drift=!(t.graduatedTo||t.graduated_to) && days>=DRIFT_DAYS;
+  return drift
+    ? `<span title="Local for ${days.toFixed(0)} days with no recent use — drift, not exploration (#109)" style="color:#f85149;font-weight:600">⚠ used ${lab} — drift</span>`
+    : `<span class="muted">used ${lab}</span>`;
+}
 
 async function renderToolsGather(){
   const v=document.getElementById('view');
@@ -2394,10 +2415,12 @@ async function renderToolsGather(){
         <div class="muted" style="font-size:12px;line-height:1.4;margin:6px 0">${t.purpose}</div>
         <div style="margin:8px 0;display:flex;gap:6px;flex-wrap:wrap">
           ${statusBadge(t.status)}
+          ${ownershipBadge(t)}
           <span style="font-size:11px;color:var(--muted)">${t.source}</span>
         </div>
         <div class="muted" style="font-size:11px">Cadence: ${t.refresh_cadence}</div>
-        <div class="muted" style="font-size:11px">Last run: ${lastRun}</div>
+        ${t.output_path?`<div class="muted" style="font-size:11px">Output: ${t.output_path}</div>`:''}
+        <div style="font-size:11px">Last run: <span class="muted">${lastRun}</span> · ${usageAge(t)}</div>
       </div>`;
     });
     html+='</div>';

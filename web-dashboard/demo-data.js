@@ -141,12 +141,17 @@
       {
         id: 'edgar-scrubber',
         kind: 'gather',
-        name: 'EDGAR Scrubber',
-        purpose: 'Pulls insider trade disclosures from SEC Form 4 filings',
+        name: 'EDGAR Scrubber (424B2 structured notes)',
+        // Exploratory, project-local: writes only to its local tool store, never
+        // the pipeline (#109). graduatedTo null = still local. last_run is old on
+        // purpose so the drift flag (local + unused) shows in demo mode.
+        purpose: 'Extracts 424B2 structured-note terms into a LOCAL tool store while a Research project explores them; graduates upstream (and retires locally) once a field proves out.',
         status: 'working',
         source: 'SEC EDGAR',
-        refresh_cadence: 'daily',
-        last_run: '2026-08-04T09:30:00Z',
+        refresh_cadence: 'on-demand (human-supervised)',
+        last_run: '2026-04-20T09:30:00Z',
+        output_path: '~/.edgar-scrubber/store/extractions.sqlite (local)',
+        graduatedTo: null,
         doc_link: '#'
       },
       {

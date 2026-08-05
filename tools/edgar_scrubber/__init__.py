@@ -5,6 +5,13 @@ from .edgar_client import EdgarClient, EdgarError, EdgarConfigError, EdgarHTTPEr
 from .field_spec import load_specs
 from .hardware_probe import HardwareProfile, get_nvidia_vram, select_profile
 from .ollama_client import OllamaClient, OllamaConfig
+from .output_store import (
+    DocumentExtraction,
+    FieldValue,
+    GraduationError,
+    OutputStore,
+    OwnershipError,
+)
 from .schema_registry import REGISTRY
 
 __all__ = [
@@ -24,4 +31,10 @@ __all__ = [
     # field specs (#102)
     "load_specs",
     "REGISTRY",
+    # local output store + ownership boundary (#109)
+    "OutputStore",
+    "DocumentExtraction",
+    "FieldValue",
+    "OwnershipError",
+    "GraduationError",
 ]
