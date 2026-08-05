@@ -249,6 +249,23 @@ class FieldSpec:
         flags.extend(self._check_cross(record, ex107))
         return flags
 
+    def check_value(self, name, value, ex107=None):
+        """Bounds/type/enum flags for ONE extracted value in isolation --
+        #104's confidence-gate signal, usable before a full record exists (the
+        ladder gates a field right after extracting it, not after the whole
+        document is assembled). A cross-check that needs a second in-record
+        field (date_after, lte, ...) can't fire here -- that needs
+        validate_record. `external_equals` against `ex107` only needs this one
+        field, so it DOES fire here: that is the gate's cross-check signal.
+        """
+        f = self.field(name)
+        if f is None:
+            return [Flag(name, "unknown_field", "warn",
+                         f"field {name!r} is not defined in spec {self.spec_id}")]
+        flags = list(self._check_value(f, value))
+        flags.extend(self._check_cross({name: value}, ex107))
+        return flags
+
     def _check_value(self, f, val):
         flags = []
 
