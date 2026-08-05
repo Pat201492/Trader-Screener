@@ -17,8 +17,8 @@ window -> resolve an accession -> fetch its primary doc, all under the rate cap,
 second run zero network) is gated behind EDGAR_LIVE=1 + EDGAR_USER_AGENT so this
 suite stays green offline. Set both to run it against the real SEC.
 
-Run:  python edgar-scrubber/test_edgar_client.py
-      EDGAR_LIVE=1 EDGAR_USER_AGENT="You you@example.com" python edgar-scrubber/test_edgar_client.py
+Run:  python tools/edgar_scrubber/test_edgar_client.py
+      EDGAR_LIVE=1 EDGAR_USER_AGENT="You you@example.com" python tools/edgar_scrubber/test_edgar_client.py
 """
 import json
 import os

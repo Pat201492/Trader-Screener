@@ -1,4 +1,4 @@
-# edgar-scrubber — EDGAR client core (issue #99)
+# edgar_scrubber — EDGAR client core (issue #99)
 
 The foundation the whole EDGAR scrubber sits on (part of EPIC #95 "Research + Tools").
 Every other scrubber issue — #100 (corpus counts), #102 (field spec), #106 (exemplars),
@@ -67,7 +67,7 @@ window is **100 pages of 100**, not 1000; `iter_hits` never asks past `from=1000
 ## Test
 
 ```
-python edgar-scrubber/test_edgar_client.py
+python tools/edgar_scrubber/test_edgar_client.py
 ```
 
 Stdlib only, exit 0 = pass (same convention as `lookahead-gate/ab_truncation_test.py`). Every #99
@@ -81,7 +81,7 @@ The live integration test #99 also names — search 424B2 over a one-week window
 stays green offline:
 
 ```
-EDGAR_LIVE=1 EDGAR_USER_AGENT="Your Name you@example.com" python edgar-scrubber/test_edgar_client.py
+EDGAR_LIVE=1 EDGAR_USER_AGENT="Your Name you@example.com" python tools/edgar_scrubber/test_edgar_client.py
 ```
 
 ## Porting into the real pipeline

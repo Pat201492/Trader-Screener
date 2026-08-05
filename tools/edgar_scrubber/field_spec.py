@@ -15,7 +15,7 @@ that:
   * maps the short wire keys #104 uses on the model boundary back to canonical
     names, and guards that a wire key never reaches a stored record.
 
-stdlib only. Run the self-check:  python tools/edgar-scrubber/field_spec.py
+stdlib only. Run the self-check:  python tools/edgar_scrubber/field_spec.py
 """
 
 import json
