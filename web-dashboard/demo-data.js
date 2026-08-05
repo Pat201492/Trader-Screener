@@ -136,6 +136,60 @@
     };
   }
 
+  function toolsGather() {
+    return [
+      {
+        id: 'edgar-scrubber',
+        kind: 'gather',
+        name: 'EDGAR Scrubber',
+        purpose: 'Pulls insider trade disclosures from SEC Form 4 filings',
+        status: 'working',
+        source: 'SEC EDGAR',
+        refresh_cadence: 'daily',
+        last_run: '2026-08-04T09:30:00Z',
+        doc_link: '#'
+      },
+      {
+        id: 'fred-ingest',
+        kind: 'gather',
+        name: 'FRED Data Fetcher',
+        purpose: 'Collects macroeconomic data from Federal Reserve',
+        status: 'working',
+        source: 'FRED API',
+        refresh_cadence: 'daily',
+        last_run: '2026-08-04T08:00:00Z',
+        doc_link: '#'
+      }
+    ];
+  }
+
+  function toolsModels() {
+    return [
+      {
+        id: 'magic-formula',
+        kind: 'model',
+        name: 'Magic Formula Rank',
+        purpose: 'Greenblatt composite: rank(ROIC) + rank(EBIT/EV)',
+        status: 'working',
+        inputs: ['fundamentals', 'valuation'],
+        output_field: 'magic_rank',
+        last_run: '2026-08-04T09:30:00Z',
+        doc_link: '#'
+      },
+      {
+        id: 'smart-money-score',
+        kind: 'model',
+        name: 'Smart Money Score',
+        purpose: 'Congress + insider + news sentiment composite',
+        status: 'building',
+        inputs: ['congress_trades', 'insider_trades', 'news_sentiment'],
+        output_field: 'smart_money_score',
+        last_run: '2026-08-04T09:30:00Z',
+        doc_link: '#'
+      }
+    ];
+  }
+
   // Route a jget() path to a synthetic response. Unknown paths → {} (renders as
   // empty/– rather than throwing).
   window.__DEMO__ = function demoGet(path) {
@@ -152,4 +206,7 @@
     if (path.match(/^\/api\/commodities\//)) return {};
     return {};
   };
+
+  window.__DEMO_TOOLS_GATHER__ = toolsGather;
+  window.__DEMO_TOOLS_MODELS__ = toolsModels;
 })();

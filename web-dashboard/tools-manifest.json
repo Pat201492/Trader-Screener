@@ -1,0 +1,24 @@
+[
+  {
+    "id": "data-gathering-example",
+    "kind": "gather",
+    "name": "Example Data Gatherer",
+    "purpose": "Pulls raw data from external source",
+    "status": "working",
+    "source": "demo",
+    "refresh_cadence": "daily",
+    "last_run": "2026-08-04T09:30:00Z",
+    "doc_link": "#"
+  },
+  {
+    "id": "analysis-model-example",
+    "kind": "model",
+    "name": "Example Analysis Model",
+    "purpose": "Consumes data and produces a classification",
+    "status": "working",
+    "inputs": ["data"],
+    "output_field": "score",
+    "last_run": "2026-08-04T09:30:00Z",
+    "doc_link": "#"
+  }
+]
