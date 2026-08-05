@@ -387,6 +387,8 @@ class EdgarClient:
         self._backoff_cap = backoff_cap
         self._sleep = sleep
         self.network_requests = 0  # transport hits (retries included); cache hits don't count
+        self.cache_hits = 0        # get_bytes calls served without touching the network
+        self.cache_misses = 0      # get_bytes calls that had to fetch (1 per URL, retries excluded)
 
     # -- headers -----------------------------------------------------------
     def _headers(self):
@@ -406,7 +408,9 @@ class EdgarClient:
         """
         cached = self.cache.get(url)
         if cached is not None:
+            self.cache_hits += 1
             return cached
+        self.cache_misses += 1
         body = self._fetch(url)
         self.cache.put(url, body)
         return body

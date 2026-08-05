@@ -17,3 +17,8 @@ node_modules/
 # OS
 .DS_Store
 Thumbs.db
+
+# EDGAR scrubber runtime artifacts (issue #99/#100) — content-addressed HTTP
+# cache and per-query crawl state, both regenerable from a re-run
+.edgar-cache/
+tools/edgar_scrubber/crawl_state/

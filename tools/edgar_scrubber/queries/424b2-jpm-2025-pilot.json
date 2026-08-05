@@ -1,0 +1,9 @@
+{
+  "id": "424b2-jpm-2025-pilot",
+  "q": "\"contingent coupon\"",
+  "forms": ["424B2"],
+  "startdt": "2025-01-01",
+  "enddt": "2025-12-31",
+  "ciks": ["0000019617"],
+  "excludeCiks": []
+}
