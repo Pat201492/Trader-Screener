@@ -1,0 +1,53 @@
+# Qwen2.5-7B-Instruct with KV-cache quantization
+# Primary model for EDGAR text extraction
+# Fits RTX 4070 Ti (12GB) at batch 8, 8k context with q8_0 quantization
+
+FROM qwen2.5:7b-instruct-q4_K_M
+
+# KV-cache quantization is NOT settable here. `quantize` is not a valid Modelfile
+# PARAMETER (Ollama supports mirostat*, num_ctx, repeat_last_n, repeat_penalty,
+# temperature, seed, stop, num_predict, top_k, top_p, min_p) and `ollama create
+# --quantize` quantizes weights, not the KV cache. An invalid PARAMETER is
+# silently ignored, which is why this looked configured but was not.
+#
+# q8_0 KV cache is a server-side setting, exported by config._setup_environment():
+#   OLLAMA_FLASH_ATTENTION=1     (required -- q8_0 KV needs flash attention)
+#   OLLAMA_KV_CACHE_TYPE=q8_0
+#
+# Spend the freed VRAM on batch size, not context length: after the #111 token
+# reductions the run is decode-bound, and decode scales with batch, prefill does not.
+
+# Context window: 8192 tokens (8k)
+# 28 layers × 4 KV heads × 128 dim × 2 (K+V) × 1 byte (q8_0) ≈ 28 KB/token
+# 8192 tokens × 28 KB/token ≈ 228 MB per parallel request
+# At batch 8: ~1.8GB KV cache + ~4.7GB weights = ~6.5GB usable
+PARAMETER num_ctx 8192
+
+# Parallel requests: batch size
+# Set via OLLAMA_NUM_PARALLEL env var at runtime
+# Probe recommends 8 for RTX 4070 Ti (full batch), 4 (reduced), or 2 (tight memory)
+# PARAMETER num_parallel 8  # set via env var instead
+
+# Max generation tokens: prevent runaway completions
+# Single extraction should not exceed 2048 tokens
+PARAMETER num_predict 2048
+
+# Temperature: 0 for extraction. 0.3 is low but still samples, so two passes over
+# the same document can disagree -- which would make #104's self-consistency check
+# fire on model noise rather than on genuine ambiguity in the filing.
+PARAMETER temperature 0
+
+# Top-p: disable for deterministic output
+PARAMETER top_p 1.0
+
+# System prompt tailored for EDGAR document extraction
+SYSTEM """You are an expert document analyst specializing in SEC EDGAR filings. Extract structured information from the text provided.
+
+Key requirements:
+- Be precise and extract only stated facts.
+- Use clean, structured output.
+- Flag ambiguous or missing data clearly.
+- Preserve exact numbers and dates from the document.
+- Do not invent or infer information not explicitly present.
+
+Output format: JSON for structured extraction, plain text for summaries."""
