@@ -1,0 +1,31 @@
+[
+  {
+    "id": "congress-buy-clusters",
+    "title": "Congress buy-clusters precede 90-day outperformance",
+    "hypothesis": "A cluster of congressional purchases in a stock over the trailing 90 days predicts that stock beating its sector-median return over the next 90 days.",
+    "falsifier": "If the top-decile congress-buy basket fails to beat the sector-median forward 90-day return by at least 2 percentage points out-of-sample — after the deflation correction for the declared trial count — the hypothesis is refuted.",
+    "tools": [
+      { "id": "smart-money-score", "label": "Smart Money Score" },
+      { "id": "edgar-scrubber", "label": "EDGAR Scrubber" }
+    ],
+    "trialCount": 12,
+    "lookahead": {
+      "status": "passed",
+      "note": "STOCK Act filings lagged to their disclosure date (~45d), not the trade date. A-vs-B truncation test in lookahead-gate/ passed: no future filing date leaks into any forward 90-day window."
+    },
+    "status": "refuted",
+    "evidence": "Out-of-sample the top-decile congress-buy basket returned +0.4% vs the sector median over 90 days across all 12 declared trials. The raw in-sample signal (+3.1%) did not survive the deflation correction or the out-of-sample split.",
+    "verdict": "Refuted. The edge is gone by the time a purchase is public — the ~45-day STOCK Act filing lag means the move is already priced. Written up in full precisely because it was killed: a refuted hypothesis with a clean falsifier is worth more than a supported one with a fuzzy bar."
+  },
+  {
+    "id": "uoa-direction",
+    "title": "Unusual call-side options activity predicts a 5-day move",
+    "hypothesis": "Unusual call-side options activity (UOA) precedes a positive 5-day price move in the underlying.",
+    "tools": [
+      { "id": "smart-money-score", "label": "Smart Money Score" }
+    ],
+    "lookahead": { "status": "na", "note": "Intraday options-flow window not yet wired into the lookahead-gate/ truncation harness — posture undeclared until it is." },
+    "status": "proposed",
+    "verdict": ""
+  }
+]

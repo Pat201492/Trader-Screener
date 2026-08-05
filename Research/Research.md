@@ -4,6 +4,49 @@
 
 ---
 
+## Dashboard section: Research → Projects (issue #97)
+
+`ARCHITECTURE.md` names Research a co-equal pillar; this is its first app surface. The `research` workspace appears on the dashboard home grid (`web-dashboard/index.html`, `SECTIONS.research`) with a single **Projects** tab rendered by `renderResearchProjects()`.
+
+**A project is a hypothesis, not a folder.** Each card is one *falsifiable claim* and refuses to hide the fields that make it falsifiable:
+
+| Field | Meaning |
+|---|---|
+| **Hypothesis** | One sentence, stated as a prediction. |
+| **Falsifier** | The observation that would kill it. A project with no falsifier is not a project. |
+| **Tools** | Which Data Gathering / Analysis Model modules feed it — chips link into the `tools` workspace. |
+| **Trial count** | How many variants will be tested, **declared before the run** — the same pre-commitment the screener's promotion gate enforces (issue #47). Declared after the fact, the deflation correction is meaningless. |
+| **Look-ahead posture** | Passes the `lookahead-gate/` A-vs-B truncation test (issue #42), or explicitly marked **n/a with a reason**. |
+| **Status** | `proposed` / `running` / `supported` / `refuted` / `inconclusive`. |
+| **Verdict** | Populated at the end — including the refuted and inconclusive ones. Especially those. |
+
+A project missing its **falsifier** or **trial count** renders a loud ⚠ warning badge (and a banner in the detail view) rather than silently looking complete. The detail view surfaces trial count and look-ahead posture as prominent cards, not footnotes.
+
+### Registry — `web-dashboard/research-projects.json`
+
+Projects are **runtime-loaded** from `research-projects.json`, the same rule as the tools manifest — no catalog literals in `index.html`. Demo mode serves an in-memory mirror via `window.__DEMO_RESEARCH__` (`demo-data.js`) and ships one sample project end-to-end (`congress-buy-clusters`, refuted with a full verdict) plus one deliberately incomplete project (`uoa-direction`) to exercise the warning path.
+
+Registry entry shape:
+
+```json
+{
+  "id": "congress-buy-clusters",
+  "title": "Congress buy-clusters precede 90-day outperformance",
+  "hypothesis": "…one-sentence prediction…",
+  "falsifier": "…the observation that refutes it…",
+  "tools": [{ "id": "smart-money-score", "label": "Smart Money Score" }],
+  "trialCount": 12,
+  "lookahead": { "status": "passed", "note": "…truncation-test note…" },
+  "status": "refuted",
+  "evidence": "…optional supporting detail…",
+  "verdict": "…written up at the end, refuted ones included…"
+}
+```
+
+`lookahead.status` is one of `passed` / `failed` / `na` (an `na` posture should carry a `note` reason); a missing `lookahead` reads as **undeclared** (red). Add a project by appending an entry to `research-projects.json` (and the demo mirror in `demo-data.js` if it should show in demo mode).
+
+---
+
 ## What it is
 A view that, for any instrument (or the whole universe), surfaces the freshest research and data we have on it — fundamentals, valuation, news/sentiment, macro context, and smart-money (congress/insider) activity — all from the **same datastore** the Project screener and old app already populate.
 

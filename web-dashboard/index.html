@@ -2438,6 +2438,149 @@ async function renderToolsModels(){
   }
 }
 
+// ── RESEARCH ────────────────────────────────────────────────
+// A research project is a falsifiable hypothesis, not a folder. The card refuses
+// to hide the fields that make it falsifiable: a project missing its falsifier or
+// its pre-declared trial count renders a LOUD warning badge (issue #97) rather than
+// silently looking complete. Same pre-commitment discipline the screener's promotion
+// gate enforces (issue #47: out-of-sample + deflation + trial count declared BEFORE
+// the run) — the trial count committed after the fact makes the deflation correction
+// meaningless. Registry is runtime-loaded (research-projects.json), same rule as the
+// tools manifest — no catalog literals in index.html.
+const RESEARCH_STATUSES={
+  proposed:    {bg:'#8b949e1a',txt:'#8b949e',label:'proposed'},
+  running:     {bg:'#e3b3411a',txt:'#e3b341',label:'running'},
+  supported:   {bg:'#3fb9501a',txt:'#3fb950',label:'supported'},
+  refuted:     {bg:'#f851491a',txt:'#f85149',label:'refuted'},
+  inconclusive:{bg:'#58a6ff1a',txt:'#58a6ff',label:'inconclusive'},
+};
+function researchStatusBadge(status){
+  const s=RESEARCH_STATUSES[status]||RESEARCH_STATUSES.proposed;
+  return `<span style="background:${s.bg};color:${s.txt};padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:capitalize">${s.label}</span>`;
+}
+// loud warning badge for a missing falsifiability field — "a project with no
+// falsifier is not a project" (issue #97). Red on purpose: silence would let an
+// incomplete project read as complete.
+function researchWarnBadge(text){
+  return `<span title="${text}" style="background:#f851491a;color:#f85149;border:1px solid #f8514955;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600">⚠ ${text}</span>`;
+}
+// the two fields that make a project falsifiable — missing either = not yet a project
+function researchMissing(p){
+  const m=[];
+  if(!p.falsifier) m.push('no falsifier');
+  if(p.trialCount==null) m.push('no trial count');
+  return m;
+}
+// look-ahead posture: passes the lookahead-gate/ A-vs-B truncation test (issue #42),
+// or explicitly n/a with a reason. Undeclared reads red.
+function lookaheadState(la){
+  if(!la||!la.status) return {text:'undeclared',color:'#f85149'};
+  const m={passed:{text:'passed',color:'var(--green)'},failed:{text:'FAILED',color:'var(--red)'},na:{text:'n/a',color:'var(--muted)'}};
+  return m[la.status]||{text:la.status,color:'var(--muted)'};
+}
+let researchProjects=[];
+async function loadResearchProjects(){
+  researchProjects=await (DEMO_ON ? Promise.resolve(window.__DEMO_RESEARCH__()) : fetch('research-projects.json').then(r=>r.json()));
+  return researchProjects;
+}
+async function renderResearchProjects(){
+  TAB='projects';
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading research projects…</div>';
+  try{
+    const projects=await loadResearchProjects();
+    let html=`<div class="lagnote"><b>A project is a hypothesis, not a folder.</b> Each card is one falsifiable claim: a prediction, the observation that would kill it (falsifier), the trial count declared <b>before</b> the run, and a verdict at the end — including the refuted and inconclusive ones. A project missing its falsifier or trial count is flagged, not hidden (issue #97).</div>`;
+    if(!projects.length){
+      v.innerHTML=html+'<div style="padding:30px;text-align:center"><div class="muted">No research projects yet. See Research/Research.md and research-projects.json.</div></div>';
+      return;
+    }
+    html+='<div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))">';
+    projects.forEach(p=>{
+      const warns=researchMissing(p).map(researchWarnBadge).join(' ');
+      const la=lookaheadState(p.lookahead);
+      html+=`<div class="card" style="cursor:pointer;transition:border-color .2s" onclick="openResearchProject('${p.id}')">
+        <div style="display:flex;justify-content:space-between;align-items:start;gap:8px;margin-bottom:6px">
+          <div class="name">${p.title||p.id}</div>
+          ${researchStatusBadge(p.status)}
+        </div>
+        <div class="muted" style="font-size:12px;line-height:1.45;margin:4px 0 10px">${p.hypothesis||'<span class="neg">(no hypothesis stated)</span>'}</div>
+        ${warns?`<div style="margin:6px 0 10px;display:flex;gap:6px;flex-wrap:wrap">${warns}</div>`:''}
+        <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:11px">
+          <span class="pill">${p.trialCount!=null?p.trialCount+' trials':'<span class="neg">trials undeclared</span>'}</span>
+          <span class="pill">look-ahead: <span style="color:${la.color}">${la.text}</span></span>
+        </div>
+      </div>`;
+    });
+    html+='</div>';
+    v.innerHTML=html;
+  }catch(e){
+    v.innerHTML=`<div class="err">Failed to load research registry: ${e.message}</div>`;
+  }
+}
+async function openResearchProject(id){
+  TAB='projects';
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading project…</div>';
+  const back='<button class="pill" style="cursor:pointer;border:1px solid var(--border)" onclick="renderResearchProjects()">← Projects</button>';
+  try{
+    if(!researchProjects.length) await loadResearchProjects();
+    const p=researchProjects.find(x=>x.id===id);
+    if(!p){ v.innerHTML=`${back}<div class="err" style="margin-top:12px">Project ${id} not found in the registry.</div>`; return; }
+    const miss=researchMissing(p), la=lookaheadState(p.lookahead);
+    let html=`${back}
+      <div style="display:flex;align-items:baseline;gap:12px;margin:12px 0 4px;flex-wrap:wrap">
+        <span class="big" style="font-size:22px">${p.title||p.id}</span>
+        ${researchStatusBadge(p.status)}
+      </div>`;
+    if(miss.length){
+      html+=`<div class="cooldownnote"><b>Not yet a valid project.</b> Missing: ${miss.join(', ')}. A hypothesis with no falsifier can't be killed, and a trial count declared after the run makes the deflation correction meaningless (issue #47). Commit these before it runs.</div>`;
+    }
+    // Hypothesis + falsifier — the falsifiable core
+    html+=`<div class="group-title">Hypothesis</div>
+      <div style="font-size:15px;line-height:1.5;margin-bottom:12px">${p.hypothesis||'<span class="neg">(no hypothesis stated)</span>'}</div>
+      <div class="group-title">Falsifier — the observation that kills it</div>`;
+    html+=p.falsifier
+      ? `<div style="font-size:14px;line-height:1.5;margin-bottom:6px;padding:10px 12px;border-left:3px solid var(--red);background:#f851490d;border-radius:6px">${p.falsifier}</div>`
+      : `<div class="cooldownnote"><b>No falsifier.</b> A project with no falsifier is not a project (issue #97) — no observation could kill it, so it can't be tested. Add one.</div>`;
+    // PROMINENT: trial count + look-ahead posture, side by side — not a footnote
+    html+=`<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin:14px 0">
+      <div class="card">
+        <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px">Trial count — declared before the run</div>
+        <div class="big" style="font-size:26px;margin-top:6px">${p.trialCount!=null?p.trialCount:'<span class="neg">undeclared</span>'}</div>
+        <div class="muted" style="font-size:11px;margin-top:6px;line-height:1.45">How many variants will be tested. Committed up front — otherwise the deflation correction (issue #47) is meaningless.</div>
+      </div>
+      <div class="card">
+        <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px">Look-ahead posture</div>
+        <div class="big" style="font-size:20px;margin-top:6px;color:${la.color}">${la.text}</div>
+        <div class="muted" style="font-size:11px;margin-top:6px;line-height:1.45">${p.lookahead&&p.lookahead.note?p.lookahead.note:'A-vs-B truncation test (lookahead-gate/, issue #42) — or explicitly n/a with a reason.'}</div>
+      </div>
+    </div>`;
+    // Tools — modules that feed it, linking into the tools workspace
+    html+=`<div class="group-title">Tools — Data Gathering / Analysis Model modules that feed this</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">`;
+    if(Array.isArray(p.tools)&&p.tools.length){
+      p.tools.forEach(t=>{
+        const label=typeof t==='string'?t:(t.label||t.id);
+        html+=`<span class="pill" style="cursor:pointer;border:1px solid var(--border)" title="Open the Tools workspace" onclick="goSection('tools')">🧰 ${label}</span>`;
+      });
+    }else{
+      html+=`<span class="muted">No tools linked.</span>`;
+    }
+    html+=`</div>`;
+    // Evidence (optional) + verdict — including the refuted and inconclusive ones
+    if(p.evidence){
+      html+=`<div class="group-title">Evidence</div><div class="muted" style="line-height:1.5;margin-bottom:12px">${p.evidence}</div>`;
+    }
+    html+=`<div class="group-title">Verdict</div>`;
+    html+=p.verdict
+      ? `<div class="defaultviewnote">${p.verdict}</div>`
+      : `<div class="muted" style="margin-bottom:12px">Verdict pending — populated at the end of the run. The refuted and inconclusive ones get written up too. Especially those.</div>`;
+    v.innerHTML=html;
+  }catch(e){
+    v.innerHTML=`${back}<div class="err" style="margin-top:12px">${e.message}</div>`;
+  }
+}
+
 // ── workspaces / routing ──────────────────────────────────
 const SECTIONS={
   data:  {label:'Data',  icon:'🗄️', desc:'Data integrity — freshness, coverage, quality, gaps',
@@ -2452,6 +2595,8 @@ const SECTIONS={
           tabs:[['learn','Learn',renderEducation]]},
   tools: {label:'Tools', icon:'🧰', desc:'Modules that gather data or analyze it',
           tabs:[['gather','Data Gathering',renderToolsGather],['models','Analysis Models',renderToolsModels]]},
+  research:{label:'Research', icon:'🔬', desc:'Hypothesis projects — prediction, evidence, verdict',
+          tabs:[['projects','Projects',renderResearchProjects]]},
 };
 let SECTION=null;
 function renderNav(){
