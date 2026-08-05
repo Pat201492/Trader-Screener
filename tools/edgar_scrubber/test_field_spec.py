@@ -16,7 +16,7 @@ Every acceptance criterion in #102 is checked here:
     a malformed spec fails loudly at load;
   * wire keys (#104 transport) map back to canonical and never reach a record.
 
-Run:  python tools/edgar-scrubber/test_field_spec.py
+Run:  python tools/edgar_scrubber/test_field_spec.py
 """
 import json
 import tempfile

@@ -13,7 +13,7 @@ to a spec is a data edit; it does not touch this file.
 Why here and not in `schema-registry.js`:
   - The consumers of the field spec — section routing (#101), extraction and the
     Claude escalation (#104), exemplar mining (#105), rule promotion (#107) — are
-    all in this Python edgar-scrubber pipeline.
+    all in this Python edgar_scrubber pipeline.
   - #86's JS registry validates the *front-end* data contracts (screener columns,
     tool manifest, research projects). This module plays the identical role for
     the *extraction* contract and mirrors its `SchemaRegistry` / object-validator
@@ -21,7 +21,7 @@ Why here and not in `schema-registry.js`:
   - `field_spec_shape_as_data()` re-exports the shape as plain JSON so the #86 JS
     registry can adopt the exact same definition without re-typing it.
 
-Run the self-check:  python tools/edgar-scrubber/schema_registry.py
+Run the self-check:  python tools/edgar_scrubber/schema_registry.py
 """
 
 # Closed vocabularies shared across every spec. Declared once; specs reference

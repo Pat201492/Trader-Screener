@@ -15,7 +15,7 @@ that:
   * maps the short wire keys #104 uses on the model boundary back to canonical
     names, and guards that a wire key never reaches a stored record.
 
-stdlib only. Run the self-check:  python tools/edgar-scrubber/field_spec.py
+stdlib only. Run the self-check:  python tools/edgar_scrubber/field_spec.py
 """
 
 import json
@@ -23,7 +23,10 @@ from dataclasses import dataclass, field as _dc_field
 from datetime import date
 from pathlib import Path
 
-from schema_registry import REGISTRY, SPEC_SHAPE_NAME
+try:  # package import: tools.edgar_scrubber.field_spec
+    from .schema_registry import REGISTRY, SPEC_SHAPE_NAME
+except ImportError:  # standalone: python tools/edgar_scrubber/field_spec.py
+    from schema_registry import REGISTRY, SPEC_SHAPE_NAME
 
 DEFAULT_SPEC_DIR = Path(__file__).resolve().parent / "field_specs"
 

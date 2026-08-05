@@ -6,7 +6,7 @@ from a filing is **data, not code**. Field definitions live in
 change, no redeploy.
 
 ```
-tools/edgar-scrubber/
+tools/edgar_scrubber/
   field_specs/
     424b2_structured_note.json   # population A — structured / market-linked notes
     424b2_shelf_takedown.json    # population B — plain debt / equity takedowns
@@ -118,9 +118,9 @@ d.spec.assert_canonical(record)              # belt-and-suspenders before storin
 ## Test
 
 ```bash
-python tools/edgar-scrubber/test_field_spec.py   # exit 0 = pass
-python tools/edgar-scrubber/field_spec.py        # loader/detector self-check
-python tools/edgar-scrubber/schema_registry.py   # shape self-check + JSON export
+python tools/edgar_scrubber/test_field_spec.py   # exit 0 = pass
+python tools/edgar_scrubber/field_spec.py        # loader/detector self-check
+python tools/edgar_scrubber/schema_registry.py   # shape self-check + JSON export
 ```
 
 ## Left for downstream issues
