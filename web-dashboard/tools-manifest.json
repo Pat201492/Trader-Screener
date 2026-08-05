@@ -1,5 +1,18 @@
 [
   {
+    "id": "edgar-scrubber",
+    "kind": "gather",
+    "name": "EDGAR Scrubber (424B2 structured notes)",
+    "purpose": "Exploratory extraction of 424B2 structured-note terms into a LOCAL tool store — never a pipeline write. A field stays local only while a Research project is exploring it; when it proves out it graduates upstream and the local extractor is retired (#95/#109).",
+    "status": "working",
+    "source": "SEC EDGAR",
+    "refresh_cadence": "on-demand (human-supervised)",
+    "last_run": "2026-08-04T09:30:00Z",
+    "output_path": "~/.edgar-scrubber/store/extractions.sqlite (local)",
+    "graduatedTo": null,
+    "doc_link": "../tools/edgar_scrubber/OUTPUT_STORE.md"
+  },
+  {
     "id": "data-gathering-example",
     "kind": "gather",
     "name": "Example Data Gatherer",

@@ -99,6 +99,11 @@ ollama serve  # Start Ollama manually
 
 See **SETUP.md** for full troubleshooting + remote Ollama setup.
 
+## Related docs
+
+- **[FIELD_SPEC.md](FIELD_SPEC.md)** — *what* to extract (issue #102)
+- **[OUTPUT_STORE.md](OUTPUT_STORE.md)** — *where* it lands + the local-only / graduation boundary (issue #109)
+
 ## References
 
 - Issue #95 (EDGAR scrubber parent)

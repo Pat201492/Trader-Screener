@@ -65,6 +65,10 @@ Rules that fall out of this:
 2. **New metric → add it upstream** in the shared pipeline, so the old app, Project screener, and Research tab all get it for free.
 3. **One source of truth.** A ticker's fundamentals/score/news exist in exactly one place.
 
+### Exploratory tools stay local until they graduate
+
+A tool that is still figuring out *what* to extract (the [EDGAR scrubber](tools/edgar_scrubber/OUTPUT_STORE.md), #95/#109) is **exploratory, human-supervised, and project-local** — it writes only to its own local datastore and Trader-Screener reads it like any other reader. It is **not** a second writer of shared data; the only-writer rule above is unchanged. When a field proves out inside a Research project it **graduates** upstream via the [graduation checklist](tools/edgar_scrubber/OUTPUT_STORE.md#graduation-checklist): the extraction ports into the pipeline's EDGAR ingest, the field joins the shared contract (rule 2), the manifest's `graduatedTo` is set, and the **local extractor is retired** — never left running in parallel (two extractors for one field is two answers). Age-since-last-use is surfaced on the tool manifest so a local field that has stopped being explored reads as drift, not silently as still-exploratory.
+
 ---
 
 ## Hosting (cost-driven)
