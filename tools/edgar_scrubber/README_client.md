@@ -64,6 +64,10 @@ for hit in client.iter_hits(forms="424B2", startdt="2024-06-03", enddt="2024-06-
 `(value, saturated)` so callers narrow the date window instead of trusting a capped count. The efts
 window is **100 pages of 100**, not 1000; `iter_hits` never asks past `from=10000`.
 
+For a corpus that exceeds the window, see [`README_crawl.md`](README_crawl.md) (#100): a saved,
+id'd query object plus a crawler that recursively date-bisects past the 10k cap and persists
+resumable state to disk.
+
 ## Test
 
 ```
