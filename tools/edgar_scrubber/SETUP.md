@@ -316,3 +316,45 @@ To escalate to Claude when the local model hits a hard case:
 - **Issue #104** (Claude escalation): same `OllamaClient` interface, swap `base_url`.
 - **Issue #101** (section routing): embeddings via `nomic-embed-text`.
 - **Issue #108** (3B benchmark): when to use the cheap bulk-pass model.
+
+## Server-side settings (the ones a client cannot set)
+
+`OLLAMA_NUM_PARALLEL`, `OLLAMA_FLASH_ATTENTION` and `OLLAMA_KV_CACHE_TYPE` are read by
+the **ollama server at startup**. Exporting them from Python sets them in the client
+process, where they do nothing — on Windows the Ollama app starts at login, long before
+any scrubber code runs.
+
+This was measured, not assumed. Against a server started normally by the Ollama Windows
+app on an RTX 4070 Ti, eight concurrent 8k requests moved peak VRAM by **17 MiB**
+(6960 → 6977). Eight parallel slots at 8192 context would have needed 1.8–3.7 GB of KV
+cache. The settings had silently not applied, and nothing errored.
+
+### Set them for real (Windows)
+
+```powershell
+setx OLLAMA_NUM_PARALLEL 8
+setx OLLAMA_FLASH_ATTENTION 1
+setx OLLAMA_KV_CACHE_TYPE q8_0
+```
+
+Then **fully quit Ollama from the system tray and relaunch it** — `setx` writes the user
+environment, but a running process keeps the environment it started with.
+
+`OLLAMA_KV_CACHE_TYPE=q8_0` requires `OLLAMA_FLASH_ATTENTION=1`; without flash attention
+the cache-type setting is ignored.
+
+### Verify it took
+
+```bash
+python -c "from tools.edgar_scrubber.config import ScrubberConfig, verify_server_runtime;            c=ScrubberConfig(); print(verify_server_runtime(c.hardware_profile))"
+```
+
+`verify_server_runtime()` loads the model at two context sizes and reads the slope of
+resident bytes per context token. For Qwen2.5-7B that is 28 layers x 4 KV heads x 128
+head_dim x 2 (K+V) = 28,672 elements/token — 28 KB/token at q8_0, 56 KB/token at f16 —
+so the slope reveals both the cache type and how many parallel slots the server really
+allocated. Neither is reported by any Ollama API.
+
+`ok: False` means the server is not running the profile the probe selected. Fix the
+environment and restart Ollama rather than lowering the profile — this is #103's
+acceptance criterion ("batch N at 8k resident with no CPU offload") turned into a check.
