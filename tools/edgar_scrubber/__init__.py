@@ -2,6 +2,14 @@
 
 from .config import ScrubberConfig, verify_server_runtime
 from .crawl import Crawler, CrawlState, SavedQuery, crawl, load_query, save_query
+from .document_expand import (
+    AccessionDocuments,
+    Ex107Facts,
+    ExpandedDocument,
+    classify_document,
+    expand_accession,
+    parse_ex107_xbrl,
+)
 from .edgar_client import EdgarClient, EdgarError, EdgarConfigError, EdgarHTTPError
 from .extraction_ladder import (
     ExtractionLadder,
@@ -20,6 +28,7 @@ from .extraction_ladder import (
 )
 from .field_spec import load_specs
 from .hardware_probe import HardwareProfile, get_nvidia_vram, select_profile
+from .normalize import NormalizedDocument, OffsetMap, normalize_html, parse_tables
 from .ollama_client import OllamaClient, OllamaConfig
 from .output_store import (
     DocumentExtraction,
@@ -27,6 +36,15 @@ from .output_store import (
     GraduationError,
     OutputStore,
     OwnershipError,
+)
+from .reduce import (
+    BoilerplateModel,
+    ReducedDocument,
+    build_boilerplate_model,
+    split_sections,
+    strip_boilerplate,
+    sub_block,
+    text_for_sections,
 )
 from .schema_registry import REGISTRY
 
@@ -74,4 +92,24 @@ __all__ = [
     "FieldValue",
     "OwnershipError",
     "GraduationError",
+    # document expansion + EX-107 inline XBRL (#101)
+    "AccessionDocuments",
+    "ExpandedDocument",
+    "Ex107Facts",
+    "classify_document",
+    "expand_accession",
+    "parse_ex107_xbrl",
+    # HTML normalize + span offsets + stage-1 table pre-parse (#101)
+    "NormalizedDocument",
+    "OffsetMap",
+    "normalize_html",
+    "parse_tables",
+    # stages 2-4: boilerplate dedup, section split, sub-block routing (#101)
+    "BoilerplateModel",
+    "ReducedDocument",
+    "build_boilerplate_model",
+    "strip_boilerplate",
+    "split_sections",
+    "text_for_sections",
+    "sub_block",
 ]
