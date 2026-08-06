@@ -75,8 +75,11 @@ Always use pinned versions (unpinned tags silently upgrade):
 | Model | Size | Purpose |
 |-------|------|---------|
 | `qwen2.5:7b-instruct-q4_K_M` | ~4.7 GB | Primary EDGAR extraction |
-| `nomic-embed-text` | ~0.3 GB | Section routing (issue #101) |
 | `qwen2.5:3b-instruct-q4_K_M` | ~2.0 GB | Cheap bulk pass (issue #108, benchmark first) |
+
+Section routing (issue #101) turned out to be deterministic keyword/heading
+classification, not an embedding model — see [DOCUMENT_REDUCTION.md](DOCUMENT_REDUCTION.md).
+No embedding model is loaded by this runtime.
 
 ## Troubleshooting
 
@@ -102,13 +105,14 @@ See **SETUP.md** for full troubleshooting + remote Ollama setup.
 ## Related docs
 
 - **[FIELD_SPEC.md](FIELD_SPEC.md)** — *what* to extract (issue #102)
+- **[DOCUMENT_REDUCTION.md](DOCUMENT_REDUCTION.md)** — document expansion + the four-stage token-budget reduction (issue #101)
 - **[OUTPUT_STORE.md](OUTPUT_STORE.md)** — *where* it lands + the local-only / graduation boundary (issue #109)
 
 ## References
 
 - Issue #95 (EDGAR scrubber parent)
 - Issue #104 (Claude escalation)
-- Issue #101 (Embeddings for section routing)
+- Issue #101 (document expansion + span-preserving reduction to the #103 token budget)
 - Issue #108 (3B model benchmark)
 - Ollama: https://ollama.ai
 - Qwen2.5: https://huggingface.co/Qwen/Qwen2.5-7B-Instruct
