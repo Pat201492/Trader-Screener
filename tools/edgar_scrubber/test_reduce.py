@@ -205,6 +205,50 @@ except ValueError:
     check("sub_block rejects BOTH anchors given at once", True)
 
 # --------------------------------------------------------------------------- #
+section("stage 4: source_offset= warm path on a POST-stage2 (composed) document")
+# --------------------------------------------------------------------------- #
+
+# Regression for the `OffsetMap.compose()` bug: composing stage 2's
+# paragraph-level local map against stage 1's map used to collapse every
+# composed span to whole-paragraph granularity, so `source_offset=` (the
+# shape a #107-induced anchor is actually passed in, per
+# `output_store.FieldValue.span[0]`) resolved to the paragraph START instead
+# of the real position -- and on a paragraph longer than the default
+# +/-500-char window, the warm-path block built around it didn't contain the
+# anchor at all. `text_offset=` alone never exercises this: it bypasses
+# `text_offset_for_source` (and therefore `compose()`'s output) entirely.
+_LOREM = ("Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod "
+          "tempor incididunt ut labore et dolore magna aliqua. ")
+LONG_PARAGRAPH = (
+    "<p>" + _LOREM * 8
+    + "The contingent coupon rate is 9.15 percent per annum, payable if the "
+      "underlying closes at or above the coupon barrier. "
+    + _LOREM * 8 + "</p>"
+)
+check("warm-path fixture: long paragraph is actually longer than the default sub_block window",
+      len(LONG_PARAGRAPH) > 1000)
+
+warm_docs = [
+    normalize_html(f"<html><body><h2>Key Terms</h2><p>Issuer: Filer {i}.</p>{BOILERPLATE}</body></html>")
+    for i in range(4)
+]
+warm_target_html = f"<html><body><h2>Key Terms</h2><p>Issuer: Filer 4.</p>{BOILERPLATE}{LONG_PARAGRAPH}</body></html>"
+warm_doc = normalize_html(warm_target_html)
+warm_model = rd.build_boilerplate_model("WARM", warm_docs + [warm_doc], threshold=0.8)
+warm_reduced = rd.strip_boilerplate(warm_doc, warm_model)
+check("warm-path fixture: boilerplate actually stripped from the reduced doc",
+      "FDIC" not in warm_reduced.text)
+check("warm-path fixture: long paragraph survives the strip",
+      "9.15 percent" in warm_reduced.text)
+
+warm_source_idx = warm_doc.source.find("9.15 percent")
+check("warm-path fixture: anchor value found in the ORIGINAL source", warm_source_idx != -1)
+
+warm_block = rd.sub_block(warm_reduced, source_offset=warm_source_idx)
+check("stage4 source_offset= on a post-stage2 (composed) doc: window actually contains the anchor value",
+      "9.15 percent" in warm_block.text)
+
+# --------------------------------------------------------------------------- #
 section("end-to-end: a span survives ALL FOUR STAGES back to exact source offsets")
 # --------------------------------------------------------------------------- #
 

@@ -27,7 +27,7 @@ stdlib only (`html.parser`, `re`). Run the self-check:
     python tools/edgar_scrubber/normalize.py
 """
 import re
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from html import unescape
@@ -161,14 +161,39 @@ class OffsetMap:
         (recursively, back to `normalize_html`'s map into the raw HTML)
         yields a map straight from the final stage's text to the original
         document bytes.
+
+        A `literal` span in THIS map (e.g. one paragraph, unchanged
+        character-for-character from `upstream`'s text) usually straddles
+        several of `upstream`'s own spans -- an entity decode, a table
+        substitution, a run boundary. Naively resolving the whole span as one
+        blob collapses every offset inside it to the same whole-paragraph
+        range. Instead, split it at each of `upstream`'s span boundaries it
+        crosses, so each piece can inherit `upstream`'s own literal/affine
+        mapping and sub-paragraph precision survives the compose.
         """
         composed = []
         for s in self.spans:
-            if s.literal:
-                lo, hi = upstream.resolve(s.source_start, s.source_end)
+            if s.literal and s.source_end > s.source_start and upstream.spans:
+                lo = bisect_right(upstream._starts, s.source_start)
+                hi = bisect_left(upstream._starts, s.source_end)
+                points = (s.source_start, *upstream._starts[lo:hi], s.source_end)
             else:
-                lo, hi = upstream.resolve(s.source_start, s.source_end)
-            composed.append(TextSpan(s.text_start, s.text_end, lo, hi, literal=False))
+                points = (s.source_start, s.source_end)
+
+            for i in range(len(points) - 1):
+                o0, o1 = points[i], points[i + 1]
+                if o1 == o0 and len(points) > 2:
+                    continue
+                t0 = s.text_start + (o0 - s.source_start)
+                t1 = s.text_start + (o1 - s.source_start)
+                span0 = upstream._span_for(o0) if upstream.spans else None
+                if s.literal and span0 is not None and span0.literal and \
+                        span0.text_start <= o0 and o1 <= span0.text_end:
+                    delta = span0.source_start - span0.text_start
+                    composed.append(TextSpan(t0, t1, o0 + delta, o1 + delta, literal=True))
+                else:
+                    lo_src, hi_src = upstream.resolve(o0, o1)
+                    composed.append(TextSpan(t0, t1, lo_src, hi_src, literal=False))
         return OffsetMap(composed)
 
 

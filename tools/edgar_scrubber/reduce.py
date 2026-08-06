@@ -361,10 +361,10 @@ class SubBlock:
 def sub_block(doc, *, text_offset=None, source_offset=None, window=500):
     """+/-`window` characters of `doc.text` around an anchor, plus the exact
     source span it resolves to. Pass exactly one of `text_offset` (an offset
-    already in `doc.text`) or `source_offset` (an offset into the ORIGINAL
-    source bytes -- the shape a #107-induced anchor is stored in, per
-    `output_store.FieldValue.span`); `source_offset` is converted via
-    `OffsetMap.text_offset_for_source` first.
+    already in `doc.text`) or `source_offset` (a single offset into the
+    ORIGINAL source bytes -- e.g. `output_store.FieldValue.span[0]`, since
+    `FieldValue.span` itself is a `(start, end)` tuple, not a scalar);
+    `source_offset` is converted via `OffsetMap.text_offset_for_source` first.
     """
     if (text_offset is None) == (source_offset is None):
         raise ValueError("sub_block: pass exactly one of text_offset or source_offset")
