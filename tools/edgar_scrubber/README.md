@@ -108,6 +108,7 @@ See **SETUP.md** for full troubleshooting + remote Ollama setup.
 - **[DOCUMENT_REDUCTION.md](DOCUMENT_REDUCTION.md)** — document expansion + the four-stage token-budget reduction (issue #101)
 - **[EXTRACTION_LADDER.md](EXTRACTION_LADDER.md)** — *how* it escalates: rule → XBRL → local 7B → confidence gate → Claude (issue #104)
 - **[OUTPUT_STORE.md](OUTPUT_STORE.md)** — *where* it lands + the local-only / graduation boundary (issue #109)
+- **[VALIDATION_UI.md](VALIDATION_UI.md)** — *teach it first*: the human-in-loop side-by-side validation loop that seeds exemplars/rules/eval (issue #105)
 
 ## References
 
