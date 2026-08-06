@@ -93,6 +93,35 @@ def test_rule_rung_short_circuits():
 
 
 # --------------------------------------------------------------------------- #
+def test_rule_rung_with_manager():
+    section("Rung 1: RuleManager integration — apply_rule() method")
+    try:
+        from . import rules as r
+    except ImportError:
+        import rules as r
+
+    local = FakeChatClient([])  # must never be called
+    mgr = r.RuleManager()
+    mgr.promote_rule_from_seed(
+        "JPM", "estimated_value_per_1000",
+        anchor="Estimated value",
+        pattern_str=r"estimated\s+value.*?(\d+\.?\d*)"
+    )
+    ladder = el.ExtractionLadder(
+        NOTE_SPEC,
+        rules=mgr,
+        local_client=local, local_model="qwen2.5:7b",
+    )
+    text = "The estimated value of the notes is 972.40 per unit."
+    r_result = ladder.extract("estimated_value_per_1000", text=text, issuer="JPM",
+                             accession="0001", document="424b2.htm")
+    check("rung == rule", r_result.rung == "rule")
+    check("value extracted by rule", "972" in str(r_result.value))
+    check("local client never called", len(local.calls) == 0)
+    check("shadow is None (not in shadow window)", ladder.log.entries[0].shadow is None)
+
+
+# --------------------------------------------------------------------------- #
 def test_xbrl_rung_short_circuits():
     section("Rung 2: XBRL / EX-107 fee exhibit (#101) short-circuits the model")
     local = FakeChatClient([])
@@ -318,6 +347,7 @@ def test_wire_keys_never_leak():
 def main():
     print("Extraction provider ladder gate (#104)")
     test_rule_rung_short_circuits()
+    test_rule_rung_with_manager()
     test_xbrl_rung_short_circuits()
     test_local_confident_no_escalation()
     test_out_of_bounds_escalates_to_claude()

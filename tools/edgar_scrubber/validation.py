@@ -714,11 +714,13 @@ class ValidationSession:
         just without an anchor-derived seed signal. Returns the FieldVerdict as
         stored (anchor filled in).
 
-        When `rules` (a RuleManager instance) is provided, records the comparison
-        between the rule's extraction and the validated value, tracking agreement
-        for promotion/demotion (#107). Typically called as:
+        When `rules` (a RuleManager instance) is provided AND `extracted_value`
+        is given, records the comparison between the rule's extraction and the
+        validated value, tracking agreement for promotion/demotion (#107).
+        The `extracted_value` is what the rule extracted (before validation);
+        fv.value is the validated/corrected value. Comparison drives promotion:
             mgr.record_comparison(issuer, fv.field, validated_value=fv.value,
-                                  extracted_value=rule_extracted_value)
+                                  extracted_value=extracted_value)
         This happens AFTER validation and before the next batch runs, so the rule
         promotion state guides shadow mode decisions on the next document."""
         field_def = self.spec.field(fv.field)
