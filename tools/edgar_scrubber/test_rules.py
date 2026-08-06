@@ -197,12 +197,25 @@ def test_validation_store_integration():
         check("seed majority >= threshold", seed.support / seed.total >= 0.6)
 
         # Promote the seed via the manager.
-        mgr = r.RuleManager()
+        mgr = r.RuleManager(agreement_threshold=2)
         promoted_rule = mgr.promote_rule_from_seed(
             "JPM", "barrier_pct", seed.anchor or "Barrier",
             pattern_str=r"Barrier[:\s]+([0-9.]+)%"
         )
         check("rule promoted from seed", mgr.has_rule("JPM", "barrier_pct"))
+
+        # Test the full validation loop integration: record_verdict with rules.
+        # Simulate extracting a third document where the rule matches and agrees with validation.
+        third_fv = v.FieldVerdict.correct("barrier_pct", 70.0, source_span=source_span)
+        fv_returned = session.record_verdict(
+            "acc-3", "424b2.htm", third_fv, issuer="JPM",
+            rules=mgr, extracted_value=70.0  # extracted_value: what the rule extracted
+        )
+        check("verdict returned", fv_returned.field == "barrier_pct")
+        # Check the tracker directly to verify record_verdict triggered agreement tracking
+        tracker = mgr.get_tracker("JPM", "barrier_pct")
+        check("agreement tracked after record_verdict", tracker.agreements == 1)
+        check("tracker status still pending", tracker.status == "pending")
 
 
 if __name__ == "__main__":
