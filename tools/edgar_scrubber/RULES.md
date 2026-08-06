@@ -188,6 +188,43 @@ result = ladder.extract("barrier_pct", text=doc_text, issuer="JPM",
 # Otherwise: escalates through local → Claude as normal
 ```
 
+### Persistence: Export and Bootstrap
+
+Rules are exported to a dict for storage (JSON, pickle, database):
+
+```python
+mgr = RuleManager()
+# ...seed or promote rules...
+rules_dict = mgr.export_rules()  # -> {(issuer, field): {"anchor": ..., "pattern": ..., ...}}
+
+# Save to JSON:
+import json
+with open("rules.json", "w") as f:
+    json.dump(rules_dict, f, default=str)
+```
+
+Before extraction, load the persisted rules into a manager:
+
+```python
+import json
+from rules import RuleManager
+from extraction_ladder import ExtractionLadder
+
+# Load rules from storage
+with open("rules.json") as f:
+    rules_dict = json.load(f)
+
+mgr = RuleManager()
+loaded = mgr.import_rules(rules_dict)
+print(f"Loaded {loaded} rules")
+
+# Pass to the ladder
+ladder = ExtractionLadder(spec, rules=mgr, ...)
+
+# Extract with the loaded rules
+result = ladder.extract(field_name, text=doc_text, issuer="JPM")
+```
+
 ### RunLog Extraction Breakdown
 
 Every run reports what share of extractions came from each rung:

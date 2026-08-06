@@ -707,7 +707,7 @@ class ValidationSession:
 
     # -- verdicts ----------------------------------------------------------
 
-    def record_verdict(self, accession, document, fv, *, issuer=None, render_doc=None, rules=None):
+    def record_verdict(self, accession, document, fv, *, issuer=None, render_doc=None, rules=None, extracted_value=None):
         """Persist one verdict and, from it, the exemplar that will help later
         documents. `render_doc` (when given) resolves the anchor and the span
         snippet the exemplar carries; without it the verdict is still stored,
@@ -729,6 +729,11 @@ class ValidationSession:
 
         self.store.write_verdict(self.session_id, accession, document, fv, now=self._now())
         self._write_exemplar(issuer, accession, document, fv, render_doc)
+
+        if rules is not None and issuer is not None and extracted_value is not None:
+            rules.record_comparison(issuer, fv.field, validated_value=fv.value,
+                                   extracted_value=extracted_value)
+
         return fv
 
     def _write_exemplar(self, issuer, accession, document, fv, render_doc):
