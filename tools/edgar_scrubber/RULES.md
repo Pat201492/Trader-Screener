@@ -232,14 +232,55 @@ A pattern should:
 
 Patterns are case-insensitive by default. Use `capture_group=1` (or None for whole match).
 
+## Rules Persistence Bootstrap
+
+Before extraction runs, rules must be loaded from persisted storage (e.g., JSON):
+
+```python
+from rules import RuleManager
+import json
+
+# Load persisted rules
+with open("rules.json") as f:
+    exported = json.load(f)
+
+mgr = RuleManager(shadow_window_days=7)
+loaded = mgr.import_rules(exported)
+print(f"Loaded {loaded} rules for {len(set((i, f) for i, f in exported.keys()))} issuers")
+
+# Pass to the ladder
+ladder = ExtractionLadder(
+    spec,
+    rules=mgr,
+    local_client=...,
+    claude_client=...,
+)
+
+# Extract with rules active
+result = ladder.extract("barrier_pct", text=doc, issuer="JPM", accession=acc, document=doc)
+```
+
+**Timing:** Rules are loaded once before batch processing begins, not per-document. A rule loaded 7 days ago but just accessed still reports `is_shadowing=True` (based on `first_agreement_at`), not current time.
+
 ## Validation Loop Integration
 
 1. **Validator** reviews a document and marks correct/incorrect values
 2. **record_verdict()** stores the verdict, derives the anchor, writes an exemplar
 3. **rule_seed_for()** checks if the anchor has stabilized (N docs, majority agreement)
 4. **Validator** is offered "promote this to a rule?"
-5. **mark_seed()** records the decision
-6. **RuleManager** loads the promoted seed as a hand-authored rule
+5. **Promoted rule** is exported to JSON and loaded (see Bootstrap above)
+6. **record_comparison()** is called during the next batch to track agreement/disagreement:
+   ```python
+   # After extraction and validation on document N+1:
+   promoted, reason, demoted = mgr.record_comparison(
+       issuer="JPM", field="barrier_pct",
+       validated_value=70.0,     # what the validator confirmed
+       extracted_value=70.0,     # what the rule extracted from the document
+   )
+   if demoted:
+       # Field escalates back into validation queue for re-seeding
+       flag_for_revalidation("JPM", "barrier_pct", reason)
+   ```
 
 On the next batch of documents:
 

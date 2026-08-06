@@ -707,12 +707,20 @@ class ValidationSession:
 
     # -- verdicts ----------------------------------------------------------
 
-    def record_verdict(self, accession, document, fv, *, issuer=None, render_doc=None):
+    def record_verdict(self, accession, document, fv, *, issuer=None, render_doc=None, rules=None):
         """Persist one verdict and, from it, the exemplar that will help later
         documents. `render_doc` (when given) resolves the anchor and the span
         snippet the exemplar carries; without it the verdict is still stored,
         just without an anchor-derived seed signal. Returns the FieldVerdict as
-        stored (anchor filled in)."""
+        stored (anchor filled in).
+
+        When `rules` (a RuleManager instance) is provided, records the comparison
+        between the rule's extraction and the validated value, tracking agreement
+        for promotion/demotion (#107). Typically called as:
+            mgr.record_comparison(issuer, fv.field, validated_value=fv.value,
+                                  extracted_value=rule_extracted_value)
+        This happens AFTER validation and before the next batch runs, so the rule
+        promotion state guides shadow mode decisions on the next document."""
         field_def = self.spec.field(fv.field)
 
         if fv.anchor is None and render_doc is not None and field_def is not None \
