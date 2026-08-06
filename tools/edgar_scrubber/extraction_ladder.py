@@ -488,13 +488,13 @@ class RunLog:
         """Fields where shadow mode detected rule/model disagreements (template change signal)."""
         disagreements = {}
         for e in self.entries:
-            if e.shadow and not e.shadow.get("agreement"):
+            if e.shadow and not e.shadow.agreement:
                 key = f"{e.field}"
                 if key not in disagreements:
                     disagreements[key] = []
                 disagreements[key].append({
                     "accession": e.accession, "document": e.document,
-                    "note": e.shadow.get("note"),
+                    "note": e.shadow.note,
                 })
         return disagreements
 
