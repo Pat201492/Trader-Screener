@@ -76,16 +76,12 @@ Expected output:
 qwen2.5:7b-instruct-q4_K_M    4.7 GB    ...
 ```
 
-### Optional: Embeddings model (for section routing, issue #101)
+### No embeddings model needed
 
-```bash
-ollama pull nomic-embed-text
-```
-
-Verify:
-```bash
-ollama list | findstr nomic
-```
+Section routing (issue #101) turned out to be deterministic keyword/heading
+classification, not an embedding model — see
+[DOCUMENT_REDUCTION.md](DOCUMENT_REDUCTION.md). No embedding model is loaded by
+this runtime, so there is nothing to pull here.
 
 ### Optional: Cheap bulk pass (candidate, issue #108)
 
@@ -314,7 +310,7 @@ To escalate to Claude when the local model hits a hard case:
 - **KV-cache quantization:** Typically ~1–2% quality loss at q8_0, ~50% footprint reduction.
 - **Issue #95** (EDGAR scrubber parent): extraction logic & prompt.
 - **Issue #104** (Claude escalation): same `OllamaClient` interface, swap `base_url`.
-- **Issue #101** (section routing): embeddings via `nomic-embed-text`.
+- **Issue #101** (section routing): deterministic keyword/heading classification — no embedding model.
 - **Issue #108** (3B benchmark): when to use the cheap bulk-pass model.
 
 ## Server-side settings (the ones a client cannot set)
