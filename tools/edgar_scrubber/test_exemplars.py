@@ -241,6 +241,34 @@ def test_fallback_chain():
           "prompt, never an error)", r is not None and r.value == 50.0)
 
 
+def test_negative_retained_across_thin_merge():
+    section("Thin issuer + pooled merge: a reserved negative slot survives "
+            "the exact+pooled combine, not just standalone select_exemplars()")
+    store = v.ValidationStore(":memory:")
+    session = v.ValidationSession(store, SPEC, session_id="s", target_n=10)
+
+    # JPM: thin support (below thin_below), but includes a correction so the
+    # "exact" list is non-empty and occupies a slot ahead of the merge.
+    session.record_verdict("jpm-1", "424b2.htm",
+                           v.FieldVerdict.correct(FIELD, 70.0), issuer=JPM)
+    session.complete_document("jpm-1", "424b2.htm", issuer=JPM)
+
+    # CITI: enough rows to fill the pool, including a negative that must be
+    # reserved a slot per the #106 selection policy.
+    for i, val in enumerate((60.0, 61.0)):
+        acc = f"citi-{i}"
+        session.record_verdict(acc, "424b2.htm", v.FieldVerdict.correct(FIELD, val),
+                               issuer=CITI)
+        session.complete_document(acc, "424b2.htm", issuer=CITI)
+    store.write_exemplar(CITI, FIELD, ex.NEGATIVE,
+                         "barrier_pct: absent in a prior filing", value=None, form=FORM)
+
+    provider = ex.ExemplarProvider(store, FORM, cap=4, thin_below=2)
+    resolved = provider.resolve(JPM, FIELD)
+    check("thin-issuer merge (exact + pooled) still reserves the negative slot",
+          any(r.kind == ex.NEGATIVE for r in resolved.rows))
+
+
 def test_static_prefix_ordering():
     section("Static-prefix-first ordering enforced")
     lines = ["barrier_pct: 70.0 [70.00%]  (corrected)"]
@@ -361,6 +389,7 @@ if __name__ == "__main__":
     test_form_isolation()
     test_selection_policy()
     test_fallback_chain()
+    test_negative_retained_across_thin_merge()
     test_static_prefix_ordering()
     test_version_in_provenance()
     test_end_to_end_wiring()

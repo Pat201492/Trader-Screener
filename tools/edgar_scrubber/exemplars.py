@@ -261,10 +261,8 @@ class ExemplarProvider:
                                version=_version_hash(self.form, issuer, field,
                                                      TIER_ISSUER, lines))
 
-        pooled = select_exemplars(self._rows(field, exclude_issuer=issuer), cap=self.cap)
-        seen_rendered = {r.rendered for r in exact}
-        combined = list(exact) + [r for r in pooled if r.rendered not in seen_rendered]
-        combined = combined[: self.cap]
+        raw_pooled = self._rows(field, exclude_issuer=issuer)
+        combined = select_exemplars(list(raw_exact) + list(raw_pooled), cap=self.cap)
 
         if not combined:
             return ExemplarSet.empty(key)
