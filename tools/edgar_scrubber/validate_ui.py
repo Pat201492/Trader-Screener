@@ -226,6 +226,13 @@ def _wrap_keep_ansi(line, width):
 # Interactive loop
 # --------------------------------------------------------------------------- #
 
+# Returned by `validate_document` when the validator presses `q`: quit the whole
+# session rather than finish the current document. `_run_live` must break on it
+# -- otherwise its `while not complete` loop re-selects the same uncompleted
+# accession and re-runs the full extraction ladder on every field, forever.
+QUIT = object()
+
+
 def _section_for(sections, render_doc, source_span):
     """Which split-section the candidate span falls in -- the "scrolled to the
     relevant section" label. Best-effort; None if it can't be placed."""
@@ -306,8 +313,12 @@ def validate_document(session, proposals, render_doc, *, accession, document,
                 if pp.field in missing:
                     i = j
                     break
+        elif cmd == "s":
+            if _offer_rule_seeds(session, issuer, read, write) == 0:
+                write("  (no rule seeds ready yet -- an anchor stabilizes only "
+                      "after it repeats across several validated docs)")
         elif cmd == "q":
-            return verdicts
+            return QUIT
         elif cmd in ("?", "h"):
             write(_HELP)
         else:
@@ -373,15 +384,18 @@ def _coerce_like(raw, template):
 
 
 def _offer_rule_seeds(session, issuer, read, write):
-    """Once a document completes, surface any (issuer, field) whose anchor has
-    just stabilized -- "promote this to a rule?" (#107). Appears once per field:
-    the answer is recorded either way."""
-    for seed in session.pending_rule_seeds(issuer):
+    """Surface any (issuer, field) whose anchor has just stabilized -- "promote
+    this to a rule?" (#107). Called on document completion and on demand via the
+    `s` key. Appears once per field: the answer is recorded either way. Returns
+    the number of seeds offered so the `s` key can report when none are ready."""
+    seeds = session.pending_rule_seeds(issuer)
+    for seed in seeds:
         write(f"\n  rule seed ready: {seed.field} anchors on {seed.anchor!r} "
               f"in {seed.support}/{seed.total} validated docs.")
         ans = (read(f"  promote {seed.field} to a #107 rule seed? [y/N] ") or "").strip().lower()
         session.mark_seed(issuer, seed.field, seed.anchor, promoted=ans in ("y", "yes"))
         write("  -> seeded." if ans in ("y", "yes") else "  -> dismissed.")
+    return len(seeds)
 
 
 _HELP = """
@@ -391,6 +405,7 @@ _HELP = """
   A  accept-all   accept this and every remaining field
   n / p           next / previous field
   N (or Enter)    next document (needs every field decided)
+  s               seed rule -- promote a stabilized anchor to a #107 rule seed
   q               quit -- session resumes exactly here
 """
 
@@ -569,9 +584,12 @@ def _run_live(args):
         proposals = extractor.propose(render_doc, issuer=meta.get("issuer"),
                                       ex107=ex107, accession=accession,
                                       document=primary.name)
-        validate_document(session, proposals, render_doc, accession=accession,
+        outcome = validate_document(session, proposals, render_doc, accession=accession,
                          document=primary.name, issuer=meta.get("issuer"),
                          sections=sections, color=not args.no_color)
+        if outcome is QUIT:
+            print("\nQuit -- session saved; resume here with the same --session id.")
+            break
 
     print(f"\nDone. {session.progress()}")
 
