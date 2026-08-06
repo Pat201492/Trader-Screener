@@ -11,6 +11,18 @@ from .document_expand import (
     parse_ex107_xbrl,
 )
 from .edgar_client import EdgarClient, EdgarError, EdgarConfigError, EdgarHTTPError
+from .eval_harness import (
+    EvalReport,
+    EvalReportStore,
+    FieldMetrics,
+    FieldRegression,
+    GateReport,
+    HeldOutCase,
+    evaluate_regression,
+    reserve_held_out_set,
+    run_eval,
+    select_held_out,
+)
 from .extraction_ladder import (
     ExtractionLadder,
     GateResult,
@@ -47,6 +59,19 @@ from .reduce import (
     text_for_sections,
 )
 from .schema_registry import REGISTRY
+from .throughput_bench import (
+    BenchAxes,
+    CellResult,
+    build_prompt,
+    build_prompt_text,
+    compare_accuracy_tradeoff,
+    matrix_axes,
+    prefix_cache_check,
+    run_cell,
+    run_matrix,
+    summarize_matrix,
+    token_reduction_check,
+)
 from .validation import (
     ACCEPT,
     CORRECT,
@@ -143,4 +168,27 @@ __all__ = [
     "derive_anchor",
     "locate_span",
     "render_highlight",
+    # extraction eval harness: held-out set + per-field precision/recall + regression gate (#108)
+    "EvalReport",
+    "EvalReportStore",
+    "FieldMetrics",
+    "FieldRegression",
+    "GateReport",
+    "HeldOutCase",
+    "evaluate_regression",
+    "reserve_held_out_set",
+    "run_eval",
+    "select_held_out",
+    # throughput benchmark: measured prefill/decode tok/s + peak VRAM matrix (#108)
+    "BenchAxes",
+    "CellResult",
+    "build_prompt",
+    "build_prompt_text",
+    "compare_accuracy_tradeoff",
+    "matrix_axes",
+    "prefix_cache_check",
+    "run_cell",
+    "run_matrix",
+    "summarize_matrix",
+    "token_reduction_check",
 ]

@@ -554,6 +554,29 @@ def _run_live(args):
                                target_n=args.n, crawl_state=ctx["crawl_state"],
                                clock=_utc_now)
 
+    # Which ACCESSIONS are held out is decided up front, from the full crawl
+    # candidate pool, so the stratified pick (#108) is not biased by
+    # validation order. The actual `mark_held_out` call happens per-document
+    # below, once `expand_accession` resolves the real primary document name
+    # -- the crawl metadata's guessed `document` is not always what
+    # `document_expand.expand_accession` picks as primary (it inspects every
+    # manifest item, not just the full-text-search hit's guess), and marking
+    # against the wrong document name would silently fail to exclude it.
+    # Either way this happens BEFORE that document's first verdict, which is
+    # the actual correctness requirement (see eval_harness.py's docstring).
+    held_out_meta = {}
+    if args.reserve_held_out:
+        from eval_harness import select_held_out
+        accessions = ctx["crawl_state"].accessions
+        candidates = [{"accession": acc, "issuer": meta.get("issuer")}
+                     for acc, meta in accessions.items()]
+        selected = select_held_out(candidates, fraction=args.reserve_held_out,
+                                   seed=args.held_out_seed)
+        held_out_meta = {c["accession"]: c for c in selected}
+        print(f"Selected {len(selected)}/{len(candidates)} accessions for the #108 held-out "
+             f"eval set (fraction={args.reserve_held_out}, seed={args.held_out_seed}); "
+             f"they validate normally but never write an exemplar or seed a rule.")
+
     while not session.progress()["complete"]:
         nxt = session.next_unvalidated()
         if nxt is None:
@@ -573,6 +596,12 @@ def _run_live(args):
         det = ctx["detect_population"](primary.normalized.text, specs)
         spec = det.spec or default_spec
         session.spec = spec
+
+        if accession in held_out_meta and not session.is_held_out(accession, primary.name):
+            picked = held_out_meta[accession]
+            session.mark_held_out(accession, primary.name, issuer=meta.get("issuer"),
+                                  product_type=det.population, stratum=picked.get("stratum"))
+            print(f"  reserved for the #108 held-out eval set (stratum={picked.get('stratum')})")
 
         render_doc = RenderDocument.from_normalized(primary.normalized)
         sections = ctx["split_sections"](primary.normalized)
@@ -613,6 +642,13 @@ def main(argv=None):
     ap.add_argument("--n", type=int, default=20, help="target number of documents (N)")
     ap.add_argument("--local-only", action="store_true",
                     help="never escalate to Claude (#104 local-only mode)")
+    ap.add_argument("--reserve-held-out", type=float, default=None,
+                    help="reserve this fraction of the crawl frontier for the #108 held-out "
+                         "eval set, stratified by issuer, before any of it is validated "
+                         "(e.g. 0.15). Reserved documents still get verdicts -- they just "
+                         "never write an exemplar or seed a rule.")
+    ap.add_argument("--held-out-seed", type=int, default=0,
+                    help="seed for --reserve-held-out's selection (default: 0, deterministic)")
     args = ap.parse_args(argv)
 
     if args.demo:

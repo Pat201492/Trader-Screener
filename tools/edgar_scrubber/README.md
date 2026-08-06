@@ -109,12 +109,14 @@ See **SETUP.md** for full troubleshooting + remote Ollama setup.
 - **[EXTRACTION_LADDER.md](EXTRACTION_LADDER.md)** — *how* it escalates: rule → XBRL → local 7B → confidence gate → Claude (issue #104)
 - **[OUTPUT_STORE.md](OUTPUT_STORE.md)** — *where* it lands + the local-only / graduation boundary (issue #109)
 - **[VALIDATION_UI.md](VALIDATION_UI.md)** — *teach it first*: the human-in-loop side-by-side validation loop that seeds exemplars/rules/eval (issue #105)
+- **[EVAL_HARNESS.md](EVAL_HARNESS.md)** — *is it still right*: held-out set + per-field precision/recall/span-accuracy regression gate (issue #108)
+- **[THROUGHPUT_BENCHMARK.md](THROUGHPUT_BENCHMARK.md)** — *is it actually fast*: measured prefill/decode tok/s + peak VRAM, replacing every estimate (issue #108)
 
 ## References
 
 - Issue #95 (EDGAR scrubber parent)
 - Issue #104 (Claude escalation)
 - Issue #101 (document expansion + span-preserving reduction to the #103 token budget)
-- Issue #108 (3B model benchmark)
+- Issue #108 (eval harness: held-out regression gate + measured throughput benchmark, including the 3B model comparison)
 - Ollama: https://ollama.ai
 - Qwen2.5: https://huggingface.co/Qwen/Qwen2.5-7B-Instruct
