@@ -47,6 +47,22 @@ from .reduce import (
     text_for_sections,
 )
 from .schema_registry import REGISTRY
+from .validation import (
+    ACCEPT,
+    CORRECT,
+    REJECT,
+    FieldProposal,
+    FieldVerdict,
+    LadderExtractor,
+    RenderDocument,
+    RuleSeed,
+    ValidationSession,
+    ValidationStore,
+    build_field_context,
+    derive_anchor,
+    locate_span,
+    render_highlight,
+)
 
 __all__ = [
     # runtime (#103)
@@ -112,4 +128,19 @@ __all__ = [
     "split_sections",
     "text_for_sections",
     "sub_block",
+    # human-in-loop validation loop (#105)
+    "ValidationSession",
+    "ValidationStore",
+    "LadderExtractor",
+    "RenderDocument",
+    "FieldProposal",
+    "FieldVerdict",
+    "RuleSeed",
+    "ACCEPT",
+    "CORRECT",
+    "REJECT",
+    "build_field_context",
+    "derive_anchor",
+    "locate_span",
+    "render_highlight",
 ]
