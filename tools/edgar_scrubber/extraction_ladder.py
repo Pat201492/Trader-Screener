@@ -33,6 +33,21 @@ model, token cost) and the run's cost/escalation stats are collected in a
 `RunLog` so a run is reconstructible from its log and escalation rate by field
 -- the tool's health metric -- is reported, not just total spend.
 
+Prompt assembly is ORDER-SENSITIVE (#106): llama.cpp/Ollama reuse KV cache for
+identical prompt PREFIXES, so `build_messages` puts everything static first
+(system prompt, field spec, exemplars) and the VARYING document chunk last:
+
+    [ static: system prompt ]                    <- identical across all calls
+    [ static: field spec ]                        <- identical for one field
+    [ static: exemplars for (issuer, field) ]     <- identical within an issuer
+    [ VARYING: parsed table + document chunk ]    <- must be last
+
+With this ordering, exemplar tokens prefill once per issuer instead of once
+per document. `static_prefix()` is the literal text of that prefix, and
+`ExtractionLadder` asserts it does not change mid-run for the same (issuer,
+field) -- see `_static_prefix_seen` -- so a future refactor that interpolates
+the document earlier fails loudly instead of silently tripling prefill cost.
+
 Local-only mode (no `claude_client`, or `claude_enabled=False`) never raises
 for a gated field: it returns the local value flagged `gated_no_claude` and
 keeps going, per #104's acceptance.
@@ -85,11 +100,25 @@ def _lookup_rule(rules, issuer, field_name):
 
 
 def _lookup_exemplars(exemplars, issuer, field_name):
+    """Returns `(lines, exemplar_set_version)`.
+
+    `exemplars` may be a full `exemplars.ExemplarProvider` (#106) -- detected
+    by its `.resolve(issuer, field) -> ExemplarSet` method -- in which case the
+    version comes from the SPECIFIC set actually selected for this (issuer,
+    field), the version #104's provenance needs to distinguish "exemplars
+    changed" from "model changed" from "documents changed". A plain callable
+    or dict (e.g. a bare `ValidationStore`, or a test double) yields lines only
+    and the version falls back to whatever the ladder was constructed with.
+    """
     if not exemplars:
-        return None
+        return None, None
+    resolver = getattr(exemplars, "resolve", None)
+    if callable(resolver):
+        ex_set = resolver(issuer, field_name)
+        return (list(ex_set.lines()) if ex_set.rows else None), ex_set.version
     if callable(exemplars) and not isinstance(exemplars, dict):
-        return exemplars(issuer, field_name)
-    return exemplars.get((issuer, field_name))
+        return exemplars(issuer, field_name), None
+    return exemplars.get((issuer, field_name)), None
 
 
 # ── Constrained decode: wire schema + prompt ────────────────────────────────
@@ -140,16 +169,26 @@ def build_wire_schema(fields):
     }
 
 
-def build_messages(field_def, text, *, table_context=None, exemplars=None):
-    """No "respond only in JSON" -- constrained decode makes it structural, so
-    that instruction is deleted from the prompt entirely (#111)."""
-    system = (
-        "You are an SEC EDGAR extraction engine. Extract exactly the requested "
-        "field from SOURCE TEXT. `s` must be the [start, end] character offset "
-        "pair into SOURCE TEXT for the span that supports the value, or null if "
-        "you cannot locate one -- never guess a span. `c` is your confidence in "
-        "the value, 0 to 1."
-    )
+# No "respond only in JSON" -- constrained decode makes it structural, so that
+# instruction is deleted from the prompt entirely (#111). A module-level
+# constant, not inlined in `build_messages`, so `static_prefix` builds the
+# EXACT same text a real call sends -- one source of truth, not two copies
+# that can drift apart (#106).
+SYSTEM_PROMPT = (
+    "You are an SEC EDGAR extraction engine. Extract exactly the requested "
+    "field from SOURCE TEXT. `s` must be the [start, end] character offset "
+    "pair into SOURCE TEXT for the span that supports the value, or null if "
+    "you cannot locate one -- never guess a span. `c` is your confidence in "
+    "the value, 0 to 1."
+)
+
+
+def _static_user_parts(field_def, exemplars):
+    """The field-spec + exemplar portion of the prompt: identical on every
+    call for a given (field, exemplar set), regardless of which document is
+    being read. This is the part of the user message that belongs in the
+    static, KV-cache-reusable prefix (#106) -- everything document-specific
+    (parsed table, source text) is added AFTER this, never interleaved with it."""
     parts = [f"FIELD: {field_def.name} ({field_def.type})"]
     if field_def.description:
         parts.append(f"DESCRIPTION: {field_def.description}")
@@ -159,14 +198,34 @@ def build_messages(field_def, text, *, table_context=None, exemplars=None):
         parts.append(f"ALLOWED VALUES: {', '.join(field_def.enum)}")
     if field_def.bounds:
         parts.append(f"BOUNDS: {field_def.bounds}")
-    if table_context:
-        parts.append(f"PARSED TABLE, label: value pairs (#101):\n{table_context}")
     if exemplars:
         parts.append("EXEMPLARS for this issuer/field (#106):\n" +
                       "\n".join(f"- {e}" for e in exemplars))
+    return parts
+
+
+def static_prefix(field_def, exemplars=None):
+    """The byte-identical-within-an-issuer prefix (#106): system prompt +
+    field spec + exemplars. llama.cpp/Ollama reuse KV for identical prompt
+    PREFIXES, so this text must be assembled once per (issuer, field) and
+    never change while a document chunk is interpolated after it -- see the
+    ordering `build_messages` enforces below, and the runtime check
+    `ExtractionLadder` makes against this exact string (#111)."""
+    return SYSTEM_PROMPT + "\n\n" + "\n\n".join(_static_user_parts(field_def, exemplars))
+
+
+def build_messages(field_def, text, *, table_context=None, exemplars=None):
+    """Static prefix first (system + field spec + exemplars, identical across
+    documents for one issuer), VARYING document content last (parsed table,
+    then source text) -- see module docstring's ordering diagram. Putting the
+    document chunk anywhere earlier breaks KV-cache prefix reuse and roughly
+    triples prefill per call (#106/#111)."""
+    parts = list(_static_user_parts(field_def, exemplars))
+    if table_context:
+        parts.append(f"PARSED TABLE, label: value pairs (#101):\n{table_context}")
     parts.append(f"SOURCE TEXT:\n{text}")
     return [
-        {"role": "system", "content": system},
+        {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": "\n\n".join(parts)},
     ]
 
@@ -517,10 +576,42 @@ class ExtractionLadder:
         self.exemplar_set_version = exemplar_set_version
         self.max_tokens = max_tokens
         self.log = log if log is not None else RunLog()
+        # (issuer, field) -> last static prefix seen this run (#106 guard).
+        self._static_prefix_seen = {}
 
     @property
     def claude_available(self):
         return bool(self.claude_enabled and self.claude_client is not None)
+
+    def _check_static_prefix(self, field_def, exemplars, exemplar_version, issuer, field_name):
+        """Runtime guard for the #106 KV-cache invariant: the static prompt
+        prefix (system + field spec + exemplars) must be a PURE FUNCTION of
+        the exemplar-set version -- same version, same prefix, every time.
+
+        The version is allowed to change mid-run (a validation session
+        compounds: document 11 legitimately gets a bigger exemplar set than
+        document 1, per #105), and the prefix changes with it -- that is by
+        design, not a bug. What must never happen is the SAME version
+        producing a DIFFERENT prefix: that means something started
+        interpolating per-document content ahead of the exemplar block (or an
+        exemplar provider stopped being deterministic for a version it already
+        reported), and it would silently triple prefill cost (#111) if not
+        caught here."""
+        if issuer is None:
+            return
+        prefix = static_prefix(field_def, exemplars)
+        key = (issuer, field_name)
+        prior_version, prior_prefix = self._static_prefix_seen.get(key, (None, None))
+        if prior_version is not None and prior_version == exemplar_version and prior_prefix != prefix:
+            raise AssertionError(
+                f"static prompt prefix changed for issuer={issuer!r} "
+                f"field={field_name!r} while its exemplar_set version "
+                f"({exemplar_version!r}) stayed the same -- this breaks "
+                f"llama.cpp/Ollama KV-cache prefix reuse (#106/#111). A given "
+                f"exemplar-set version must always render the same static "
+                f"prefix; only a version bump may change it."
+            )
+        self._static_prefix_seen[key] = (exemplar_version, prefix)
 
     def extract(self, field_name, *, text, issuer=None, ex107=None,
                 accession=None, document=None, table_context=None):
@@ -547,8 +638,11 @@ class ExtractionLadder:
                 f"local rung (#103 must be wired up before #104 can escalate)."
             )
 
-        # Rung 3: local 7B, with (issuer, field) exemplars if available (#106).
-        exemplars = _lookup_exemplars(self.exemplars, issuer, field_name)
+        # Rung 3: local 7B, with (form, issuer, field) exemplars if available (#106).
+        exemplars, ex_version = _lookup_exemplars(self.exemplars, issuer, field_name)
+        exemplar_set = ex_version if ex_version is not None else self.exemplar_set_version
+        self._check_static_prefix(f, exemplars, ex_version, issuer, field_name)
+
         value, span, conf, samples, tin, tout, retries = _extract_via_model(
             self.local_client, self.local_model, f, text, table_context=table_context,
             exemplars=exemplars, n_samples=self.self_consistency_samples,
@@ -561,7 +655,7 @@ class ExtractionLadder:
         if not gate.escalate:
             prov = Provenance(rung="local", document=document, span=span, model=self.local_model,
                                prompt_version=self.prompt_version,
-                               exemplar_set=self.exemplar_set_version,
+                               exemplar_set=exemplar_set,
                                tokens_in=tin, tokens_out=tout)
             return self._finish(f, value, span, "local", prov, conf, gate, ex107,
                                  accession=accession, document=document)
@@ -575,7 +669,7 @@ class ExtractionLadder:
             cost = estimate_cost(self.claude_model, ctin, ctout)
             prov = Provenance(rung="claude", document=document, span=c_span, model=self.claude_model,
                                prompt_version=self.prompt_version,
-                               exemplar_set=self.exemplar_set_version,
+                               exemplar_set=exemplar_set,
                                tokens_in=ctin, tokens_out=ctout, cost_usd=cost)
             return self._finish(f, c_value, c_span, "claude", prov, c_conf, gate, ex107,
                                  accession=accession, document=document, escalated=True)
@@ -583,7 +677,7 @@ class ExtractionLadder:
         # Local-only mode: flag the gate failure, keep going -- never raise.
         prov = Provenance(rung="local", document=document, span=span, model=self.local_model,
                            prompt_version=self.prompt_version,
-                           exemplar_set=self.exemplar_set_version, tokens_in=tin, tokens_out=tout)
+                           exemplar_set=exemplar_set, tokens_in=tin, tokens_out=tout)
         return self._finish(f, value, span, "local", prov, conf, gate, ex107,
                              accession=accession, document=document, gated=True)
 
