@@ -64,7 +64,7 @@ print(response["choices"][0]["message"]["content"])
 
 **Single Endpoint:** OpenAI-compatible `/v1/chat/completions` at `localhost:11434/v1` works for both:
 - Local Ollama (this repo)
-- Claude escalation via `base_url` swap (issue #104)
+- Claude escalation via `base_url` swap (`OllamaConfig.for_claude()`, issue #104 — see [EXTRACTION_LADDER.md](EXTRACTION_LADDER.md))
 
 **Hardware Probe:** Never silently downgrades to CPU. Reports profile explicitly so tight-VRAM machines can make informed decisions (close VSCode/browser to free ~1.5 GB).
 
@@ -106,6 +106,7 @@ See **SETUP.md** for full troubleshooting + remote Ollama setup.
 
 - **[FIELD_SPEC.md](FIELD_SPEC.md)** — *what* to extract (issue #102)
 - **[DOCUMENT_REDUCTION.md](DOCUMENT_REDUCTION.md)** — document expansion + the four-stage token-budget reduction (issue #101)
+- **[EXTRACTION_LADDER.md](EXTRACTION_LADDER.md)** — *how* it escalates: rule → XBRL → local 7B → confidence gate → Claude (issue #104)
 - **[OUTPUT_STORE.md](OUTPUT_STORE.md)** — *where* it lands + the local-only / graduation boundary (issue #109)
 
 ## References

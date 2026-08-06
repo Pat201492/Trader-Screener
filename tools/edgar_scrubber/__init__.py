@@ -11,6 +11,21 @@ from .document_expand import (
     parse_ex107_xbrl,
 )
 from .edgar_client import EdgarClient, EdgarError, EdgarConfigError, EdgarHTTPError
+from .extraction_ladder import (
+    ExtractionLadder,
+    GateResult,
+    GateSignal,
+    LadderResult,
+    LogEntry,
+    MalformedOutputError,
+    Provenance,
+    RuleMatch,
+    RunLog,
+    build_wire_schema,
+    chat_json,
+    estimate_cost,
+    evaluate_gate,
+)
 from .field_spec import load_specs
 from .hardware_probe import HardwareProfile, get_nvidia_vram, select_profile
 from .normalize import NormalizedDocument, OffsetMap, normalize_html, parse_tables
@@ -57,6 +72,20 @@ __all__ = [
     # field specs (#102)
     "load_specs",
     "REGISTRY",
+    # extraction provider ladder: rule -> XBRL -> local 7B -> Claude (#104)
+    "ExtractionLadder",
+    "RuleMatch",
+    "GateResult",
+    "GateSignal",
+    "evaluate_gate",
+    "Provenance",
+    "LogEntry",
+    "RunLog",
+    "LadderResult",
+    "build_wire_schema",
+    "chat_json",
+    "estimate_cost",
+    "MalformedOutputError",
     # local output store + ownership boundary (#109)
     "OutputStore",
     "DocumentExtraction",
