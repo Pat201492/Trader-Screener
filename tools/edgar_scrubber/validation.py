@@ -433,6 +433,9 @@ CREATE TABLE IF NOT EXISTS verdicts (
 CREATE TABLE IF NOT EXISTS exemplars (
     issuer       TEXT NOT NULL,
     field        TEXT NOT NULL,
+    form         TEXT,               -- form type (e.g. "424B2"); NULL on rows
+                                      -- written before this column existed --
+                                      -- treated as form-agnostic (#106)
     kind         TEXT NOT NULL,      -- positive | corrected | negative
     rendered     TEXT NOT NULL,
     value_json   TEXT,
@@ -491,8 +494,17 @@ class ValidationStore:
         self._conn.row_factory = sqlite3.Row
         if not readonly:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
         self.readonly = readonly
+
+    def _migrate(self):
+        """Additive schema migration for stores created before the `form`
+        column existed (#106) -- `CREATE TABLE IF NOT EXISTS` alone will not
+        add it to an already-existing exemplars table."""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(exemplars)")}
+        if "form" not in cols:
+            self._conn.execute("ALTER TABLE exemplars ADD COLUMN form TEXT")
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -654,14 +666,14 @@ class ValidationStore:
 
     def write_exemplar(self, issuer, field, kind, rendered, *, value=None,
                        anchor=None, span_text=None, accession=None,
-                       document=None, now=None):
+                       document=None, form=None, now=None):
         if not issuer:
             return  # exemplars are keyed by issuer; an unknown issuer can't index
         self._conn.execute(
             "INSERT INTO exemplars "
-            "(issuer, field, kind, rendered, value_json, anchor, span_text, "
-            " accession, document, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (issuer, field, kind, rendered, json.dumps(value), anchor, span_text,
+            "(issuer, field, form, kind, rendered, value_json, anchor, span_text, "
+            " accession, document, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (issuer, field, form, kind, rendered, json.dumps(value), anchor, span_text,
              accession, document, now),
         )
         self._conn.commit()
@@ -701,6 +713,36 @@ class ValidationStore:
         nothing yet, so the ladder omits the exemplar block entirely."""
         ex = self.exemplars_for(issuer, field)
         return ex or None
+
+    def exemplar_rows(self, form, field, *, issuer=None, exclude_issuer=None, limit=200):
+        """Raw (unselected, unrendered) exemplar rows for one `(form, field)`,
+        scoped either to one issuer (`issuer=`) or pooled across every OTHER
+        issuer (`exclude_issuer=`) -- the two tiers of #106's fallback chain
+        (`exemplars.ExemplarProvider` picks and orders from these; this is the
+        raw material, not the prompt). Rows written before the `form` column
+        existed carry `form IS NULL` and are treated as compatible with any
+        form, so old exemplars are not silently dropped by the migration."""
+        where = ["field = ?", "(form = ? OR form IS NULL)"]
+        params = [field, form]
+        if issuer is not None:
+            where.append("issuer = ?")
+            params.append(issuer)
+        if exclude_issuer is not None:
+            where.append("issuer != ?")
+            params.append(exclude_issuer)
+        params.append(limit)
+        rows = self._conn.execute(
+            f"SELECT issuer, kind, rendered, value_json, anchor, span_text, "
+            f"accession, document FROM exemplars WHERE {' AND '.join(where)} "
+            f"ORDER BY rowid DESC LIMIT ?",
+            params,
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["value"] = json.loads(d.pop("value_json")) if d.get("value_json") is not None else None
+            out.append(d)
+        return out
 
     # -- rule seeds (#107) -------------------------------------------------
 
@@ -800,11 +842,12 @@ class ValidationSession:
         if self.store.is_held_out(self.session_id, accession, document):
             return  # #108: a held-out document never teaches the exemplar store
         field = fv.field
+        form = getattr(self.spec, "form_type", None)
         if fv.verdict == REJECT:
             rendered = render_exemplar("negative", field=field)
             self.store.write_exemplar(issuer, field, "negative", rendered,
                                       accession=accession, document=document,
-                                      now=self._now())
+                                      form=form, now=self._now())
             return
 
         kind = "corrected" if fv.verdict == CORRECT else "positive"
@@ -814,7 +857,7 @@ class ValidationSession:
         self.store.write_exemplar(issuer, field, kind, rendered, value=fv.value,
                                   anchor=fv.anchor, span_text=span_text,
                                   accession=accession, document=document,
-                                  now=self._now())
+                                  form=form, now=self._now())
 
     def complete_document(self, accession, document, *, issuer=None):
         """Mark a document done -- called after every spec field has a verdict.

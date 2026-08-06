@@ -23,6 +23,13 @@ from .eval_harness import (
     run_eval,
     select_held_out,
 )
+from .exemplars import (
+    ExemplarKey,
+    ExemplarProvider,
+    ExemplarRow,
+    ExemplarSet,
+    select_exemplars,
+)
 from .extraction_ladder import (
     ExtractionLadder,
     GateResult,
@@ -113,6 +120,12 @@ __all__ = [
     # field specs (#102)
     "load_specs",
     "REGISTRY",
+    # exemplar store: (form, issuer, field) few-shot prompt assembly (#106)
+    "ExemplarProvider",
+    "ExemplarKey",
+    "ExemplarRow",
+    "ExemplarSet",
+    "select_exemplars",
     # extraction provider ladder: rule -> XBRL -> local 7B -> Claude (#104)
     "ExtractionLadder",
     "RuleMatch",
