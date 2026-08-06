@@ -10,9 +10,14 @@ rule/model disagree beyond threshold -> auto-demote + flag for re-validation.
 Run:  python tools/edgar_scrubber/test_rules.py
 """
 
-import rules as r
-import validation as v
-import field_spec as fs
+try:  # package import: tools.edgar_scrubber.test_rules
+    from . import rules as r
+    from . import validation as v
+    from . import field_spec as fs
+except ImportError:  # standalone: python tools/edgar_scrubber/test_rules.py
+    import rules as r
+    import validation as v
+    import field_spec as fs
 
 failures = []
 

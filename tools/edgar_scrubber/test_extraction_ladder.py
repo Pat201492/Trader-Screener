@@ -21,8 +21,12 @@ Run:  python tools/edgar_scrubber/test_extraction_ladder.py
 """
 import json
 
-import extraction_ladder as el
-import field_spec as fs
+try:  # package import: tools.edgar_scrubber.test_extraction_ladder
+    from . import extraction_ladder as el
+    from . import field_spec as fs
+except ImportError:  # standalone: python tools/edgar_scrubber/test_extraction_ladder.py
+    import extraction_ladder as el
+    import field_spec as fs
 
 failures = []
 

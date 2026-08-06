@@ -578,11 +578,48 @@ class ExtractionLadder:
             raise KeyError(f"{field_name!r} is not defined in spec {self.spec.spec_id}")
 
         # Rung 1: promoted rule (#107).
-        rule = _lookup_rule(self.rules, issuer, field_name)
-        if rule is not None:
-            prov = Provenance(rung="rule", rule_id=rule.rule_id, document=document, span=rule.span)
-            return self._finish(f, rule.value, rule.span, "rule", prov, rule.confidence,
-                                 None, ex107, accession=accession, document=document)
+        if self.rules is not None and issuer is not None:
+            rule_result = None
+            if hasattr(self.rules, 'apply_rule') and callable(self.rules.apply_rule):
+                # RuleManager instance: call apply_rule() with text
+                rule_result = self.rules.apply_rule(issuer, field_name, text)
+            else:
+                # Dict or callable returning pre-computed RuleMatch
+                rule = _lookup_rule(self.rules, issuer, field_name)
+                if rule is not None:
+                    rule_result = rule
+
+            if rule_result is not None:
+                if isinstance(rule_result, tuple):
+                    # Result from RuleManager.apply_rule(): (value, start, end)
+                    value, start, end = rule_result
+                    rule_match = RuleMatch(value=value, rule_id=f"applied-rule-{issuer}-{field_name}",
+                                          span=(start, end), confidence=1.0)
+                else:
+                    # Already a RuleMatch object
+                    rule_match = rule_result
+
+                # Check shadow mode and run model in parallel if needed
+                shadow_comp = None
+                if hasattr(self.rules, 'is_shadowing') and self.rules.is_shadowing(issuer, field_name):
+                    # Rule is in shadow window; run model in parallel to compare
+                    if self.local_client is not None:
+                        exemplars = _lookup_exemplars(self.exemplars, issuer, field_name)
+                        model_value, model_span, model_conf, _samples, _tin, _tout, _retries = _extract_via_model(
+                            self.local_client, self.local_model, f, text, table_context=table_context,
+                            exemplars=exemplars, n_samples=1, max_tokens=self.max_tokens)
+                        agreement = rule_match.value == model_value
+                        shadow_comp = ShadowComparison(
+                            rule_value=rule_match.value, model_value=model_value,
+                            rule_span=rule_match.span, model_span=model_span,
+                            agreement=agreement,
+                            note=None if agreement else f"rule={rule_match.value!r} vs model={model_value!r}"
+                        )
+
+                prov = Provenance(rung="rule", rule_id=rule_match.rule_id, document=document, span=rule_match.span)
+                result = self._finish(f, rule_match.value, rule_match.span, "rule", prov, rule_match.confidence,
+                                     None, ex107, accession=accession, document=document, shadow=shadow_comp)
+                return result
 
         # Rung 2: XBRL / EX-107 fee exhibit (#101).
         if ex107 and ex107.get(field_name) is not None:
@@ -645,7 +682,7 @@ class ExtractionLadder:
         ]
 
     def _finish(self, f, value, span, rung, provenance, confidence, gate, ex107, *,
-                accession, document, escalated=False, gated=False):
+                accession, document, escalated=False, gated=False, shadow=None):
         flags = self.spec.check_value(f.name, value, ex107=ex107) if value is not None else []
         if gated:
             flags = list(flags) + [Flag(
@@ -662,6 +699,7 @@ class ExtractionLadder:
             value=value, unit=f.unit, span=span, confidence=confidence,
             flags=[fl.as_dict() for fl in flags], escalated=escalated, gated=gated,
             gate=gate.as_dict() if gate else None, provenance=provenance.as_dict(),
+            shadow=shadow,
         ))
         return result
 
