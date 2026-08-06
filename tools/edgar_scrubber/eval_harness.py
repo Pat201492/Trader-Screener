@@ -482,7 +482,7 @@ def evaluate_regression(baseline, candidate, *, thresholds=None, min_support=3):
             b, c = base_m.get(metric), cand_m.get(metric)
             if b is None or c is None:
                 continue
-            n = cand_m.get(f"{metric}_n", 0)
+            n = min(base_m.get(f"{metric}_n", 0), cand_m.get(f"{metric}_n", 0))
             if n < min_support:
                 continue
             delta = c - b
@@ -493,7 +493,7 @@ def evaluate_regression(baseline, candidate, *, thresholds=None, min_support=3):
             b, c = base_m.get(metric), cand_m.get(metric)
             if b is None or c is None:
                 continue
-            n = cand_m.get(f"{metric}_n", 0)
+            n = min(base_m.get(f"{metric}_n", 0), cand_m.get(f"{metric}_n", 0))
             if n < min_support:
                 continue
             delta = c - b

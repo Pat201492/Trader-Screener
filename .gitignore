@@ -22,3 +22,4 @@ Thumbs.db
 # cache and per-query crawl state, both regenerable from a re-run
 .edgar-cache/
 tools/edgar_scrubber/crawl_state/
+tools/edgar_scrubber/.bench_cache/

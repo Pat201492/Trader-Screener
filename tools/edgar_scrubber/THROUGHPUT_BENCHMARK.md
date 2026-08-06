@@ -1,12 +1,47 @@
 # Throughput benchmark (issue #108)
 
-Part of #95. Every performance number in #95, #103, #107, and #111 is an
+Part of #95. Every performance number in #95, #103, #107, and #111 was an
 estimate derived from hardware characteristics — `hardware_probe.py`'s
 KV-cache sizing is arithmetic, and #111's "~8x token reduction" and "the run
-becomes decode-bound" are predictions. Nothing has been measured. A
-20-document benchmark on the actual target GPU (an RTX 4070 Ti) replaces all
-of it and is cheap to run. See [EVAL_HARNESS.md](EVAL_HARNESS.md) for the
-quality half of #108.
+becomes decode-bound" were predictions. See [EVAL_HARNESS.md](EVAL_HARNESS.md)
+for the quality half of #108.
+
+## Measured (2026-08-06, RTX 4070 Ti)
+
+[`throughput_results/2026-08-06_rtx4070ti.json`](throughput_results/2026-08-06_rtx4070ti.json)
+is a real run of [`run_throughput_matrix.py`](run_throughput_matrix.py) against
+5 real 424B2 filings fetched live from EDGAR (4 JPMorgan, 1 BofA Finance) and
+a live local Ollama server on the target RTX 4070 Ti, both `qwen2.5` models,
+both routing modes, both preprocessing modes:
+
+- **#111's ~8x token-reduction claim holds, and then some** — measured
+  `whole_section`/`raw_table` -> `sub_block`/`flattened_pairs` reduction is
+  **8.1x** on the 3B model (4577 -> 567 tokens/doc) and **9.8x** on the 7B
+  model (4559 -> 465 tokens/doc).
+- **Every one of the 8 measured cells is decode-bound** (`decode_bound: true`
+  — measured decode wall-clock time exceeds prefill wall-clock time in
+  every cell), confirming #111's prediction.
+- 3B decode throughput measured at ~111-113 tok/s; 7B at ~58-61 tok/s, both
+  well above what the pre-existing #103 arithmetic assumed.
+
+**Not yet measured, scoped as follow-up work**:
+- **KV-quant (`fp16` vs `q8_0`) comparison** — this run only measured
+  whatever quantization the Ollama server already had running; flipping
+  `OLLAMA_KV_CACHE_TYPE` requires restarting the server, which this pass
+  intentionally did not do so as not to disrupt other GPU use during the
+  run. `on_kv_quant_change` in `run_matrix` is the pause point for whoever
+  does this next.
+- **Batch concurrency (1/4/8/16)** — `run_cell` as shipped issues
+  `generate_fn` calls strictly sequentially regardless of `axes.batch`
+  (batch only changes VRAM-sample chunking cadence), so this pass measured
+  `batch=1` only; a batch axis that actually fires concurrent requests is a
+  follow-up.
+- **`compare_accuracy_tradeoff`** — needs `eval_harness.run_eval` output
+  attached per cell, which needs a real #105 held-out set; none exists in
+  this environment yet, so accuracy-tied cells are unmeasured.
+- Only 5 documents were used (not the full 20) to keep the live run under a
+  few minutes; re-running `run_throughput_matrix.py` with more `N_DOCS` only
+  costs more EDGAR fetches (cached under `.bench_cache/`) and GPU time.
 
 ```
 tools/edgar_scrubber/

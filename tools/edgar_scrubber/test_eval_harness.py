@@ -272,6 +272,14 @@ def test_regression_gate():
     check("a metric below min_support is skipped, not blocked on noise",
           not gate_low_n.blocked)
 
+    # baseline-side low support: candidate is well-supported and reasonable,
+    # but the *baseline* was scored from a single noisy example -- must not block.
+    noisy_baseline = _report("noisy_base", 1.0, 0.90, n=1)
+    well_supported_candidate = _report("well_supported", 0.90, 0.90, n=50)
+    gate_baseline_low_n = eh.evaluate_regression(noisy_baseline, well_supported_candidate, min_support=5)
+    check("low support on the baseline side is also skipped, not just the candidate side",
+          not gate_baseline_low_n.blocked)
+
     missing = eh.EvalReport(report_id="missing", spec_id="s", spec_version="1.0.0",
                             generated_at="t", fields={})
     gate_missing = eh.evaluate_regression(baseline, missing)
