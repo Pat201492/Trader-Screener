@@ -375,6 +375,27 @@ class Provenance:
 
 
 @dataclass
+class ShadowComparison:
+    """Shadow mode: rule and model running in parallel (#107).
+    Logged when a rule is in its promotion window."""
+
+    rule_value: object
+    model_value: object
+    rule_span: tuple
+    model_span: tuple
+    agreement: bool
+    note: str = None
+
+    def as_dict(self):
+        d = asdict(self)
+        if isinstance(d.get("rule_span"), tuple):
+            d["rule_span"] = list(d["rule_span"])
+        if isinstance(d.get("model_span"), tuple):
+            d["model_span"] = list(d["model_span"])
+        return d
+
+
+@dataclass
 class LogEntry:
     accession: str
     document: str
@@ -389,11 +410,14 @@ class LogEntry:
     gated: bool
     gate: dict
     provenance: dict
+    shadow: dict = None           # ShadowComparison when rule is in shadow window
 
     def as_dict(self):
         d = asdict(self)
         if isinstance(d.get("span"), tuple):
             d["span"] = list(d["span"])
+        if d.get("shadow"):
+            d["shadow"] = d["shadow"].as_dict() if hasattr(d["shadow"], "as_dict") else d["shadow"]
         return d
 
 
@@ -451,13 +475,38 @@ class RunLog:
             per_doc[key] = per_doc.get(key, 0.0) + (e.provenance.get("cost_usd") or 0.0)
         return {k: round(v, 6) for k, v in per_doc.items()}
 
+    def extraction_breakdown(self):
+        """Per-run breakdown: what % of extractions came from rule vs local vs Claude.
+        The #107 throughput budget metric: rule coverage should dominate."""
+        if not self.entries:
+            return {"rule": 0.0, "xbrl": 0.0, "local": 0.0, "claude": 0.0}
+        counts = self.rung_counts()
+        total = len(self.entries)
+        return {rung: round(counts.get(rung, 0) / total, 4) for rung in ("rule", "xbrl", "local", "claude")}
+
+    def shadow_disagreements(self):
+        """Fields where shadow mode detected rule/model disagreements (template change signal)."""
+        disagreements = {}
+        for e in self.entries:
+            if e.shadow and not e.shadow.get("agreement"):
+                key = f"{e.field}"
+                if key not in disagreements:
+                    disagreements[key] = []
+                disagreements[key].append({
+                    "accession": e.accession, "document": e.document,
+                    "note": e.shadow.get("note"),
+                })
+        return disagreements
+
     def summary(self):
         return {
             "total_extractions": len(self.entries),
             "rung_counts": self.rung_counts(),
+            "extraction_breakdown": self.extraction_breakdown(),
             "escalation_rate": round(self.escalation_rate(), 4),
             "escalation_rate_by_field": self.escalation_rate_by_field(),
             "gated_fields": self.gated_fields(),
+            "shadow_disagreements": self.shadow_disagreements(),
             "cost_by_document": self.cost_by_document(),
             **self.cost_summary(),
         }
