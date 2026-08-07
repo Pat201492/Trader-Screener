@@ -82,11 +82,21 @@ fail-loud; issuer+CIK parsed from `display_names`; and every endpoint building i
 
 The live integration test #99 also names — search 424B2 over a one-week window → resolve an accession
 → fetch its primary document, under the rate cap, second run zero network — is gated so the suite
-stays green offline:
+stays green offline. See [SETUP.md](SETUP.md#edgar_user_agent-sec-live-tests) for how to set
+`EDGAR_USER_AGENT` on Windows/PowerShell; bash form:
 
-```
+```bash
 EDGAR_LIVE=1 EDGAR_USER_AGENT="Your Name you@example.com" python tools/edgar_scrubber/test_edgar_client.py
 ```
+
+```powershell
+$env:EDGAR_LIVE = "1"
+$env:EDGAR_USER_AGENT = "Your Name you@example.com"
+python tools/edgar_scrubber/test_edgar_client.py
+```
+
+`EdgarClient(...)` also reads `EDGAR_USER_AGENT` itself when `user_agent` is omitted (not just in this
+test), so any script can rely on the env var instead of hardcoding a UA in source.
 
 ## Porting into the real pipeline
 
