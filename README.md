@@ -6,7 +6,7 @@ Trader-oriented screener + research terminal, built on the shared data pipeline 
 
 ## Live demo (no backend)
 
-The dashboard runs fully in the browser on **synthetic sample data** — no pipeline or API needed. It exercises the real UI (magic-formula ranks, smart-money moat, sizing, IV rank, options-flow columns, macro regime, data-integrity) and is banner-labelled "synthetic data, not real markets."
+The dashboard runs fully in the browser on **synthetic sample data** — no pipeline or API needed. It exercises the real UI (magic-formula ranks, smart-money moat, sizing, IV rank, options-flow columns, macro regime, data-integrity, plus the **Research** hypothesis-project cards and the **Tools** module catalog — Data Gathering / Analysis Models, with the EDGAR 424B2 scrubber as the first tool) and is banner-labelled "synthetic data, not real markets."
 
 - **Locally:** open [`web-dashboard/index.html?demo=1`](web-dashboard/index.html?demo=1), or serve the repo root and visit `/` (redirects into the demo).
 - **On the web (optional):** enable GitHub Pages → served at `https://pat201492.github.io/Trader-Screener/`. ⚠️ Pages on a **private** repo needs a paid plan and makes the served static files public (including `Project folder/`, `Research/`, the `.md`s). To publish only the demo, use a `gh-pages` branch (or a separate public repo) containing just `web-dashboard/`.
