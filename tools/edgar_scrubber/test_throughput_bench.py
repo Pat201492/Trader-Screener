@@ -239,6 +239,78 @@ def test_open_questions_answered_from_measured_cells():
           "decode_bound_cells" in summary["qwen2.5:7b-instruct-q4_K_M"])
 
 
+# --- the batch axis must actually dispatch concurrently ----------------------
+# It used to loop the chunk sequentially, so batch=1/4/8/16 produced
+# statistically identical timings forever -- the axis was labelled in every
+# report but measured nothing. These pin the two halves of the fix: requests
+# really overlap, and the result carries a metric that can SHOW the overlap
+# (per-request server durations cannot -- four concurrent 1s calls still
+# average 1s).
+
+def test_batch_dispatches_concurrently():
+    import threading, time as _t
+    live = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def slow_generate(payload):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        _t.sleep(0.05)
+        with lock:
+            live -= 1
+        return {"prompt_eval_count": 10, "prompt_eval_duration": 10_000_000,
+                "eval_count": 5, "eval_duration": 10_000_000}
+
+    axes = tb.BenchAxes(model="m", batch=4, kv_quant="f16", routing="none", preprocessing="raw")
+    tb.run_cell(axes, ["p"] * 8, generate_fn=slow_generate, vram_sampler=lambda: (10.0, 5.0))
+    assert peak > 1, f"batch=4 never had more than {peak} request in flight — the axis is a no-op"
+    assert peak <= 4, f"more in flight ({peak}) than batch allows"
+
+
+def test_batch_one_stays_sequential():
+    import threading
+    live = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def gen(payload):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+            live -= 1
+        return {"prompt_eval_count": 10, "prompt_eval_duration": 10_000_000,
+                "eval_count": 5, "eval_duration": 10_000_000}
+
+    axes = tb.BenchAxes(model="m", batch=1, kv_quant="f16", routing="none", preprocessing="raw")
+    tb.run_cell(axes, ["p"] * 4, generate_fn=gen, vram_sampler=lambda: (10.0, 5.0))
+    assert peak == 1, "batch=1 must not run anything concurrently"
+
+
+def test_wall_clock_metric_can_show_a_batch_win():
+    # The metric the report needs: server durations are identical between these
+    # two cells, so only wall clock distinguishes them.
+    import time as _t
+
+    def gen(payload):
+        _t.sleep(0.02)
+        return {"prompt_eval_count": 10, "prompt_eval_duration": 20_000_000,
+                "eval_count": 5, "eval_duration": 20_000_000}
+
+    seq = tb.run_cell(tb.BenchAxes(model="m", batch=1, kv_quant="f16", routing="none", preprocessing="raw"),
+                   ["p"] * 6, generate_fn=gen, vram_sampler=lambda: (10.0, 5.0))
+    par = tb.run_cell(tb.BenchAxes(model="m", batch=6, kv_quant="f16", routing="none", preprocessing="raw"),
+                   ["p"] * 6, generate_fn=gen, vram_sampler=lambda: (10.0, 5.0))
+
+    assert seq.seconds_per_doc == par.seconds_per_doc, \
+        "server-duration means are identical — this is why they cannot measure batch"
+    assert par.wall_seconds_per_doc < seq.wall_seconds_per_doc, \
+        f"wall clock must show the win: batch=6 {par.wall_seconds_per_doc}s vs batch=1 {seq.wall_seconds_per_doc}s"
+
+
 def main():
     print("Throughput benchmark harness gate (#108)")
     test_routing_and_preprocessing_build_distinct_real_text()
@@ -246,6 +318,9 @@ def main():
     test_run_cell_measures_prefill_decode_tokens_and_peak_vram()
     test_run_matrix_fires_kv_quant_change_once_per_value()
     test_open_questions_answered_from_measured_cells()
+    test_batch_dispatches_concurrently()
+    test_batch_one_stays_sequential()
+    test_wall_clock_metric_can_show_a_batch_win()
 
     if failures:
         print(f"\n{len(failures)} check(s) FAILED:")

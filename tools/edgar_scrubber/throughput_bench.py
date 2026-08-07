@@ -41,6 +41,8 @@ no GPU):  python tools/edgar_scrubber/throughput_bench.py
 """
 
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field as _dc_field
 
 try:  # package import: tools.edgar_scrubber.throughput_bench
@@ -228,6 +230,12 @@ class CellResult:
     decode_seconds_per_doc: float
     peak_vram_gb: float
     baseline_vram_gb: float
+    # WALL-CLOCK seconds per document across the whole cell. `seconds_per_doc`
+    # above is the mean of per-request SERVER durations, which cannot show a
+    # batch win: four concurrent requests each taking 1s still average 1s, while
+    # the wall clock shows ~1s for four docs. Without this the batch axis stays
+    # unmeasurable even once dispatch is genuinely concurrent.
+    wall_seconds_per_doc: float = 0.0
     accuracy: dict = None   # optional {field: FieldMetrics.as_dict()} from eval_harness
 
     @property
@@ -283,21 +291,36 @@ def run_cell(axes, prompts, *, generate_fn, vram_sampler=_default_vram_sampler,
     baseline_used = total0 - free0
     peak_used = baseline_used
 
+    def _one(p):
+        payload = {"model": axes.model, "prompt": p, "stream": False,
+                   "options": {"num_ctx": num_ctx, "num_predict": num_predict}}
+        resp = generate_fn(payload)
+        return BenchSample(
+            prompt_tokens=resp.get("prompt_eval_count", 0),
+            prompt_duration_ns=resp.get("prompt_eval_duration", 0),
+            decode_tokens=resp.get("eval_count", 0),
+            decode_duration_ns=resp.get("eval_duration", 0),
+        )
+
+    # The chunk is dispatched CONCURRENTLY. It used to loop `for p in chunk`
+    # sequentially, which made `axes.batch` a no-op: batch=1/4/8/16 produced
+    # statistically identical timings for every run of this harness, since batch
+    # only changed how often VRAM was sampled. Ollama's request-level batch is
+    # concurrent in-flight requests against its parallel slots, so measuring it
+    # requires actually firing them at once.
     samples = []
+    wall0 = time.perf_counter()
     for i in range(0, len(prompts), axes.batch):
         chunk = prompts[i:i + axes.batch]
-        for p in chunk:
-            payload = {"model": axes.model, "prompt": p, "stream": False,
-                      "options": {"num_ctx": num_ctx, "num_predict": num_predict}}
-            resp = generate_fn(payload)
-            samples.append(BenchSample(
-                prompt_tokens=resp.get("prompt_eval_count", 0),
-                prompt_duration_ns=resp.get("prompt_eval_duration", 0),
-                decode_tokens=resp.get("eval_count", 0),
-                decode_duration_ns=resp.get("eval_duration", 0),
-            ))
+        if axes.batch == 1:
+            chunk_samples = [_one(chunk[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=axes.batch) as pool:
+                chunk_samples = list(pool.map(_one, chunk))
+        samples.extend(chunk_samples)
         total, free = vram_sampler()
         peak_used = max(peak_used, total - free)
+    wall_seconds = time.perf_counter() - wall0
 
     n = len(samples)
     mean_prefill = sum(s.prefill_tok_s for s in samples) / n
@@ -314,6 +337,7 @@ def run_cell(axes, prompts, *, generate_fn, vram_sampler=_default_vram_sampler,
         prefill_seconds_per_doc=round(prefill_seconds, 3),
         decode_seconds_per_doc=round(decode_seconds, 3),
         peak_vram_gb=round(peak_used, 2), baseline_vram_gb=round(baseline_used, 2),
+        wall_seconds_per_doc=round(wall_seconds / n, 3),
     )
 
 

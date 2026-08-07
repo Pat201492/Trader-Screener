@@ -558,11 +558,27 @@ class EvalReportStore:
         self.close()
 
     def save(self, report, *, accepted_baseline=False):
+        # ON CONFLICT rather than INSERT OR REPLACE. REPLACE deletes the existing
+        # row and inserts a fresh one, so re-saving a report with the default
+        # accepted_baseline=False silently cleared a flag that accept_as_baseline()
+        # had set. The regression gate would then find no baseline to compare
+        # against and pass everything -- a silent loss of the only thing standing
+        # between a quality regression and a merge.
+        #
+        # MAX() keeps an accepted baseline accepted across re-saves; demoting one
+        # stays an explicit act rather than a side effect of writing the report again.
         self._conn.execute(
-            "INSERT OR REPLACE INTO eval_reports "
+            "INSERT INTO eval_reports "
             "(report_id, spec_id, spec_version, exemplar_set_version, rule_set_version, "
             " local_model, generated_at, accepted_baseline, report_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(report_id) DO UPDATE SET "
+            "  spec_id=excluded.spec_id, spec_version=excluded.spec_version, "
+            "  exemplar_set_version=excluded.exemplar_set_version, "
+            "  rule_set_version=excluded.rule_set_version, "
+            "  local_model=excluded.local_model, generated_at=excluded.generated_at, "
+            "  accepted_baseline=MAX(eval_reports.accepted_baseline, excluded.accepted_baseline), "
+            "  report_json=excluded.report_json",
             (report.report_id, report.spec_id, report.spec_version, report.exemplar_set_version,
              report.rule_set_version, report.local_model, report.generated_at,
              1 if accepted_baseline else 0, report.to_json()),

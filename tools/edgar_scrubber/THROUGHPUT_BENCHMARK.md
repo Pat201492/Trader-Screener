@@ -31,11 +31,19 @@ both routing modes, both preprocessing modes:
   intentionally did not do so as not to disrupt other GPU use during the
   run. `on_kv_quant_change` in `run_matrix` is the pause point for whoever
   does this next.
-- **Batch concurrency (1/4/8/16)** — `run_cell` as shipped issues
-  `generate_fn` calls strictly sequentially regardless of `axes.batch`
-  (batch only changes VRAM-sample chunking cadence), so this pass measured
-  `batch=1` only; a batch axis that actually fires concurrent requests is a
-  follow-up.
+- **Batch concurrency (1/4/8/16)** — `run_cell` now dispatches each chunk
+  concurrently (`ThreadPoolExecutor(max_workers=axes.batch)`), and
+  `CellResult.wall_seconds_per_doc` is the metric that can show the win.
+  `seconds_per_doc` cannot: it is a mean of per-request SERVER durations, and
+  four concurrent 1s calls still average 1s. **The axis is now measurable but
+  has not been measured** — the live pass predates the fix and ran `batch=1`
+  only. Re-run with `BATCHES=(1,4,8,16)` to fill it in.
+- **Prefix-cache hit rate (#106 static-prefix ordering)** — one of the issue's
+  four open questions, and **not measured**. `run_throughput_matrix.py` never
+  passes `exemplars=` when building prompts, so the real run never exercises
+  the static-prefix ordering and `prefix_cache_check` is never driven
+  end-to-end. Wiring exemplars into the matrix run is the prerequisite; until
+  then "does the prefix cache actually hit?" is open.
 - **`compare_accuracy_tradeoff`** — needs `eval_harness.run_eval` output
   attached per cell, which needs a real #105 held-out set; none exists in
   this environment yet, so accuracy-tied cells are unmeasured.
