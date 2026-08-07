@@ -311,6 +311,123 @@ def test_wire_keys_never_leak():
     check("to_field_value() round-trips into output_store.FieldValue", fv.field == "estimated_value_per_1000")
 
 
+def test_static_prefix_byte_identical_across_calls():
+    section("Static prefix (#106/#111): byte-identical across calls within an issuer/field")
+    # Same issuer, field, exemplar version, different documents -> static prefix must not change
+    exemplars_fn = lambda issuer, field: (["example: 972.4"], "v1") if issuer == "JPM" else (None, None)
+    local = FakeChatClient([
+        (wire_body(EV_FIELD, 972.4, span=(1, 2), conf=0.9), USAGE),
+        (wire_body(EV_FIELD, 985.5, span=(10, 20), conf=0.9), USAGE),
+        (wire_body(EV_FIELD, 950.0, span=(30, 40), conf=0.9), USAGE),
+    ])
+    ladder = el.ExtractionLadder(
+        NOTE_SPEC,
+        exemplars=exemplars_fn,
+        local_client=local,
+        local_model="qwen2.5:7b",
+        exemplar_set_version="v1"
+    )
+
+    # Extract same field from three different documents, same issuer
+    r1 = ladder.extract("estimated_value_per_1000", text="doc1...", issuer="JPM", accession="0001a", document="424b2_1.htm")
+    r2 = ladder.extract("estimated_value_per_1000", text="doc2...", issuer="JPM", accession="0001b", document="424b2_2.htm")
+    r3 = ladder.extract("estimated_value_per_1000", text="doc3...", issuer="JPM", accession="0001c", document="424b2_3.htm")
+
+    check("all three calls succeeded", r1 and r2 and r3)
+
+    # Extract the static prefix from the messages
+    prefix1 = el.static_prefix(EV_FIELD, ["example: 972.4"])
+    prefix2 = el.static_prefix(EV_FIELD, ["example: 972.4"])  # exact same inputs
+
+    check("static prefix is byte-identical for same inputs", prefix1 == prefix2)
+
+    # Check that the prompts sent to the model are ordered correctly:
+    # static prefix + document text (SOURCE TEXT is always the last part)
+    prefixes_seen = []
+    for call in local.calls[:3]:
+        # Find user message by role (brittle to assume index 1)
+        messages = call["messages"]
+        assert len(messages) >= 2, f"Expected at least 2 messages, got {len(messages)}"
+        user_msg = None
+        for msg in messages:
+            if msg.get("role") == "user":
+                user_msg = msg
+                break
+        assert user_msg is not None, "No user message found in call"
+        user_message = user_msg["content"]
+
+        # Assert SOURCE TEXT separator exists before splitting
+        assert "\nSOURCE TEXT:\n" in user_message, "SOURCE TEXT delimiter not found; prompt ordering may be broken"
+        parts = user_message.split("\nSOURCE TEXT:\n", 1)
+        prefix = parts[0]
+        prefixes_seen.append(prefix)
+
+    # All three calls should have identical prefixes (same issuer, field, exemplar version)
+    if prefixes_seen:
+        check("static prefix identical across all calls (first vs second)",
+              prefixes_seen[0] == prefixes_seen[1] if len(prefixes_seen) > 1 else True)
+        check("static prefix identical across all calls (second vs third)",
+              prefixes_seen[1] == prefixes_seen[2] if len(prefixes_seen) > 2 else True)
+
+    # Verify that changing the exemplar version DOES change the prefix (expected)
+    prefix_different_version = el.static_prefix(EV_FIELD, ["different_example: 999"])
+    check("different exemplars produce different prefix", prefix1 != prefix_different_version)
+
+
+def test_static_prefix_version_mismatch_blocked():
+    section("Static prefix guard (#106/#111): blocks when version stays same but prefix drifts")
+    # The guard catches programming errors where an exemplar provider returns different
+    # content without bumping its version. This is structural -- the version is the only
+    # thing that signals KV-cache coherence to llama.cpp/Ollama, so version skew is a silent
+    # performance regression #111 must catch at runtime.
+    #
+    # Scenario: an ExemplarProvider with a resolve() method returns different ExemplarSet
+    # objects for the same (issuer, field) without changing the version string.
+    class BadExemplarProvider:
+        def __init__(self):
+            self.call_count = 0
+
+        def resolve(self, issuer, field):
+            self.call_count += 1
+            class FakeExemplarSet:
+                def __init__(self, version, rows):
+                    self.version = version
+                    self.rows = rows
+                def lines(self):
+                    return self.rows
+
+            if self.call_count == 1:
+                return FakeExemplarSet("v1", ["example1"])
+            else:
+                return FakeExemplarSet("v1", ["example1", "example2_different"])  # SAME version, DIFFERENT content!
+
+    provider = BadExemplarProvider()
+    local = FakeChatClient([
+        (wire_body(EV_FIELD, 972.4, span=(1, 2), conf=0.9), USAGE),
+        (wire_body(EV_FIELD, 985.5, span=(10, 20), conf=0.9), USAGE),
+    ])
+    ladder = el.ExtractionLadder(
+        NOTE_SPEC,
+        exemplars=provider,
+        local_client=local,
+        local_model="qwen2.5:7b"
+    )
+
+    # First call succeeds
+    r1 = ladder.extract("estimated_value_per_1000", text="doc1...", issuer="JPM", accession="0001a", document="424b2_1.htm")
+    check("first call succeeds", r1 is not None)
+
+    # Second call detects the drift and raises AssertionError
+    # Implementation: extraction_ladder.py:606 raises with message "static prompt prefix changed"
+    raised = False
+    try:
+        r2 = ladder.extract("estimated_value_per_1000", text="doc2...", issuer="JPM", accession="0001b", document="424b2_2.htm")
+    except AssertionError as e:
+        raised = "static prompt prefix changed" in str(e)
+
+    check("prefix drift is caught and raises AssertionError", raised)
+
+
 def main():
     print("Extraction provider ladder gate (#104)")
     test_rule_rung_short_circuits()
@@ -326,6 +443,8 @@ def main():
     test_provenance_reconstructible()
     test_same_client_interface_config_only()
     test_wire_keys_never_leak()
+    test_static_prefix_byte_identical_across_calls()
+    test_static_prefix_version_mismatch_blocked()
 
     if failures:
         print(f"\n{len(failures)} check(s) FAILED:")
