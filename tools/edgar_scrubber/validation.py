@@ -455,8 +455,20 @@ CREATE TABLE IF NOT EXISTS rule_seeds (
     PRIMARY KEY (issuer, field)
 );
 
+CREATE TABLE IF NOT EXISTS held_out_docs (
+    session_id   TEXT NOT NULL,
+    accession    TEXT NOT NULL,
+    document     TEXT NOT NULL,
+    issuer       TEXT,
+    product_type TEXT,
+    stratum      TEXT,
+    selected_at  TEXT,
+    PRIMARY KEY (session_id, accession, document)
+);
+
 CREATE INDEX IF NOT EXISTS ix_ex_issuer_field ON exemplars(issuer, field);
 CREATE INDEX IF NOT EXISTS ix_vd_issuer_field ON verdicts(field);
+CREATE INDEX IF NOT EXISTS ix_held_out_issuer ON held_out_docs(issuer);
 """
 
 
@@ -577,19 +589,78 @@ class ValidationStore:
     def anchor_verdicts(self, issuer, field):
         """Every (accession, anchor, span) an accept/correct verdict recorded
         for one (issuer, field), across every session -- the raw input to
-        rule-seed stability."""
+        rule-seed stability.
+
+        Held-out documents (#108) are excluded by a LEFT JOIN against
+        `held_out_docs`: a document reserved for the eval set must never
+        seed a rule, so its anchors cannot count toward stability here --
+        not "count but get filtered downstream," excluded at the query that
+        computes support in the first place.
+        """
         rows = self._conn.execute(
             "SELECT v.accession, v.anchor, v.span_start, v.span_end "
             "FROM verdicts v JOIN validated_docs d "
             "  ON d.session_id = v.session_id AND d.accession = v.accession "
             "     AND d.document = v.document "
+            "LEFT JOIN held_out_docs h "
+            "  ON h.session_id = v.session_id AND h.accession = v.accession "
+            "     AND h.document = v.document "
             "WHERE v.field = ? AND d.issuer = ? AND v.verdict IN (?, ?) "
-            "  AND v.anchor IS NOT NULL",
+            "  AND v.anchor IS NOT NULL AND h.session_id IS NULL",
             (field, issuer, ACCEPT, CORRECT),
         ).fetchall()
         return [(r["accession"], r["anchor"],
                  (r["span_start"], r["span_end"])
                  if r["span_start"] is not None else None) for r in rows]
+
+    # -- held-out eval set (#108) -------------------------------------------
+
+    def mark_held_out(self, session_id, accession, document, *, issuer=None,
+                      product_type=None, stratum=None, now=None):
+        """Reserve one document for the #108 held-out eval set.
+
+        Call this BEFORE the document's first verdict is recorded: #105
+        writes an exemplar the INSTANT a verdict is recorded
+        (`ValidationSession._write_exemplar`), so marking a document
+        held-out after even one of its fields has been verdicted would
+        already have leaked that field into the exemplar store. The
+        document's verdicts still get recorded normally -- they ARE the
+        eval harness's ground truth -- they just never write an exemplar or
+        count toward rule-seed anchor stability (`anchor_verdicts` above).
+        Idempotent: marking the same document twice just overwrites the
+        stratum/timestamp.
+        """
+        self._conn.execute(
+            "INSERT OR REPLACE INTO held_out_docs "
+            "(session_id, accession, document, issuer, product_type, stratum, selected_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, accession, document, issuer, product_type, stratum, now),
+        )
+        self._conn.commit()
+
+    def is_held_out(self, session_id, accession, document):
+        return self._conn.execute(
+            "SELECT 1 FROM held_out_docs WHERE session_id = ? AND accession = ? AND document = ?",
+            (session_id, accession, document),
+        ).fetchone() is not None
+
+    def held_out_documents(self, session_id=None):
+        """Every reserved (session_id, accession, document, issuer,
+        product_type, stratum) -- across all sessions unless one is given.
+        This is the eval harness's document list, and the set a report can
+        point at as proof of what was, and was never, excluded."""
+        if session_id is None:
+            rows = self._conn.execute(
+                "SELECT session_id, accession, document, issuer, product_type, stratum "
+                "FROM held_out_docs ORDER BY session_id, accession, document"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT session_id, accession, document, issuer, product_type, stratum "
+                "FROM held_out_docs WHERE session_id = ? ORDER BY accession, document",
+                (session_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # -- exemplars (#106) --------------------------------------------------
 
@@ -785,6 +856,8 @@ class ValidationSession:
     def _write_exemplar(self, issuer, accession, document, fv, render_doc):
         if not issuer:
             return
+        if self.store.is_held_out(self.session_id, accession, document):
+            return  # #108: a held-out document never teaches the exemplar store
         field = fv.field
         form = getattr(self.spec, "form_type", None)
         if fv.verdict == REJECT:
@@ -808,6 +881,23 @@ class ValidationSession:
         This is the unit `next_unvalidated`/`progress` count against N."""
         self.store.mark_document_validated(self.session_id, accession, document,
                                            issuer=issuer, now=self._now())
+
+    # -- held-out eval set (#108) -------------------------------------------
+
+    def mark_held_out(self, accession, document, *, issuer=None, product_type=None,
+                      stratum=None):
+        """Reserve `accession/document` for the #108 held-out eval set.
+
+        Call this BEFORE `record_verdict` runs for the document -- see
+        `ValidationStore.mark_held_out`. `eval_harness.reserve_held_out_set`
+        is the usual caller: it selects a stratified slice from the
+        candidate pool up front and marks every one of them through this
+        method before the validation loop ever reaches them."""
+        self.store.mark_held_out(self.session_id, accession, document, issuer=issuer,
+                                 product_type=product_type, stratum=stratum, now=self._now())
+
+    def is_held_out(self, accession, document):
+        return self.store.is_held_out(self.session_id, accession, document)
 
     def all_fields_verdicted(self, accession, document):
         """The #105 acceptance for one document: EVERY spec field got a verdict.
