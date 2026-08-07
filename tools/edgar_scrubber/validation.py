@@ -749,12 +749,22 @@ class ValidationSession:
 
     # -- verdicts ----------------------------------------------------------
 
-    def record_verdict(self, accession, document, fv, *, issuer=None, render_doc=None):
+    def record_verdict(self, accession, document, fv, *, issuer=None, render_doc=None, rules=None, extracted_value=None):
         """Persist one verdict and, from it, the exemplar that will help later
         documents. `render_doc` (when given) resolves the anchor and the span
         snippet the exemplar carries; without it the verdict is still stored,
         just without an anchor-derived seed signal. Returns the FieldVerdict as
-        stored (anchor filled in)."""
+        stored (anchor filled in).
+
+        When `rules` (a RuleManager instance) is provided AND `extracted_value`
+        is given, records the comparison between the rule's extraction and the
+        validated value, tracking agreement for promotion/demotion (#107).
+        The `extracted_value` is what the rule extracted (before validation);
+        fv.value is the validated/corrected value. Comparison drives promotion:
+            mgr.record_comparison(form, issuer, fv.field, validated_value=fv.value,
+                                  extracted_value=extracted_value)
+        This happens AFTER validation and before the next batch runs, so the rule
+        promotion state guides shadow mode decisions on the next document."""
         field_def = self.spec.field(fv.field)
 
         if fv.anchor is None and render_doc is not None and field_def is not None \
@@ -763,6 +773,13 @@ class ValidationSession:
 
         self.store.write_verdict(self.session_id, accession, document, fv, now=self._now())
         self._write_exemplar(issuer, accession, document, fv, render_doc)
+
+        if rules is not None and issuer is not None and extracted_value is not None:
+            form = getattr(self.spec, 'spec_id', None)
+            if form:
+                rules.record_comparison(form, issuer, fv.field, validated_value=fv.value,
+                                       extracted_value=extracted_value)
+
         return fv
 
     def _write_exemplar(self, issuer, accession, document, fv, render_doc):

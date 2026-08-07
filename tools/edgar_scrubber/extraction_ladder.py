@@ -91,15 +91,21 @@ class RuleMatch:
     confidence: float = 1.0
 
 
-def _lookup_rule(rules, issuer, field_name):
+def _lookup_rule(rules, form, issuer, field_name):
     if rules is None:
         return None
     if callable(rules) and not isinstance(rules, dict):
-        return rules(issuer, field_name)
-    return rules.get((issuer, field_name))
+        # Only RuleManager instances should be callable; they take 3-tuple.
+        return rules(form, issuer, field_name)
+    # Dict-based: check 3-tuple first (new API)
+    result = rules.get((form, issuer, field_name))
+    if result is None:
+        # Fall back to 2-tuple for backward compat with old dict-based rules
+        result = rules.get((issuer, field_name))
+    return result
 
 
-def _lookup_exemplars(exemplars, issuer, field_name):
+def _lookup_exemplars(exemplars, form, issuer, field_name):
     """Returns `(lines, exemplar_set_version)`.
 
     `exemplars` may be a full `exemplars.ExemplarProvider` (#106) -- detected
@@ -117,8 +123,21 @@ def _lookup_exemplars(exemplars, issuer, field_name):
         ex_set = resolver(issuer, field_name)
         return (list(ex_set.lines()) if ex_set.rows else None), ex_set.version
     if callable(exemplars) and not isinstance(exemplars, dict):
-        return exemplars(issuer, field_name), None
-    return exemplars.get((issuer, field_name)), None
+        # Backward compat: ValidationStore.__call__ only takes (issuer, field).
+        # Try 3-tuple first (new API), fall back to 2-tuple (old API).
+        try:
+            result = exemplars(form, issuer, field_name)
+        except TypeError:
+            result = exemplars(issuer, field_name)
+        # Wrap result to match (lines, version) tuple return
+        if isinstance(result, tuple) and len(result) == 2:
+            return result
+        return result, None
+    # Dict-based: check 3-tuple first (new API), then 2-tuple for backward compat
+    result = exemplars.get((form, issuer, field_name))
+    if result is None:
+        result = exemplars.get((issuer, field_name))
+    return result, None
 
 
 # ── Constrained decode: wire schema + prompt ────────────────────────────────
@@ -434,6 +453,27 @@ class Provenance:
 
 
 @dataclass
+class ShadowComparison:
+    """Shadow mode: rule and model running in parallel (#107).
+    Logged when a rule is in its promotion window."""
+
+    rule_value: object
+    model_value: object
+    rule_span: tuple
+    model_span: tuple
+    agreement: bool
+    note: str = None
+
+    def as_dict(self):
+        d = asdict(self)
+        if isinstance(d.get("rule_span"), tuple):
+            d["rule_span"] = list(d["rule_span"])
+        if isinstance(d.get("model_span"), tuple):
+            d["model_span"] = list(d["model_span"])
+        return d
+
+
+@dataclass
 class LogEntry:
     accession: str
     document: str
@@ -448,11 +488,14 @@ class LogEntry:
     gated: bool
     gate: dict
     provenance: dict
+    shadow: dict = None           # ShadowComparison when rule is in shadow window
 
     def as_dict(self):
         d = asdict(self)
         if isinstance(d.get("span"), tuple):
             d["span"] = list(d["span"])
+        if d.get("shadow"):
+            d["shadow"] = d["shadow"].as_dict() if hasattr(d["shadow"], "as_dict") else d["shadow"]
         return d
 
 
@@ -510,13 +553,38 @@ class RunLog:
             per_doc[key] = per_doc.get(key, 0.0) + (e.provenance.get("cost_usd") or 0.0)
         return {k: round(v, 6) for k, v in per_doc.items()}
 
+    def extraction_breakdown(self):
+        """Per-run breakdown: what % of extractions came from rule vs local vs Claude.
+        The #107 throughput budget metric: rule coverage should dominate."""
+        if not self.entries:
+            return {"rule": 0.0, "xbrl": 0.0, "local": 0.0, "claude": 0.0}
+        counts = self.rung_counts()
+        total = len(self.entries)
+        return {rung: round(counts.get(rung, 0) / total, 4) for rung in ("rule", "xbrl", "local", "claude")}
+
+    def shadow_disagreements(self):
+        """Fields where shadow mode detected rule/model disagreements (template change signal)."""
+        disagreements = {}
+        for e in self.entries:
+            if e.shadow and not e.shadow.agreement:
+                key = f"{e.field}"
+                if key not in disagreements:
+                    disagreements[key] = []
+                disagreements[key].append({
+                    "accession": e.accession, "document": e.document,
+                    "note": e.shadow.note,
+                })
+        return disagreements
+
     def summary(self):
         return {
             "total_extractions": len(self.entries),
             "rung_counts": self.rung_counts(),
+            "extraction_breakdown": self.extraction_breakdown(),
             "escalation_rate": round(self.escalation_rate(), 4),
             "escalation_rate_by_field": self.escalation_rate_by_field(),
             "gated_fields": self.gated_fields(),
+            "shadow_disagreements": self.shadow_disagreements(),
             "cost_by_document": self.cost_by_document(),
             **self.cost_summary(),
         }
@@ -618,13 +686,53 @@ class ExtractionLadder:
         f = self.spec.field(field_name)
         if f is None:
             raise KeyError(f"{field_name!r} is not defined in spec {self.spec.spec_id}")
+        form = self.spec.spec_id
 
         # Rung 1: promoted rule (#107).
-        rule = _lookup_rule(self.rules, issuer, field_name)
-        if rule is not None:
-            prov = Provenance(rung="rule", rule_id=rule.rule_id, document=document, span=rule.span)
-            return self._finish(f, rule.value, rule.span, "rule", prov, rule.confidence,
-                                 None, ex107, accession=accession, document=document)
+        if self.rules is not None and issuer is not None:
+            rule_result = None
+            if hasattr(self.rules, 'apply_rule') and callable(self.rules.apply_rule):
+                # RuleManager instance: call apply_rule() with text
+                rule_result = self.rules.apply_rule(form, issuer, field_name, text)
+            else:
+                # Dict or callable returning pre-computed RuleMatch
+                rule = _lookup_rule(self.rules, form, issuer, field_name)
+                if rule is not None:
+                    rule_result = rule
+
+            if rule_result is not None:
+                if isinstance(rule_result, tuple):
+                    # Result from RuleManager.apply_rule(): (value, start, end)
+                    value, start, end = rule_result
+                    rule_match = RuleMatch(value=value, rule_id=f"applied-rule-{issuer}-{field_name}",
+                                          span=(start, end), confidence=1.0)
+                else:
+                    # Already a RuleMatch object
+                    rule_match = rule_result
+
+                # Check shadow mode and run model in parallel if needed
+                shadow_comp = None
+                if hasattr(self.rules, 'is_shadowing') and self.rules.is_shadowing(form, issuer, field_name):
+                    # Rule is in shadow window; run model in parallel to compare
+                    if self.local_client is not None:
+                        exemplars, ex_version = _lookup_exemplars(self.exemplars, form, issuer, field_name)
+                        # Shadow mode requires exemplars (#106) to be meaningful; skip if missing
+                        if exemplars:
+                            model_value, model_span, model_conf, _samples, _tin, _tout, _retries = _extract_via_model(
+                                self.local_client, self.local_model, f, text, table_context=table_context,
+                                exemplars=exemplars, n_samples=1, max_tokens=self.max_tokens)
+                            agreement = rule_match.value == model_value
+                            shadow_comp = ShadowComparison(
+                                rule_value=rule_match.value, model_value=model_value,
+                                rule_span=rule_match.span, model_span=model_span,
+                                agreement=agreement,
+                                note=None if agreement else f"rule={rule_match.value!r} vs model={model_value!r}"
+                            )
+
+                prov = Provenance(rung="rule", rule_id=rule_match.rule_id, document=document, span=rule_match.span)
+                result = self._finish(f, rule_match.value, rule_match.span, "rule", prov, rule_match.confidence,
+                                     None, ex107, accession=accession, document=document, shadow=shadow_comp)
+                return result
 
         # Rung 2: XBRL / EX-107 fee exhibit (#101).
         if ex107 and ex107.get(field_name) is not None:
@@ -639,10 +747,9 @@ class ExtractionLadder:
             )
 
         # Rung 3: local 7B, with (form, issuer, field) exemplars if available (#106).
-        exemplars, ex_version = _lookup_exemplars(self.exemplars, issuer, field_name)
+        exemplars, ex_version = _lookup_exemplars(self.exemplars, form, issuer, field_name)
         exemplar_set = ex_version if ex_version is not None else self.exemplar_set_version
         self._check_static_prefix(f, exemplars, ex_version, issuer, field_name)
-
         value, span, conf, samples, tin, tout, retries = _extract_via_model(
             self.local_client, self.local_model, f, text, table_context=table_context,
             exemplars=exemplars, n_samples=self.self_consistency_samples,
@@ -690,7 +797,11 @@ class ExtractionLadder:
         ]
 
     def _finish(self, f, value, span, rung, provenance, confidence, gate, ex107, *,
-                accession, document, escalated=False, gated=False):
+                accession, document, escalated=False, gated=False, shadow=None):
+        """Finish extraction: apply field specs, record in log, return result.
+
+        shadow: ShadowComparison when rule in shadow mode (comparing rule vs model).
+        """
         flags = self.spec.check_value(f.name, value, ex107=ex107) if value is not None else []
         if gated:
             flags = list(flags) + [Flag(
@@ -707,6 +818,7 @@ class ExtractionLadder:
             value=value, unit=f.unit, span=span, confidence=confidence,
             flags=[fl.as_dict() for fl in flags], escalated=escalated, gated=gated,
             gate=gate.as_dict() if gate else None, provenance=provenance.as_dict(),
+            shadow=shadow,
         ))
         return result
 

@@ -27,12 +27,20 @@ import json
 import os
 import tempfile
 
-import validation as v
-import validate_ui as ui
-from field_spec import load_specs
-from normalize import normalize_html
-from reduce import build_boilerplate_model, strip_boilerplate, split_sections, sub_block
-from extraction_ladder import ExtractionLadder
+try:  # package import: tools.edgar_scrubber.test_validation
+    from . import validation as v
+    from . import validate_ui as ui
+    from .field_spec import load_specs
+    from .normalize import normalize_html
+    from .reduce import build_boilerplate_model, strip_boilerplate, split_sections, sub_block
+    from .extraction_ladder import ExtractionLadder
+except ImportError:  # standalone: python tools/edgar_scrubber/test_validation.py
+    import validation as v
+    import validate_ui as ui
+    from field_spec import load_specs
+    from normalize import normalize_html
+    from reduce import build_boilerplate_model, strip_boilerplate, split_sections, sub_block
+    from extraction_ladder import ExtractionLadder
 
 failures = []
 

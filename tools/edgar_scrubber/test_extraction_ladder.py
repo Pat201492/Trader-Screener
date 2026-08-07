@@ -21,8 +21,12 @@ Run:  python tools/edgar_scrubber/test_extraction_ladder.py
 """
 import json
 
-import extraction_ladder as el
-import field_spec as fs
+try:  # package import: tools.edgar_scrubber.test_extraction_ladder
+    from . import extraction_ladder as el
+    from . import field_spec as fs
+except ImportError:  # standalone: python tools/edgar_scrubber/test_extraction_ladder.py
+    import extraction_ladder as el
+    import field_spec as fs
 
 failures = []
 
@@ -76,7 +80,7 @@ def test_rule_rung_short_circuits():
     local = FakeChatClient([])  # scripted empty -- must never be called
     ladder = el.ExtractionLadder(
         NOTE_SPEC,
-        rules={("JPM", "estimated_value_per_1000"): el.RuleMatch(972.4, "anchor-ev1000", span=(10, 20))},
+        rules={(NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000"): el.RuleMatch(972.4, "anchor-ev1000", span=(10, 20))},
         local_client=local, local_model="qwen2.5:7b",
     )
     r = ladder.extract("estimated_value_per_1000", text="...", issuer="JPM",
@@ -86,6 +90,86 @@ def test_rule_rung_short_circuits():
     check("provenance carries the rule id", r.provenance == "rule:anchor-ev1000")
     check("local client never called", len(local.calls) == 0)
     check("no gate recorded for a rule hit", ladder.log.entries[0].gate is None)
+
+
+# --------------------------------------------------------------------------- #
+def test_rule_rung_with_manager():
+    section("Rung 1: RuleManager integration — apply_rule() method")
+    try:
+        from . import rules as r
+    except ImportError:
+        import rules as r
+
+    local = FakeChatClient([])  # must never be called
+    mgr = r.RuleManager()
+    mgr.promote_rule_from_seed(
+        NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000",
+        anchor="Estimated value",
+        pattern_str=r"estimated\s+value.*?(\d+\.?\d*)"
+    )
+    ladder = el.ExtractionLadder(
+        NOTE_SPEC,
+        rules=mgr,
+        local_client=local, local_model="qwen2.5:7b",
+    )
+    text = "The estimated value of the notes is 972.40 per unit."
+    r_result = ladder.extract("estimated_value_per_1000", text=text, issuer="JPM",
+                             accession="0001", document="424b2.htm")
+    check("rung == rule", r_result.rung == "rule")
+    check("value extracted by rule", "972" in str(r_result.value))
+    check("local client never called", len(local.calls) == 0)
+    check("shadow is None (not in shadow window)", ladder.log.entries[0].shadow is None)
+
+
+# --------------------------------------------------------------------------- #
+def test_rule_shadow_mode():
+    section("Rung 1: shadow mode — rule + model run in parallel, log disagreements")
+    try:
+        from . import rules as r
+    except ImportError:
+        import rules as r
+
+    # Create a RuleManager with a promoted rule already in shadow window.
+    mgr = r.RuleManager(agreement_threshold=1, shadow_window_days=7)
+    mgr.promote_rule_from_seed(
+        NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000",
+        anchor="Estimated value",
+        pattern_str=r"estimated\s+value.*?(\d+\.?\d*)"
+    )
+    # Trigger promotion by recording agreement
+    mgr.record_comparison(NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000", 972.4, 972.4)
+
+    # Verify it's in shadow window
+    check("rule promoted and in shadow", mgr.is_shadowing(NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000"))
+
+    # Set up local client to return a DIFFERENT value than the rule (to test disagreement)
+    # Rule will extract "972", but model returns "971" (simulating a template change)
+    local_response = wire_body(EV_FIELD, 971.0, span=(50, 60), conf=0.85)
+    local = FakeChatClient([(local_response, USAGE)])
+
+    ladder = el.ExtractionLadder(
+        NOTE_SPEC,
+        rules=mgr,
+        exemplars={(NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000"): ["Example: 972.40", "Estimated value is 972.40"]},
+        local_client=local, local_model="qwen2.5:7b",
+    )
+
+    text = "The estimated value of the notes is 972.40 per unit."
+    result = ladder.extract("estimated_value_per_1000", text=text, issuer="JPM",
+                           accession="0001", document="424b2.htm")
+
+    check("rung == rule (rule wins even in shadow)", result.rung == "rule")
+    check("value from rule", "972" in str(result.value))
+    check("local client called (shadowing)", len(local.calls) == 1)
+
+    # Check shadow comparison was logged
+    log_entry = ladder.log.entries[0]
+    check("shadow comparison recorded", log_entry.shadow is not None)
+    if log_entry.shadow:
+        check("shadow tracks rule value", "972" in str(log_entry.shadow.rule_value))
+        check("shadow tracks model value", log_entry.shadow.model_value == 971.0)
+        check("shadow flags disagreement", log_entry.shadow.agreement is False)
+        check("shadow note includes mismatch", "rule" in (log_entry.shadow.note or ""))
 
 
 # --------------------------------------------------------------------------- #
@@ -314,6 +398,8 @@ def test_wire_keys_never_leak():
 def main():
     print("Extraction provider ladder gate (#104)")
     test_rule_rung_short_circuits()
+    test_rule_rung_with_manager()
+    test_rule_shadow_mode()
     test_xbrl_rung_short_circuits()
     test_local_confident_no_escalation()
     test_out_of_bounds_escalates_to_claude()
