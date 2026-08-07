@@ -80,16 +80,31 @@ def _lookup_rule(rules, form, issuer, field_name):
     if rules is None:
         return None
     if callable(rules) and not isinstance(rules, dict):
+        # Only RuleManager instances should be callable; they take 3-tuple.
         return rules(form, issuer, field_name)
-    return rules.get((form, issuer, field_name))
+    # Dict-based: check 3-tuple first (new API)
+    result = rules.get((form, issuer, field_name))
+    if result is None:
+        # Fall back to 2-tuple for backward compat with old dict-based rules
+        result = rules.get((issuer, field_name))
+    return result
 
 
 def _lookup_exemplars(exemplars, form, issuer, field_name):
     if not exemplars:
         return None
     if callable(exemplars) and not isinstance(exemplars, dict):
-        return exemplars(form, issuer, field_name)
-    return exemplars.get((form, issuer, field_name))
+        # Backward compat: ValidationStore.__call__ only takes (issuer, field).
+        # Try 3-tuple first (new API), fall back to 2-tuple (old API).
+        try:
+            return exemplars(form, issuer, field_name)
+        except TypeError:
+            return exemplars(issuer, field_name)
+    # Dict-based: check 3-tuple first, then 2-tuple for backward compat
+    result = exemplars.get((form, issuer, field_name))
+    if result is None:
+        result = exemplars.get((issuer, field_name))
+    return result
 
 
 # ── Constrained decode: wire schema + prompt ────────────────────────────────
