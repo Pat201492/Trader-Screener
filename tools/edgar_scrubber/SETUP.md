@@ -336,6 +336,55 @@ To escalate to Claude when the local model hits a hard case:
 - **Issue #101** (section routing): deterministic keyword/heading classification — no embedding model.
 - **Issue #108** (3B benchmark): when to use the cheap bulk-pass model.
 
+## EDGAR_USER_AGENT (SEC live tests)
+
+`edgar_client.py` (issue #99) talks to `sec.gov` directly and the SEC fair-access policy
+requires a real, contactable `User-Agent: <name> <email>` on every request — there is
+deliberately no default shipped in source (a wrong/anonymous UA gets the machine 403'd,
+and a block is slow to lift). `EdgarClient` reads it two ways:
+
+1. Pass it explicitly: `EdgarClient(user_agent="Your Name you@example.com", cache_dir=...)`.
+2. Omit it and set the `EDGAR_USER_AGENT` env var — `EdgarClient()` falls back to
+   `os.environ["EDGAR_USER_AGENT"]`. An explicitly-passed empty string still raises
+   (`EdgarConfigError`); only *omitting* the argument triggers the env fallback.
+
+### Set it (PowerShell, current session)
+
+```powershell
+$env:EDGAR_USER_AGENT = "Your Name you@example.com"
+```
+
+### Set it (PowerShell, persistent across sessions)
+
+```powershell
+setx EDGAR_USER_AGENT "Your Name you@example.com"
+```
+
+`setx` writes the user environment; open a new terminal (or relaunch your IDE) for it to
+take effect, same caveat as `OLLAMA_NUM_PARALLEL` below.
+
+### Set it (bash, inline — what `README_client.md` documents)
+
+```bash
+EDGAR_USER_AGENT="Your Name you@example.com"
+```
+
+### Run the gated live integration test
+
+`test_edgar_client.py::test_live_integration` is the only thing in this module that
+touches the real SEC (search 424B2 → resolve an accession → fetch its primary document →
+confirm a second identical run is zero-network). It is skipped unless `EDGAR_LIVE=1`:
+
+```powershell
+$env:EDGAR_LIVE = "1"
+$env:EDGAR_USER_AGENT = "Your Name you@example.com"
+python tools/edgar_scrubber/test_edgar_client.py
+```
+
+```bash
+EDGAR_LIVE=1 EDGAR_USER_AGENT="Your Name you@example.com" python tools/edgar_scrubber/test_edgar_client.py
+```
+
 ## Server-side settings (the ones a client cannot set)
 
 `OLLAMA_NUM_PARALLEL`, `OLLAMA_FLASH_ATTENTION` and `OLLAMA_KV_CACHE_TYPE` are read by

@@ -21,7 +21,8 @@ What this module wraps (endpoints, all measured live 2026-08-04 — see #100):
 Three things this module treats as load-bearing, not optional (issue #99):
 
   1. SEC etiquette or you get blocked. A `User-Agent: <name> <email>` on every
-     request (configurable, and there is deliberately NO default that would ship
+     request (configurable via the `user_agent` arg or the `EDGAR_USER_AGENT`
+     env var — see SETUP.md; there is deliberately NO default that would ship
      someone else's address); a hard 10 req/s ceiling enforced by ONE shared
      limiter across the whole process (a parallel fetcher that forgets this gets
      the IP blocked mid-crawl); `Accept-Encoding: gzip` + connection reuse;
@@ -374,11 +375,18 @@ class EdgarClient:
     returns without touching the limiter or the network at all.
     """
 
-    def __init__(self, user_agent, cache_dir, rate=DEFAULT_RATE,
+    def __init__(self, user_agent=None, cache_dir=None, rate=DEFAULT_RATE,
                  transport=None, limiter=None, cache=None,
                  max_retries=5, backoff_base=1.0, backoff_cap=60.0,
                  sleep=time.sleep):
+        # `user_agent=None` (i.e. the caller omitted it) falls back to the
+        # EDGAR_USER_AGENT env var; an explicit "" still raises below. There is
+        # still no shipped default UA — the env var itself has none.
+        if user_agent is None:
+            user_agent = os.environ.get("EDGAR_USER_AGENT", "")
         self.user_agent = validate_user_agent(user_agent)
+        if cache is None and not cache_dir:
+            raise EdgarConfigError("EdgarClient requires cache_dir (or an explicit cache=).")
         self.limiter = limiter or RateLimiter(rate)
         self.cache = cache or HttpCache(cache_dir)
         self._transport = transport or HttpTransport()

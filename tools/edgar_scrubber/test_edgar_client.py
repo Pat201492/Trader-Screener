@@ -18,7 +18,11 @@ second run zero network) is gated behind EDGAR_LIVE=1 + EDGAR_USER_AGENT so this
 suite stays green offline. Set both to run it against the real SEC.
 
 Run:  python tools/edgar_scrubber/test_edgar_client.py
-      EDGAR_LIVE=1 EDGAR_USER_AGENT="You you@example.com" python tools/edgar_scrubber/test_edgar_client.py
+
+      bash:       EDGAR_LIVE=1 EDGAR_USER_AGENT="You you@example.com" python tools/edgar_scrubber/test_edgar_client.py
+      PowerShell: $env:EDGAR_LIVE="1"; $env:EDGAR_USER_AGENT="You you@example.com"; python tools/edgar_scrubber/test_edgar_client.py
+
+      See SETUP.md#edgar_user_agent-sec-live-tests for a persistent (non-inline) way to set the UA.
 """
 import json
 import os
