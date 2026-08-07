@@ -191,6 +191,17 @@
         output_field: 'smart_money_score',
         last_run: '2026-08-04T09:30:00Z',
         doc_link: '#'
+      },
+      {
+        id: 'dealer-hedging-barrier-test',
+        kind: 'model',
+        name: 'Dealer-Hedging Barrier Causal Test',
+        purpose: 'Propensity-matches elevated- vs low-issuance underlyings on size/ADV/options-OI and tests forward realized-vol/barrier-pinning behavior; calibrates the confirm/refute bar empirically against placebo null universes rather than an independence-assuming chance floor (#131).',
+        status: 'working',
+        inputs: ['edgar_scrubber.filing_date', 'edgar_scrubber.underlyings', 'prices', 'realized_vol', 'options_oi', 'adv'],
+        output_field: 'dealer_hedging_verdict',
+        last_run: '2026-08-07T00:00:00Z',
+        doc_link: '#'
       }
     ];
   }
@@ -230,6 +241,24 @@
         lookahead: { status: 'na', note: 'Intraday options-flow window not yet wired into the lookahead-gate/ truncation harness — posture undeclared until it is.' },
         status: 'proposed',
         verdict: ''
+      },
+      {
+        id: 'dealer-hedging-barrier-causal-test',
+        title: 'Elevated issuance and realized-vol/pinning behavior near clustered barrier levels (Part B, #131)',
+        hypothesis: 'Underlyings with elevated recent issuance of barrier-linked structured notes show different realized-vol/price behavior near their clustered barrier levels than matched low-issuance controls, after controlling for underlying size, liquidity (ADV), and options open interest.',
+        falsifier: 'No statistically- (p<0.05) and economically- (>=0.2 vol-pts realized-vol or >=5pp pinning-rate) meaningful, consistently-signed difference between elevated-issuance and matched low-issuance observations, in excess of what the declared 27-trial grid produces on independently-seeded NULL placebo universes — refuted. Declared up front because the 27 trials are NOT independent (overlapping day-ranges/tickers across window/proximity/horizon cells), so a naive alpha×trialCount chance floor understates the true false-positive rate; the bar is calibrated empirically instead.',
+        tools: [
+          { id: 'edgar-scrubber', label: 'EDGAR Scrubber' },
+          { id: 'dealer-hedging-barrier-test', label: 'Dealer-Hedging Barrier Causal Test' }
+        ],
+        trialCount: 27,
+        lookahead: {
+          status: 'passed',
+          note: 'Every signal (issuance intensity, near-barrier flag, ADV/OI matching covariates) lags to the prior close. Knowledge date for an issuance event is EDGAR\'s acceptance timestamp (filing date), never the note\'s earlier pricing date — asserted directly (a plain A-vs-B truncation test can\'t catch a wrong-but-still-past date field, only an absolute future-index read). Truncation gate, same-day-peek check, and the knowledge-date check all pass in Research/dealer_hedging_causal_test.py.'
+        },
+        status: 'refuted',
+        evidence: '27 declared trials (3 issuance windows x 3 barrier-proximity defs x 3 horizons) run on a neutral synthetic reference universe (no dealer-hedging mechanism planted) — this repo has no live pipeline connection, so the run is against a portable stdlib-only fixture standing in for scrubber-shaped issuance events plus pipeline-shaped prices/vol/OI/ADV, same posture as lookahead-gate/ and pipeline-mock/. 9 of 27 trials were underpowered (<20 matched pairs, the tightest-window/proximity cells) and excluded. Of the 18 scored trials, 7 nominally "confirmed" a vol/pinning difference at p<0.05 — but because the trials overlap in day-range and tickers across cells they are not independent, so the naive alpha x 27 ~= 1.35 chance floor is the wrong bar (it would have called this same null fixture "confirmed"). Calibrated empirically instead: 8 independently-seeded placebo universes with zero planted effect, run through the identical 27-trial grid, produced 4-14 confirming trials each — comfortably bracketing the canonical run\'s 7 (empirical p~=0.78). A separate power check (a universe with a deliberately planted dealer-hedging effect) confirms the matching + paired-test procedure does detect a real effect when one exists, so this null result means the fixture showed nothing, not that the test is blind.',
+        verdict: 'Refuted. After propensity-style matching on size/ADV/options-OI, the difference in forward realized vol and barrier-pinning rate between elevated- and low-issuance observations is statistically indistinguishable from what the same correlated 27-trial grid produces on a placebo universe with no dealer-hedging mechanism at all. Written up including the two real bugs the build caught along the way, because they\'re the reason the verdict can be trusted: a percentile-rank tie-break that silently labeled zero-issuance tickers as "elevated" (fixed by ranking only among nonzero issuers), and a naive independent-trials chance floor that would have called this exact neutral fixture "confirmed" at 7/18 trials (fixed by empirical placebo calibration). Only synthetic-fixture evidence exists here — #131 has no live pipeline connection in this repo — so the natural next step is a live run against real EDGAR 424B2 filings and real options OI, not a re-run of this fixture.'
       }
     ];
   }

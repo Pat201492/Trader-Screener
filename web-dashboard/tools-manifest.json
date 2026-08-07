@@ -33,5 +33,16 @@
     "output_field": "score",
     "last_run": "2026-08-04T09:30:00Z",
     "doc_link": "#"
+  },
+  {
+    "id": "dealer-hedging-barrier-test",
+    "kind": "model",
+    "name": "Dealer-Hedging Barrier Causal Test",
+    "purpose": "Propensity-matches elevated- vs low-issuance underlyings on size/ADV/options-OI and tests forward realized-vol/barrier-pinning behavior; calibrates the confirm/refute bar empirically against placebo null universes rather than an independence-assuming chance floor (#131).",
+    "status": "working",
+    "inputs": ["edgar_scrubber.filing_date", "edgar_scrubber.underlyings", "prices", "realized_vol", "options_oi", "adv"],
+    "output_field": "dealer_hedging_verdict",
+    "last_run": "2026-08-07T00:00:00Z",
+    "doc_link": "../Research/dealer_hedging_causal_test.py"
   }
 ]
