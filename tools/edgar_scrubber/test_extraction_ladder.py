@@ -314,7 +314,7 @@ def test_wire_keys_never_leak():
 def test_static_prefix_byte_identical_across_calls():
     section("Static prefix (#106/#111): byte-identical across calls within an issuer/field")
     # Same issuer, field, exemplar version, different documents -> static prefix must not change
-    exemplars_fn = lambda issuer, field: (["example: 972.4"], "v1") if issuer == "JPM" else (None, None)
+    exemplars_fn = lambda issuer, field: ["example: 972.4"] if issuer == "JPM" else None
     local = FakeChatClient([
         (wire_body(EV_FIELD, 972.4, span=(1, 2), conf=0.9), USAGE),
         (wire_body(EV_FIELD, 985.5, span=(10, 20), conf=0.9), USAGE),
@@ -438,7 +438,7 @@ def test_token_cost_static_prefix_cache():
     ])
     ladder = el.ExtractionLadder(
         NOTE_SPEC,
-        exemplars=lambda issuer, field: (exemplars if issuer == "JPM" else None, "v1"),
+        exemplars=lambda issuer, field: exemplars if issuer == "JPM" else None,
         local_client=local,
         local_model="qwen2.5:7b",
         exemplar_set_version="v1"
