@@ -123,5 +123,5 @@ python tools/edgar_scrubber/test_output_store.py
 - Issue #95 — EDGAR scrubber (parent)
 - Issue #102 — field spec (produces the records stored here)
 - Issue #98 — tool manifest schema (`graduatedTo`, status)
-- Issue #110 — first Research project (issuance-by-underlying), the store's first reader
+- Issue #110 — first Research project (issuance-by-underlying), the store's first reader — [`Research/structured_note_issuance/`](../../Research/structured_note_issuance/README.md)
 - [`ARCHITECTURE.md`](../../ARCHITECTURE.md) — the only-writer / collect-once boundary
