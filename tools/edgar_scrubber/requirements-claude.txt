@@ -1,0 +1,4 @@
+# Claude escalation (#104) -- not required for the local Ollama runtime.
+# Install alongside requirements.txt only if you're wiring up the Claude rung:
+#   pip install -r tools/edgar_scrubber/requirements.txt -r tools/edgar_scrubber/requirements-claude.txt
+anthropic>=0.28.0

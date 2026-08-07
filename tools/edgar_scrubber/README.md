@@ -12,7 +12,8 @@ Production-ready local inference for EDGAR document extraction. Ollama + Qwen2.5
 | **config.py** | Unified configuration loader (probe → save → env setup) |
 | **Modelfile.qwen2.5-7b** | Qwen2.5-7B with KV-cache quantization for Ollama |
 | **example_usage.py** | Sample extraction workflow |
-| **requirements.txt** | Python dependencies |
+| **requirements.txt** | Base Python dependencies (local Ollama runtime) |
+| **requirements-claude.txt** | Optional extra for Claude escalation (#104) |
 
 ## Quick Start
 
@@ -22,7 +23,17 @@ Production-ready local inference for EDGAR document extraction. Ollama + Qwen2.5
 ollama --version  # verify
 ```
 
-### 2. Run hardware probe
+### 2. Install Python dependencies
+Use a venv, not the system interpreter (see [SETUP.md](SETUP.md#step-0-python-environment--dependencies)):
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r tools/edgar_scrubber/requirements.txt
+```
+`anthropic` is a separate, optional extra (`requirements-claude.txt`) for the Claude
+escalation path (#104) — install it only if you're wiring that up.
+
+### 3. Run hardware probe
 ```bash
 python tools/edgar_scrubber/hardware_probe.py
 ```
@@ -36,12 +47,12 @@ KV cache quantization: q8_0
 VRAM: 10.2GB free / 12.0GB total
 ```
 
-### 3. Pull model
+### 4. Pull model
 ```bash
 ollama pull qwen2.5:7b-instruct-q4_K_M
 ```
 
-### 4. Use in your code
+### 5. Use in your code
 ```python
 from tools.edgar_scrubber.config import ScrubberConfig
 from tools.edgar_scrubber.ollama_client import OllamaClient
