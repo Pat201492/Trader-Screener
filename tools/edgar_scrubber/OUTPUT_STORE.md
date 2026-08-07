@@ -123,5 +123,6 @@ python tools/edgar_scrubber/test_output_store.py
 - Issue #95 — EDGAR scrubber (parent)
 - Issue #102 — field spec (produces the records stored here)
 - Issue #98 — tool manifest schema (`graduatedTo`, status)
-- Issue #110 — first Research project (issuance-by-underlying), the store's first reader
+- Issue #130 — Part A of #110 shipped: [`RESEARCH_MAPS.md`](RESEARCH_MAPS.md), the store's first actual reader, consuming only `query()`/`fields()`
+- Issue #110 — parent: first Research project (issuance-by-underlying). Part B, the dealer-hedging causal test (the stretch goal on top of Part A), lives at [`Research/structured_note_issuance/`](../../Research/structured_note_issuance/README.md)
 - [`ARCHITECTURE.md`](../../ARCHITECTURE.md) — the only-writer / collect-once boundary
