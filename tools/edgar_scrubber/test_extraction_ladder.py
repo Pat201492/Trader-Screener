@@ -47,6 +47,25 @@ EV_FIELD = NOTE_SPEC.field("estimated_value_per_1000")
 BUFFER_FIELD = NOTE_SPEC.field("buffer_pct")
 
 
+# Filing-shaped fixture text containing every value these tests script, so a
+# scripted span resolves to text that actually states its value. Before #144
+# the fixtures passed a three-dot placeholder with spans like (100, 110) -- spans that
+# pointed nowhere, which no gate could detect. `span_support` now reads the
+# span, so a fixture has to be honest about what its span contains.
+DOC = ("424B2 pricing supplement. Our estimated value of the notes is 972.4 "
+       "per $1,000 principal amount; an earlier draft said 971.0 and a revised "
+       "sheet said 985.5, while a downside illustration quotes 950.0. A "
+       "hypothetical example elsewhere shows 1240.0, which is not the estimated "
+       "value. The buffer amount is 9.75%, stepping to 15.0% and then 20.0% in "
+       "the worst-of table. The aggregate principal amount is 2500000 dollars.")
+
+
+def span_of(needle, doc=DOC):
+    """The (start, end) of `needle` in the fixture text."""
+    i = doc.index(needle)
+    return (i, i + len(needle))
+
+
 def wire_body(field_def, value, span=None, conf=None):
     key = field_def.wire_key or field_def.name
     entry = {"v": value, "s": list(span) if span else None}
@@ -83,7 +102,7 @@ def test_rule_rung_short_circuits():
         rules={(NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000"): el.RuleMatch(972.4, "anchor-ev1000", span=(10, 20))},
         local_client=local, local_model="qwen2.5:7b",
     )
-    r = ladder.extract("estimated_value_per_1000", text="...", issuer="JPM",
+    r = ladder.extract("estimated_value_per_1000", text=DOC, issuer="JPM",
                         accession="0001", document="424b2.htm")
     check("rung == rule", r.rung == "rule")
     check("value from the rule", r.value == 972.4)
@@ -144,7 +163,7 @@ def test_rule_shadow_mode():
 
     # Set up local client to return a DIFFERENT value than the rule (to test disagreement)
     # Rule will extract "972", but model returns "971" (simulating a template change)
-    local_response = wire_body(EV_FIELD, 971.0, span=(50, 60), conf=0.85)
+    local_response = wire_body(EV_FIELD, 971.0, span=span_of("971.0"), conf=0.85)
     local = FakeChatClient([(local_response, USAGE)])
 
     ladder = el.ExtractionLadder(
@@ -177,7 +196,7 @@ def test_xbrl_rung_short_circuits():
     section("Rung 2: XBRL / EX-107 fee exhibit (#101) short-circuits the model")
     local = FakeChatClient([])
     ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b")
-    r = ladder.extract("aggregate_principal", text="...", ex107={"aggregate_principal": 2_500_000},
+    r = ladder.extract("aggregate_principal", text=DOC, ex107={"aggregate_principal": 2_500_000},
                         accession="0001", document="424b2.htm")
     check("rung == xbrl", r.rung == "xbrl")
     check("value from ex107", r.value == 2_500_000)
@@ -188,11 +207,11 @@ def test_xbrl_rung_short_circuits():
 # --------------------------------------------------------------------------- #
 def test_local_confident_no_escalation():
     section("Rung 3: in-bounds, spanned, confident local value -> no escalation")
-    local = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=(100, 110), conf=0.92), USAGE)])
+    local = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.92), USAGE)])
     claude = FakeChatClient([])  # must not be called
     ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
                                   claude_client=claude, claude_model="claude-sonnet-4-6")
-    r = ladder.extract("estimated_value_per_1000", text="...", accession="0001", document="424b2.htm")
+    r = ladder.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
     check("rung == local", r.rung == "local")
     check("not escalated", r.escalated is False)
     check("not gated", r.gated is False)
@@ -205,11 +224,11 @@ def test_local_confident_no_escalation():
 # --------------------------------------------------------------------------- #
 def test_out_of_bounds_escalates_to_claude():
     section("Bounds gate signal: out-of-bounds local value escalates to Claude")
-    local = FakeChatClient([(wire_body(EV_FIELD, 1240.0, span=(100, 110), conf=0.9), USAGE)])
-    claude = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=(100, 110), conf=0.97), USAGE)])
+    local = FakeChatClient([(wire_body(EV_FIELD, 1240.0, span=span_of("1240.0"), conf=0.9), USAGE)])
+    claude = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.97), USAGE)])
     ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
                                   claude_client=claude, claude_model="claude-sonnet-4-6")
-    r = ladder.extract("estimated_value_per_1000", text="...", accession="0001", document="424b2.htm")
+    r = ladder.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
     check("escalated to Claude", r.escalated is True and r.rung == "claude")
     check("final value is Claude's, not the bad local one", r.value == 972.4)
     check("Claude was called exactly once", len(claude.calls) == 1)
@@ -223,10 +242,10 @@ def test_out_of_bounds_escalates_to_claude():
 def test_span_resolution_failure_escalates():
     section("Span gate signal: in-bounds but no locatable span still escalates")
     local = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=None, conf=0.9), USAGE)])
-    claude = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=(50, 60), conf=0.95), USAGE)])
+    claude = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.95), USAGE)])
     ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
                                   claude_client=claude, claude_model="claude-sonnet-4-6")
-    r = ladder.extract("estimated_value_per_1000", text="...", accession="0001", document="424b2.htm")
+    r = ladder.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
     check("escalated despite in-bounds value (no span)", r.escalated is True)
     check("escalation reason is span", ladder.log.entries[0].gate["reason"] == "span")
 
@@ -256,14 +275,14 @@ def test_span_beats_cross_check_when_both_fail():
 def test_self_consistency_disagreement_escalates():
     section("Self-consistency gate signal: two sampled passes disagree -> escalate")
     local = FakeChatClient([
-        (wire_body(BUFFER_FIELD, 20.0, span=(10, 20), conf=0.9), USAGE),
-        (wire_body(BUFFER_FIELD, 15.0, span=(10, 20), conf=0.9), USAGE),
+        (wire_body(BUFFER_FIELD, 20.0, span=span_of("20.0"), conf=0.9), USAGE),
+        (wire_body(BUFFER_FIELD, 15.0, span=span_of("15.0"), conf=0.9), USAGE),
     ])
-    claude = FakeChatClient([(wire_body(BUFFER_FIELD, 20.0, span=(10, 20), conf=0.96), USAGE)])
+    claude = FakeChatClient([(wire_body(BUFFER_FIELD, 20.0, span=span_of("20.0"), conf=0.96), USAGE)])
     ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
                                   claude_client=claude, claude_model="claude-sonnet-4-6",
                                   self_consistency_samples=2)
-    r = ladder.extract("buffer_pct", text="...", accession="0001", document="424b2.htm")
+    r = ladder.extract("buffer_pct", text=DOC, accession="0001", document="424b2.htm")
     check("two local samples were drawn", len(local.calls) == 2)
     check("disagreement escalated to Claude", r.rung == "claude")
     check("gate reason is self_consistency",
@@ -273,10 +292,10 @@ def test_self_consistency_disagreement_escalates():
 # --------------------------------------------------------------------------- #
 def test_local_only_mode_flags_instead_of_failing():
     section("Local-only mode: gated field flagged, run completes without raising")
-    local = FakeChatClient([(wire_body(EV_FIELD, 1240.0, span=(100, 110), conf=0.9), USAGE)])
+    local = FakeChatClient([(wire_body(EV_FIELD, 1240.0, span=span_of("1240.0"), conf=0.9), USAGE)])
     ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
                                   claude_client=None)
-    r = ladder.extract("estimated_value_per_1000", text="...", accession="0001", document="424b2.htm")
+    r = ladder.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
     check("did not raise; returned a result", r is not None)
     check("gated, not escalated", r.gated is True and r.escalated is False)
     check("value kept from the local rung", r.value == 1240.0)
@@ -286,9 +305,9 @@ def test_local_only_mode_flags_instead_of_failing():
     # claude_enabled=False with a client present behaves the same as no client.
     claude = FakeChatClient([])
     ladder2 = el.ExtractionLadder(NOTE_SPEC, local_client=FakeChatClient(
-        [(wire_body(EV_FIELD, 1240.0, span=(100, 110), conf=0.9), USAGE)]),
+        [(wire_body(EV_FIELD, 1240.0, span=span_of("1240.0"), conf=0.9), USAGE)]),
         local_model="qwen2.5:7b", claude_client=claude, claude_enabled=False)
-    r2 = ladder2.extract("estimated_value_per_1000", text="...", accession="0001", document="424b2.htm")
+    r2 = ladder2.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
     check("claude_enabled=False also gates instead of calling Claude",
           r2.gated is True and len(claude.calls) == 0)
 
@@ -296,17 +315,17 @@ def test_local_only_mode_flags_instead_of_failing():
 # --------------------------------------------------------------------------- #
 def test_malformed_output_retry_measured():
     section("Malformed-output retry: measured, zero on the clean path")
-    clean = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=(1, 2), conf=0.9), USAGE)])
+    clean = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.9), USAGE)])
     ladder = el.ExtractionLadder(NOTE_SPEC, local_client=clean, local_model="qwen2.5:7b")
-    ladder.extract("estimated_value_per_1000", text="...", accession="0001", document="424b2.htm")
+    ladder.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
     check("zero malformed retries on a clean run", ladder.log.malformed_retries == 0)
 
     dirty = FakeChatClient([
         ("not json", USAGE),
-        (wire_body(EV_FIELD, 972.4, span=(1, 2), conf=0.9), USAGE),
+        (wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.9), USAGE),
     ])
     ladder2 = el.ExtractionLadder(NOTE_SPEC, local_client=dirty, local_model="qwen2.5:7b")
-    r = ladder2.extract("estimated_value_per_1000", text="...", accession="0001", document="424b2.htm")
+    r = ladder2.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
     check("recovered after one retry", r.value == 972.4)
     check("retry counted", ladder2.log.malformed_retries == 1)
 
@@ -323,17 +342,17 @@ def test_malformed_output_retry_measured():
 # --------------------------------------------------------------------------- #
 def test_cost_and_escalation_reporting():
     section("Cost log + escalation rate, broken down by field, per document")
-    local_bad = FakeChatClient([(wire_body(EV_FIELD, 1240.0, span=(1, 2), conf=0.9), USAGE)])
-    local_good = FakeChatClient([(wire_body(BUFFER_FIELD, 20.0, span=(1, 2), conf=0.9), USAGE)])
-    claude = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=(1, 2), conf=0.97), USAGE)])
+    local_bad = FakeChatClient([(wire_body(EV_FIELD, 1240.0, span=span_of("1240.0"), conf=0.9), USAGE)])
+    local_good = FakeChatClient([(wire_body(BUFFER_FIELD, 20.0, span=span_of("20.0"), conf=0.9), USAGE)])
+    claude = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.97), USAGE)])
     log = el.RunLog()
 
     ladder_ev = el.ExtractionLadder(NOTE_SPEC, local_client=local_bad, local_model="qwen2.5:7b",
                                      claude_client=claude, claude_model="claude-sonnet-4-6", log=log)
-    ladder_ev.extract("estimated_value_per_1000", text="...", accession="0001", document="a.htm")
+    ladder_ev.extract("estimated_value_per_1000", text=DOC, accession="0001", document="a.htm")
     ladder_buf = el.ExtractionLadder(NOTE_SPEC, local_client=local_good, local_model="qwen2.5:7b",
                                       claude_client=FakeChatClient([]), claude_model="claude-sonnet-4-6", log=log)
-    ladder_buf.extract("buffer_pct", text="...", accession="0002", document="b.htm")
+    ladder_buf.extract("buffer_pct", text=DOC, accession="0002", document="b.htm")
 
     summary = log.summary()
     check("total_extractions == 2", summary["total_extractions"] == 2)
@@ -348,17 +367,17 @@ def test_cost_and_escalation_reporting():
 # --------------------------------------------------------------------------- #
 def test_provenance_reconstructible():
     section("Provenance on every value; a run reconstructible from RunLog.to_jsonl()")
-    local = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=(5, 15), conf=0.91), USAGE)])
+    local = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.91), USAGE)])
     ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
                                   prompt_version="v3", exemplar_set_version="jpm-ev1000-v2", log=el.RunLog())
-    ladder.extract("estimated_value_per_1000", text="...", issuer="JPM",
+    ladder.extract("estimated_value_per_1000", text=DOC, issuer="JPM",
                     accession="0001", document="424b2.htm")
 
     lines = ladder.log.to_jsonl()
     check("one log line per extraction", len(lines) == 1)
     entry = json.loads(lines[0])
     check("rung recorded", entry["rung"] == "local")
-    check("span recorded", entry["span"] == [5, 15])
+    check("span recorded", entry["span"] == list(span_of("972.4")))
     check("model recorded", entry["provenance"]["model"] == "qwen2.5:7b")
     check("prompt_version recorded", entry["provenance"]["prompt_version"] == "v3")
     check("exemplar_set recorded", entry["provenance"]["exemplar_set"] == "jpm-ev1000-v2")
@@ -374,21 +393,21 @@ def test_same_client_interface_config_only():
     # the real client; here the ladder-facing proof is that ONE fake class
     # plays both roles without the ladder branching on client type anywhere.
     shared_class = FakeChatClient
-    local = shared_class([(wire_body(EV_FIELD, 1240.0, span=(1, 2), conf=0.9), USAGE)])
-    claude = shared_class([(wire_body(EV_FIELD, 972.4, span=(1, 2), conf=0.97), USAGE)])
+    local = shared_class([(wire_body(EV_FIELD, 1240.0, span=span_of("1240.0"), conf=0.9), USAGE)])
+    claude = shared_class([(wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.97), USAGE)])
     check("local and claude clients are the same class", type(local) is type(claude))
     ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
                                   claude_client=claude, claude_model="claude-sonnet-4-6")
-    r = ladder.extract("estimated_value_per_1000", text="...", accession="0001", document="424b2.htm")
+    r = ladder.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
     check("escalation still resolves correctly through the shared class", r.value == 972.4)
 
 
 # --------------------------------------------------------------------------- #
 def test_wire_keys_never_leak():
     section("Wire keys (#102/#104 transport) never reach a LadderResult or the log")
-    local = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=(1, 2), conf=0.9), USAGE)])
+    local = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.9), USAGE)])
     ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b")
-    r = ladder.extract("estimated_value_per_1000", text="...", accession="0001", document="424b2.htm")
+    r = ladder.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
     check("result.field is canonical, not the wire key", r.field == "estimated_value_per_1000")
     check("wire key not present in result field name", r.field != "ev1000")
     fv = r.to_field_value()
@@ -400,9 +419,9 @@ def test_static_prefix_byte_identical_across_calls():
     # Same issuer, field, exemplar version, different documents -> static prefix must not change
     exemplars_fn = lambda issuer, field: ["example: 972.4"] if issuer == "JPM" else None
     local = FakeChatClient([
-        (wire_body(EV_FIELD, 972.4, span=(1, 2), conf=0.9), USAGE),
-        (wire_body(EV_FIELD, 985.5, span=(10, 20), conf=0.9), USAGE),
-        (wire_body(EV_FIELD, 950.0, span=(30, 40), conf=0.9), USAGE),
+        (wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.9), USAGE),
+        (wire_body(EV_FIELD, 985.5, span=span_of("985.5"), conf=0.9), USAGE),
+        (wire_body(EV_FIELD, 950.0, span=span_of("950.0"), conf=0.9), USAGE),
     ])
     ladder = el.ExtractionLadder(
         NOTE_SPEC,
@@ -413,9 +432,9 @@ def test_static_prefix_byte_identical_across_calls():
     )
 
     # Extract same field from three different documents, same issuer
-    r1 = ladder.extract("estimated_value_per_1000", text="doc1...", issuer="JPM", accession="0001a", document="424b2_1.htm")
-    r2 = ladder.extract("estimated_value_per_1000", text="doc2...", issuer="JPM", accession="0001b", document="424b2_2.htm")
-    r3 = ladder.extract("estimated_value_per_1000", text="doc3...", issuer="JPM", accession="0001c", document="424b2_3.htm")
+    r1 = ladder.extract("estimated_value_per_1000", text=DOC, issuer="JPM", accession="0001a", document="424b2_1.htm")
+    r2 = ladder.extract("estimated_value_per_1000", text=DOC, issuer="JPM", accession="0001b", document="424b2_2.htm")
+    r3 = ladder.extract("estimated_value_per_1000", text=DOC, issuer="JPM", accession="0001c", document="424b2_3.htm")
 
     check("all three calls succeeded", r1 and r2 and r3)
 
@@ -487,8 +506,8 @@ def test_static_prefix_version_mismatch_blocked():
 
     provider = BadExemplarProvider()
     local = FakeChatClient([
-        (wire_body(EV_FIELD, 972.4, span=(1, 2), conf=0.9), USAGE),
-        (wire_body(EV_FIELD, 985.5, span=(10, 20), conf=0.9), USAGE),
+        (wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.9), USAGE),
+        (wire_body(EV_FIELD, 985.5, span=span_of("985.5"), conf=0.9), USAGE),
     ])
     ladder = el.ExtractionLadder(
         NOTE_SPEC,
@@ -498,14 +517,14 @@ def test_static_prefix_version_mismatch_blocked():
     )
 
     # First call succeeds
-    r1 = ladder.extract("estimated_value_per_1000", text="doc1...", issuer="JPM", accession="0001a", document="424b2_1.htm")
+    r1 = ladder.extract("estimated_value_per_1000", text=DOC, issuer="JPM", accession="0001a", document="424b2_1.htm")
     check("first call succeeds", r1 is not None)
 
     # Second call detects the drift and raises AssertionError
     # Implementation: extraction_ladder.py:606 raises with message "static prompt prefix changed"
     raised = False
     try:
-        r2 = ladder.extract("estimated_value_per_1000", text="doc2...", issuer="JPM", accession="0001b", document="424b2_2.htm")
+        r2 = ladder.extract("estimated_value_per_1000", text=DOC, issuer="JPM", accession="0001b", document="424b2_2.htm")
     except AssertionError as e:
         raised = "static prompt prefix changed" in str(e)
 
@@ -516,9 +535,9 @@ def test_token_cost_static_prefix_cache():
     section("Token cost (#111 criterion 8): static prefix cache saves ~8x on exemplar tokens")
     exemplars = ["example1: 100", "example2: 200", "example3: 300"]
     local = FakeChatClient([
-        (wire_body(EV_FIELD, 972.4, span=(10, 20), conf=0.9), {"prompt_tokens": 250, "completion_tokens": 20}),
-        (wire_body(EV_FIELD, 985.5, span=(20, 30), conf=0.9), {"prompt_tokens": 180, "completion_tokens": 18}),
-        (wire_body(EV_FIELD, 950.0, span=(30, 40), conf=0.9), {"prompt_tokens": 180, "completion_tokens": 19}),
+        (wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.9), {"prompt_tokens": 250, "completion_tokens": 20}),
+        (wire_body(EV_FIELD, 985.5, span=span_of("985.5"), conf=0.9), {"prompt_tokens": 180, "completion_tokens": 18}),
+        (wire_body(EV_FIELD, 950.0, span=span_of("950.0"), conf=0.9), {"prompt_tokens": 180, "completion_tokens": 19}),
     ])
     ladder = el.ExtractionLadder(
         NOTE_SPEC,
@@ -527,14 +546,103 @@ def test_token_cost_static_prefix_cache():
         local_model="qwen2.5:7b",
         exemplar_set_version="v1"
     )
-    r1 = ladder.extract("estimated_value_per_1000", text="doc1 content...", issuer="JPM", accession="0001", document="a.htm")
-    r2 = ladder.extract("estimated_value_per_1000", text="doc2 content...", issuer="JPM", accession="0002", document="b.htm")
-    r3 = ladder.extract("estimated_value_per_1000", text="doc3 content...", issuer="JPM", accession="0003", document="c.htm")
+    r1 = ladder.extract("estimated_value_per_1000", text=DOC, issuer="JPM", accession="0001", document="a.htm")
+    r2 = ladder.extract("estimated_value_per_1000", text=DOC, issuer="JPM", accession="0002", document="b.htm")
+    r3 = ladder.extract("estimated_value_per_1000", text=DOC, issuer="JPM", accession="0003", document="c.htm")
     check("three documents extracted", r1 and r2 and r3)
     check("all calls use constrained decode", all(call["response_format"] is not None for call in local.calls[:3]))
     savings_per_call = 250 - 180
     total_savings = savings_per_call * 2
     check(f"static-prefix cache saves ~{total_savings} tokens across 3 calls", savings_per_call > 0)
+
+
+# --------------------------------------------------------------------------- #
+def test_span_support_catches_fabrication_in_range():
+    section("span_support (#144): a value absent from its own span escalates, "
+            "even when bounds and span presence both pass")
+
+    # The real preliminary 424B2 that exposed this (UBS AG, accession
+    # 0001839882-24-018311): the filing discloses a RANGE and defers the point
+    # value to the final pricing supplement. A 7B answered 989.5 -- inside
+    # bounds (900-1000), right type, non-null, and nowhere in the document.
+    source = ("The estimated initial value of the Notes as of the trade date "
+              "is expected to be between $962.60 and $992.60. The range of the "
+              "estimated initial value was determined by reference to UBS' "
+              "internal pricing models.")
+    span = (0, len(source))
+
+    gate = el.evaluate_gate(EV_FIELD, 989.5, span, spec=NOTE_SPEC,
+                             model_confidence=0.9, source_text=source)
+    by_name = {s.name: s.passed for s in gate.signals}
+    check("bounds passed (989.5 is inside 900-1000)", by_name["bounds"] is True)
+    check("span presence passed (the model did return a span)", by_name["span"] is True)
+    check("span_support FAILED", by_name["span_support"] is False)
+    check("gate escalates", gate.escalate is True)
+    check("gate reason is span_support", gate.reason == "span_support")
+
+    detail = [s.detail for s in gate.signals if s.name == "span_support"][0]
+    check("detail names the value and quotes the span", "989.5" in detail and "962.60" in detail)
+
+    # The number the filing DOES state passes the same check.
+    ok = el.evaluate_gate(EV_FIELD, 992.60, span, spec=NOTE_SPEC,
+                           model_confidence=0.9, source_text=source)
+    check("a value the span actually states passes", ok.escalate is False)
+
+
+# --------------------------------------------------------------------------- #
+def test_span_support_tolerates_issuer_formatting():
+    section("span_support (#144): filing formatting is not mistaken for fabrication")
+
+    check("$ and thousands separators strip",
+          el.span_supports_value(EV_FIELD, 1000.0, "priced at $1,000.00 per note") is True)
+    check("a percent written 9.75% supports 9.75",
+          el.span_supports_value(BUFFER_FIELD, 9.75, "buffer amount of 9.75%") is True)
+    check("a number genuinely absent is contradicted",
+          el.span_supports_value(EV_FIELD, 989.5, "between $962.60 and $992.60") is False)
+    check("a span with no digits at all is contradicted",
+          el.span_supports_value(EV_FIELD, 989.5, "see the final pricing supplement") is False)
+
+    # Dates: filings write prose, the record holds ISO. Comparing the two as
+    # strings would flag every correct date as a fabrication.
+    date_field = NOTE_SPEC.field("pricing_date")
+    if date_field is not None:
+        check("a prose date supports its ISO value",
+              el.span_supports_value(date_field, "2024-06-07",
+                                      "the trade date is June 7, 2024") is True)
+        check("a different prose date is contradicted",
+              el.span_supports_value(date_field, "2024-06-07",
+                                      "the trade date is June 13, 2025") is False)
+
+    # Types with no scalar textual form must not be scored as failures.
+    arr_field = NOTE_SPEC.field("underlyings")
+    if arr_field is not None:
+        check("an array field is not checkable (None, not False)",
+              el.span_supports_value(arr_field, [{"name": "BMY"}], "common stock of BMY") is None)
+
+
+# --------------------------------------------------------------------------- #
+def test_span_support_passes_vacuously_without_source_text():
+    section("span_support (#144): pre-existing callers keep their behaviour")
+
+    # No source_text -- every caller written before #144. The signal must be
+    # present (callers read signals by name) and must not manufacture a failure.
+    gate = el.evaluate_gate(EV_FIELD, 989.5, (0, 40), spec=NOTE_SPEC, model_confidence=0.9)
+    by_name = {s.name: s.passed for s in gate.signals}
+    check("span_support present", "span_support" in by_name)
+    check("span_support passes when unchecked", by_name["span_support"] is True)
+    check("gate does not escalate", gate.escalate is False)
+
+    # Span present but source text too short to contain it: unverifiable, and an
+    # out-of-range span is itself wrong, so it fails rather than passing quietly.
+    short = el.evaluate_gate(EV_FIELD, 989.5, (5000, 5010), spec=NOTE_SPEC,
+                              model_confidence=0.9, source_text="tiny")
+    check("an out-of-range span fails span_support",
+          [s.passed for s in short.signals if s.name == "span_support"][0] is False)
+
+    # Bounds still outrank span_support in the #104 priority order.
+    both = el.evaluate_gate(EV_FIELD, 5.0, (0, 20), spec=NOTE_SPEC, model_confidence=0.9,
+                             source_text="no such number here at all")
+    check("bounds still beats span_support for `reason`", both.reason == "bounds")
 
 
 def main():
@@ -557,6 +665,9 @@ def main():
     test_static_prefix_byte_identical_across_calls()
     test_static_prefix_version_mismatch_blocked()
     test_token_cost_static_prefix_cache()
+    test_span_support_catches_fabrication_in_range()
+    test_span_support_tolerates_issuer_formatting()
+    test_span_support_passes_vacuously_without_source_text()
 
     if failures:
         print(f"\n{len(failures)} check(s) FAILED:")

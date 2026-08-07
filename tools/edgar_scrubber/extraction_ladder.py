@@ -56,6 +56,7 @@ stdlib only. Run the self-check:  python tools/edgar_scrubber/extraction_ladder.
 """
 
 import json
+import re
 from dataclasses import asdict, dataclass, field as _dc_field
 
 try:  # package import: tools.edgar_scrubber.extraction_ladder
@@ -351,9 +352,107 @@ def estimate_cost(model, tokens_in, tokens_out, pricing=None):
 
 # ── Confidence gate ──────────────────────────────────────────────────────────
 
+# ── Span support ─────────────────────────────────────────────────────────────
+#
+# A returned span proves the model pointed SOMEWHERE; it does not prove the
+# span says what the model claims it says. That gap is not hypothetical: on a
+# preliminary 424B2 that discloses `estimated_value_per_1000` as a RANGE
+# ("expected to be between $962.60 and $992.60", with the point value deferred
+# to the final pricing supplement), a 7B returned 989.5 -- a number that is in
+# bounds (900-1000), the right type, non-null on a required field, and absent
+# from the document. Bounds cannot catch a fabrication that lands inside them,
+# and `span is not None` cannot catch one carrying a plausible span. Reading
+# the span's own text is what separates extracted from invented (#144).
+
+_NUMBER_IN_TEXT = re.compile(r"[-+]?\$?\s?\d[\d,]*(?:\.\d+)?\s?%?")
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july",
+     "august", "september", "october", "november", "december"], start=1)}
+
+_LONG_DATE = re.compile(
+    r"\b(" + "|".join(_MONTHS) + r")\w*\.?\s+(\d{1,2})\b(?:\s*,)?\s*(\d{4})\b", re.I)
+_ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_US_DATE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")
+
+
+def _numbers_in(text):
+    """Every number the span states, issuer formatting stripped: `$1,000.00`,
+    `9.75%`, `(2,500)` all reduce to a float."""
+    out = []
+    for m in _NUMBER_IN_TEXT.finditer(text):
+        raw = m.group().replace("$", "").replace(",", "").replace("%", "")
+        raw = raw.replace(" ", "").strip()
+        try:
+            out.append(float(raw))
+        except ValueError:
+            continue
+    return out
+
+
+def _dates_in(text):
+    """ISO dates the span states, in any of the three formats filings use.
+    `June 7, 2024`, `2024-06-07` and `06/07/2024` all reduce to `2024-06-07`,
+    so a correct value written in prose is not mistaken for a fabrication."""
+    out = set()
+    for mo, d, y in _LONG_DATE.findall(text):
+        out.add(f"{int(y):04d}-{_MONTHS[mo.lower()]:02d}-{int(d):02d}")
+    for y, mo, d in _ISO_DATE.findall(text):
+        out.add(f"{int(y):04d}-{int(mo):02d}-{int(d):02d}")
+    for mo, d, y in _US_DATE.findall(text):
+        out.add(f"{int(y):04d}-{int(mo):02d}-{int(d):02d}")
+    return out
+
+
+def _squash(s):
+    return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+
+
+def span_supports_value(field_def, value, span_text):
+    """Does the span's own text actually state `value`?
+
+    Returns True (supported), False (contradicted -- the span does not contain
+    the value), or None (not checkable for this type, so the caller must not
+    treat it as a failure). None is deliberate and distinct from False: an
+    `array` of underlying objects has no textual form to compare against, and
+    silently scoring that as a failure would escalate every list-valued field
+    to Claude for no reason.
+    """
+    if value is None or not span_text:
+        return None
+
+    t = field_def.type
+
+    if t in ("number", "percent"):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None          # type_mismatch is the bounds signal's job
+        nums = _numbers_in(span_text)
+        if not nums:
+            return False
+        # Exact-ish: the span must literally state the number. A percent may be
+        # written `9.75%` (9.75) or `0.0975`, so accept the x100 form too.
+        tol = max(abs(value) * 1e-6, 1e-9)
+        cands = {value}
+        if t == "percent":
+            cands |= {value * 100.0, value / 100.0}
+        return any(abs(n - c) <= max(tol, abs(c) * 1e-6) for n in nums for c in cands)
+
+    if t == "date":
+        if not isinstance(value, str):
+            return None
+        return value in _dates_in(span_text)
+
+    if t in ("string", "enum"):
+        v = _squash(str(value))
+        return bool(v) and v in _squash(span_text)
+
+    return None                  # array / object: no scalar textual form
+
+
 @dataclass(frozen=True)
 class GateSignal:
-    name: str          # bounds | cross_check | span | self_consistency | model_confidence
+    name: str          # bounds | span | span_support | cross_check |
+                       # self_consistency | model_confidence
     passed: bool
     detail: str = ""
 
@@ -372,15 +471,45 @@ class GateResult:
                 "signals": [s.as_dict() for s in self.signals]}
 
 
+def _span_support_signal(field_def, value, span, source_text):
+    """The `span_support` GateSignal. Passes vacuously whenever the check
+    cannot be made -- no source text, no span, an out-of-range span, or a type
+    with no scalar textual form. Only an affirmative contradiction fails."""
+    if source_text is None or span is None:
+        return GateSignal("span_support", True, "not checked (no source text or span)")
+    try:
+        start, end = span
+        snippet = source_text[start:end]
+    except (TypeError, ValueError):
+        return GateSignal("span_support", True, "not checked (malformed span)")
+    if not snippet:
+        return GateSignal("span_support", False,
+                          f"span {list(span)} is empty or outside the source text")
+    supported = span_supports_value(field_def, value, snippet)
+    if supported is None:
+        return GateSignal("span_support", True,
+                          f"not checkable for type {field_def.type!r}")
+    if supported:
+        return GateSignal("span_support", True)
+    return GateSignal("span_support", False,
+                      f"{field_def.name}={value!r} does not appear in its own "
+                      f"source span {list(span)}: {snippet[:120]!r}")
+
+
 def evaluate_gate(field_def, value, span, *, ex107=None, spec=None, samples=None,
-                   model_confidence=None, confidence_floor=0.35):
+                   model_confidence=None, confidence_floor=0.35, source_text=None):
     """Gate on checkable signals, in the priority #104 specifies: field-spec
     bound violations need no judgment call and come first; then span
-    resolution; then cross-check against EX-107; then self-consistency
-    across sampled passes; self-reported model confidence is weighted LAST
-    -- it decides `reason` only when nothing else already did, though a
-    confidence far below floor can still be the sole trigger for `escalate`
-    when everything else checks out.
+    resolution, then whether that span actually SAYS the value (#144); then
+    cross-check against EX-107; then self-consistency across sampled passes;
+    self-reported model confidence is weighted LAST -- it decides `reason`
+    only when nothing else already did, though a confidence far below floor
+    can still be the sole trigger for `escalate` when everything else checks
+    out.
+
+    `source_text` is the same text the value was extracted from, and `span`
+    indexes into it. Omit it and the `span_support` signal passes vacuously --
+    every pre-#144 caller keeps its old behaviour.
     """
     signals = []
 
@@ -391,6 +520,8 @@ def evaluate_gate(field_def, value, span, *, ex107=None, spec=None, samples=None
 
     span_ok = span is not None
     signals.append(GateSignal("span", span_ok, "" if span_ok else "no locatable source span"))
+
+    signals.append(_span_support_signal(field_def, value, span, source_text))
 
     signals.append(GateSignal("cross_check", not cross_bad, "; ".join(f.message for f in cross_bad)))
 
@@ -757,7 +888,8 @@ class ExtractionLadder:
         self.log.malformed_retries += retries
 
         gate = evaluate_gate(f, value, span, ex107=ex107, spec=self.spec, samples=samples,
-                              model_confidence=conf, confidence_floor=self.confidence_floor)
+                              model_confidence=conf, confidence_floor=self.confidence_floor,
+                              source_text=text)
 
         if not gate.escalate:
             prov = Provenance(rung="local", document=document, span=span, model=self.local_model,
