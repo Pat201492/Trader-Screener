@@ -48,15 +48,35 @@ a separate, not-checked-out repo; ARCHITECTURE.md's "single writer" rule means
 this can't fork that ingest). Per the same posture as lookahead-gate/ and
 pipeline-mock/, this module is a portable, stdlib-only, deterministically
 seeded REFERENCE implementation: a synthetic universe standing in for (a)
-scrubber-shaped issuance events queried the way output_store.py's query()
-returns them (underlyings[], filing_date, issuer, product_type) and (b)
-pipeline-shaped prices/realized-vol/options-OI/ADV. It is not tuned to make
-the hypothesis win or lose -- the canonical run uses a NEUTRAL fixture
-(effect_strength=0.0, no mechanical link planted between issuance and forward
-behavior); a separate power self-check with a DELIBERATELY planted effect
-proves the statistical machinery would detect a real one if it existed, so a
-"refuted" verdict from the neutral fixture means the test has no teeth to
-bite with, not that it has no teeth at all.
+scrubber-shaped issuance events and (b) pipeline-shaped prices/realized-vol/
+options-OI/ADV. (b) has no local mock module to consume (pipeline-mock/ is a
+network server, not an importable one) so it stays inline-synthetic; (a) does
+have a local, stdlib+sqlite, zero-network mock -- tools/edgar_scrubber/
+output_store.py's OutputStore(":memory:") -- so this module's own issuance
+events are round-tripped through it for real: written with write_document(),
+read back with query()/fields(), the tool interface only (#109), same pattern
+tools/edgar_scrubber/research_maps.py uses for real scrubber output. See
+_issuance_events_via_output_store() below. Not tuned to make the hypothesis
+win or lose -- the canonical run uses a NEUTRAL fixture (effect_strength=0.0,
+no mechanical link planted between issuance and forward behavior); a separate
+power self-check with a DELIBERATELY planted effect proves the statistical
+machinery would detect a real one if it existed, so a "refuted" verdict from
+the neutral fixture means the test has no teeth to bite with, not that it has
+no teeth at all.
+
+OUTPUT_STORE GAP (pipeline TODO, not worked around here): OutputStore's
+`documents.filing_date` is a single denormalized column, and
+`DocumentExtraction.from_record()` defaults its source key to `pricing_date`
+(output_store.py:174) -- the store has no native pricing-vs-acceptance-date
+distinction. This module needs exactly that distinction (see LOOK-AHEAD
+POSTURE above), so it passes `filing_date_field="filing_idx"` explicitly to
+get acceptance-date semantics onto the document dimension, and keeps
+filing_idx/pricing_idx as their own field rows (read back via fields(), not
+the denormalized column) for the knowledge-date check to gate on. A real
+scrubber extraction would want a proper `filing_date` (EDGAR acceptance,
+ISO) alongside `pricing_date` as two first-class fields -- worth fixing in
+output_store.py when a real 424B2 spec needs it, not a reason to bypass the
+interface here.
 
 Run:  python Research/dealer_hedging_causal_test.py
 Exit code 0 = self-checks passed and the declared trial grid ran to a
@@ -71,6 +91,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lookahead-gate"))
 import lookahead_lag as lag  # noqa: E402  (path insert must precede this import)
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "edgar_scrubber"))
+import output_store as scrubber_store  # noqa: E402  (path insert must precede this import)
 
 
 # ── Declared up front (issue #131 posture) ──────────────────────────────────
@@ -128,9 +151,12 @@ def make_universe(seed, effect_strength=0.0):
 
     Returns {ticker: {"bars": [...], "adv": [...], "total_oi": [...],
     "mkt_cap": float, "notes": [{"filing_idx", "pricing_idx", "size_usd",
-    "barrier": float}, ...], "treatment_days": set(int)}}.
+    "barrier": float}, ...], "treatment_days": set(int)}}. The "notes" book is
+    round-tripped through an in-memory OutputStore before it's attached here
+    -- see _issuance_events_via_output_store().
     """
     universe = {}
+    notes_by_ticker = {}
     for t_i in range(N_UNDERLYINGS):
         tk = f"U{t_i:03d}"
         rnd = random.Random(f"{seed}:{tk}")
@@ -178,16 +204,79 @@ def make_universe(seed, effect_strength=0.0):
                 "size_usd": rnd.uniform(1e6, 25e6),
                 "barrier": ref_price * knockin_pct,
             })
+        notes_by_ticker[tk] = notes
 
         universe[tk] = {
             "bars": bars, "closes": closes, "adv": adv, "total_oi": total_oi,
-            "mkt_cap": mkt_cap, "notes": sorted(notes, key=lambda n: n["filing_idx"]),
-            "treatment_days": set(),
+            "mkt_cap": mkt_cap, "treatment_days": set(),
         }
+
+    # Consumed through the scrubber's tool interface only (#109), not this
+    # module's own ad hoc shape -- see module docstring's DATA SOURCE note.
+    notes_by_ticker = _issuance_events_via_output_store(notes_by_ticker)
+    for tk, notes in notes_by_ticker.items():
+        universe[tk]["notes"] = notes
 
     if effect_strength > 0:
         _plant_effect(universe, effect_strength)
     return universe
+
+
+def _issuance_events_via_output_store(notes_by_ticker):
+    """Round-trip the synthetic issuance book through a fresh in-memory
+    OutputStore, the same way tools/edgar_scrubber/research_maps.py reads
+    real scrubber output: write_document() to load, query()/fields() to
+    read back -- never the sqlite file or an ad hoc dict shape directly.
+
+    `notes_by_ticker`: {ticker: [{"filing_idx", "pricing_idx", "size_usd",
+    "barrier"}, ...]} as built in make_universe(). Returns the same shape,
+    sorted by filing_idx per ticker, but every value has passed through the
+    store's public read surface.
+
+    filing_date_field="filing_idx" makes the ACCEPTANCE date (not
+    pricing_date) the document's queryable knowledge date -- see the
+    OUTPUT_STORE GAP note in the module docstring. filing_idx/pricing_idx
+    are also kept as their own field rows (read back via fields()) since
+    this module's knowledge-date check needs the raw pair, not just the
+    denormalized column.
+    """
+    store = scrubber_store.OutputStore(":memory:")
+    run_id = store.start_run(
+        "synthetic.dealer_hedging_fixture", "1.0.0", "2026-08-05T00:00:00Z",
+        note="synthetic reference universe (issue #131), not a real crawl",
+    )
+    for tk, notes in notes_by_ticker.items():
+        for idx, n in enumerate(notes):
+            record = {
+                "issuer": f"{tk}-issuer",
+                "product_type": "barrier_note",
+                "underlyings": [{"name": tk, "kind": "equity"}],
+                "filing_idx": n["filing_idx"],
+                "pricing_idx": n["pricing_idx"],
+                "size_usd": n["size_usd"],
+                "barrier": n["barrier"],
+            }
+            doc = scrubber_store.DocumentExtraction.from_record(
+                f"{tk}-note-{idx:03d}", "synthetic.txt", record,
+                filing_date_field="filing_idx",
+            )
+            store.write_document(run_id, doc)
+
+    out = {}
+    for tk in notes_by_ticker:
+        read_notes = []
+        for d in store.query(underlying=tk):
+            values = {r["field"]: r["value"]
+                      for r in store.fields(d["accession"], d["document"])}
+            read_notes.append({
+                "filing_idx": values["filing_idx"],
+                "pricing_idx": values["pricing_idx"],
+                "size_usd": values["size_usd"],
+                "barrier": values["barrier"],
+            })
+        out[tk] = sorted(read_notes, key=lambda n: n["filing_idx"])
+    store.close()
+    return out
 
 
 def _plant_effect(universe, effect_strength):
