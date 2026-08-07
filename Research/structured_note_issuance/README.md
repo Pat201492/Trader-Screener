@@ -33,21 +33,14 @@ Three outputs, all pure extraction. No modeling, no controls, no p-values.
    $1,000 issue price, aggregated by issuer and product type over time.
    Costs nothing extra -- the field is already extracted for Part B.
 
-Code: [`analysis.py`](analysis.py) (the three aggregations),
-[`charts.py`](charts.py) (one PNG renderer per output),
-[`build_report.py`](build_report.py) (the runner: `OutputStore` ->
-`analysis.py` -> `charts.py` -> `output/findings.md`).
-
-Each function carries a caveat in its own docstring rather than hiding it:
-a worst-of/basket note lists more than one underlying and the field spec
-has no per-underlying issue size, so `analysis.py` attributes a basket
-note's **full** `aggregate_principal` (and its single
-`initial_underlying_value`) to **every** underlying it lists. Summing
-"issuance by underlying" across underlyings therefore over-counts total
-book size -- this is a map of where exposure and protection levels *touch*
-a name, not a partition of total issuance.
-
-### Running it for real
+**Already shipped, as #130** -- carved out of this issue by scope triage and
+merged ahead of Part B: [`tools/edgar_scrubber/research_maps.py`](../../tools/edgar_scrubber/research_maps.py)
+(the three aggregations + SVG charts + written findings),
+[`generate_research_maps.py`](../../tools/edgar_scrubber/generate_research_maps.py)
+(the CLI runner), gated by
+[`test_research_maps.py`](../../tools/edgar_scrubber/test_research_maps.py).
+Full writeup: [`tools/edgar_scrubber/RESEARCH_MAPS.md`](../../tools/edgar_scrubber/RESEARCH_MAPS.md).
+This project (the rest of #110) is Part B only -- the causal test below.
 
 ```bash
 # 1. crawl (issue #100) -- the saved query already exists:
@@ -57,30 +50,9 @@ python tools/edgar_scrubber/crawl.py tools/edgar_scrubber/queries/424b2-structur
 #    -- see tools/edgar_scrubber/EXTRACTION_LADDER.md. This is what calls
 #    OutputStore.write_document() and populates the local store.
 
-# 3. build the report
-python Research/structured_note_issuance/build_report.py
+# 3. build the maps
+python tools/edgar_scrubber/generate_research_maps.py --out-dir tools/edgar_scrubber/research_output
 ```
-
-Output lands in `Research/structured_note_issuance/output/` (gitignored --
-see the root `.gitignore` and the note there: committing a report generated
-from real filings alongside code that hasn't run the real crawl would read
-as a genuine finding when it isn't one yet).
-
-### Current status
-
-No live crawl has been executed against this checkout's local store, so
-`build_report.py` currently reports "nothing to report" and exits cleanly
-rather than fabricating numbers. What **is** shipped and gated is the full
-Part A pipeline itself, proven correct against synthetic seed data (multiple
-issuers, a worst-of basket, principal-weighted averaging) in
-[`test_analysis.py`](test_analysis.py):
-
-```bash
-python Research/structured_note_issuance/test_analysis.py
-```
-
-The moment the crawl + extraction ladder populate the store, `build_report.py`
-produces the three real charts and `output/findings.md` with no code changes.
 
 ## Part B -- causal (the stretch)
 
@@ -155,9 +127,9 @@ predate public disclosure by several days.
 **The knowledge date is the acceptance timestamp.** `causal_test.py`'s
 `trailing_issuance()` reads only a caller-supplied `Filing.acceptance_date`
 (sourced from the crawler's `file_date` -- crawl-time metadata, not an
-extracted field) and never `pricing_date`. `analysis.py` (Part A) uses
-`pricing_date` on purpose: it makes no forward prediction, so it has no
-look-ahead exposure to guard.
+extracted field) and never `pricing_date`. `research_maps.py` (Part A, #130)
+uses `pricing_date`/`filing_date` on purpose: it makes no forward
+prediction, so it has no look-ahead exposure to guard.
 
 `test_causal_test.py` adapts `lookahead-gate/`'s A-vs-B truncation
 methodology from a price-history signal to this event-stream (filing)
@@ -176,8 +148,8 @@ python Research/structured_note_issuance/test_causal_test.py
 
 ### Data required
 
-From the scrubber (via `analysis.load_notes()` plus a caller-supplied
-accession -> acceptance-date map): `underlyings[]`, `aggregate_principal`,
+From the scrubber (via `research_maps.load_documents()` plus a
+caller-supplied accession -> acceptance-date map): `underlyings[]`, `aggregate_principal`,
 `barrier_pct`, `autocall_barrier_pct`, `observation_dates[]`, `pricing_date`,
 `issuer`, `product_type`, `estimated_value_per_1000`,
 `initial_underlying_value`.
@@ -219,15 +191,14 @@ checklist in
 
 ## Files
 
+Part A lives in `tools/edgar_scrubber/` (#130) -- see that project's own
+Files table in [`RESEARCH_MAPS.md`](../../tools/edgar_scrubber/RESEARCH_MAPS.md).
+This directory carries Part B only:
+
 | File | Purpose |
 |---|---|
-| `analysis.py` | Part A: the three aggregations, reading `OutputStore` through its public interface |
-| `charts.py` | Part A: one PNG renderer per aggregation |
-| `build_report.py` | Part A: the runner (`OutputStore` -> `analysis.py` -> `charts.py` -> `output/findings.md`) |
-| `test_analysis.py` | Part A gate -- synthetic multi-issuer/basket-note seed, run directly, exit 0 = pass |
 | `causal_test.py` | Part B: hypothesis, falsifier, declared trial grid, feature computation, matched controls, verdict |
 | `test_causal_test.py` | Part B gate, including the look-ahead A-vs-B truncation test |
-| `output/` | `build_report.py`'s generated PNGs + findings.md (gitignored) |
 
 ## References
 
@@ -236,5 +207,6 @@ checklist in
 - Issue #100 -- resumable crawl
 - Issue #107 -- rule induction (feeds the extraction ladder this project reads from)
 - Issue #109 -- output store + tool interface + graduation checklist
+- Issue #130 -- Part A of this issue, shipped separately: [`tools/edgar_scrubber/research_maps.py`](../../tools/edgar_scrubber/research_maps.py) / [`RESEARCH_MAPS.md`](../../tools/edgar_scrubber/RESEARCH_MAPS.md)
 - [`Research/Research.md`](../Research.md) -- the Research terminal's dashboard section doc
 - [`lookahead-gate/`](../../lookahead-gate/) -- the A-vs-B truncation test this project's look-ahead posture is built on

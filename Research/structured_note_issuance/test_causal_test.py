@@ -198,6 +198,21 @@ def main():
     check("verdict comes with a non-empty explanation", bool(explanation))
     print(f"    synthetic verdict: {status} -- {explanation}")
 
+    # make_bars() gives every symbol the SAME drift/vol random walk with NO
+    # engineered issuance -> vol relationship -- a known-null case. Each
+    # trial's false-positive rate is calibrated to ~0.3% (CRITICAL_T is a
+    # Bonferroni bar for 18 trials), so a correctly-specified mechanism
+    # should almost never call this "supported". A prior version of
+    # run_trial() sampled the high group from a conditioned subsample
+    # (near_barrier + trailing_issuance>0) against an UNCONDITIONED control
+    # (the control's whole history) with overlapping forward-vol windows on
+    # top -- that combination cleared |t| >= CRITICAL_T on this exact
+    # synthetic data in the same direction on a majority of trials, i.e. a
+    # false "supported" verdict on pure noise. This check exists so that
+    # regression can't silently come back.
+    check("synthetic null case (no engineered relationship) does NOT verdict 'supported'",
+          status != "supported")
+
     print()
     if failures:
         print(f"test_causal_test: FAIL ({len(failures)} check(s) failed)")

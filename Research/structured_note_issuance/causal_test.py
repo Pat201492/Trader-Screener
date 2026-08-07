@@ -44,9 +44,10 @@ file_date (when EDGAR actually indexed/accepted it), and these DIFFER --
 pricing_date can predate public disclosure by a few days. The knowledge date
 used everywhere in this module is the ACCEPTANCE date, supplied explicitly
 by the caller as `Filing.acceptance_date` (sourced from the crawler's
-full-text-search `file_date`, NOT from anything in analysis.py, which uses
-pricing_date on purpose because Part A makes no forward prediction and has
-no look-ahead exposure to guard). `trailing_issuance()` below reads ONLY
+full-text-search `file_date`, NOT from anything in
+tools/edgar_scrubber/research_maps.py, Part A of this issue (#130), which
+uses pricing_date/filing_date on purpose because it makes no forward
+prediction and has no look-ahead exposure to guard). `trailing_issuance()` below reads ONLY
 `acceptance_date` and only counts filings strictly BEFORE the as-of day --
 one more session of lag on top of that, same discipline as every §2a/§2b
 column in lookahead-gate/lookahead_lag.py. See test_causal_test.py for the
@@ -58,8 +59,9 @@ open interest or ADV itself. That data belongs to the shared pipeline
 (Stock-Data-Pipeline), not to a local, exploratory tool
 (OUTPUT_STORE.md's ownership boundary). Callers supply `UnderlyingUniverse`
 per symbol and a list of `Filing` (typically built from
-analysis.load_notes() plus a caller-supplied accession -> acceptance_date
-map, since acceptance date is crawl-time metadata, not an extracted field).
+tools.edgar_scrubber.research_maps.load_documents() plus a caller-supplied
+accession -> acceptance_date map, since acceptance date is crawl-time
+metadata, not an extracted field).
 
 Run the self-check: python Research/structured_note_issuance/test_causal_test.py
 """
@@ -262,23 +264,49 @@ def declared_trials():
                 yield w, p, h
 
 
+def _non_overlapping(indices, horizon):
+    """Thin a sorted set of day-indices down to ones whose `horizon`-day
+    forward_realized_vol windows do not overlap. Overlapping windows share
+    return observations, which breaks the Welch t-test's independence
+    assumption and inflates |t| under the null -- consecutive near-barrier
+    days right after a filing are exactly where this bites."""
+    out = []
+    last = None
+    for i in sorted(indices):
+        if last is None or i - last >= horizon:
+            out.append(i)
+            last = i
+    return out
+
+
 def run_trial(universe_by_symbol, filings, high_symbols, matches, window, proximity_pct, horizon):
     high_vols, control_vols = [], []
     for h in high_symbols:
         hu = universe_by_symbol[h]
         dates_index = [b.date for b in hu.bars]
         h_barrier_levels = [lvl for f in filings if f.underlying == h for lvl in f.barrier_levels]
-        for i, bar in enumerate(hu.bars):
-            if trailing_issuance(filings, h, dates_index, i, window) <= 0:
-                continue
-            if not near_barrier(bar.close, h_barrier_levels, proximity_pct):
-                continue
+        qualifying = _non_overlapping(
+            (i for i, bar in enumerate(hu.bars)
+             if trailing_issuance(filings, h, dates_index, i, window) > 0
+             and near_barrier(bar.close, h_barrier_levels, proximity_pct)),
+            horizon,
+        )
+        for i in qualifying:
             fv = forward_realized_vol(hu.bars, i, horizon)
             if fv is not None:
                 high_vols.append(fv)
+
+        # Controls are sampled on the SAME calendar day-indices the high
+        # symbol qualified on -- never on the control's own issuance (a
+        # control has none, by construction) and never on its whole
+        # unconditioned history. Matching on time is what makes this a valid
+        # comparison against the conditioned high-group sample instead of
+        # two differently-selected populations.
         for c in matches.get(h, []):
             cu = universe_by_symbol[c]
-            for i in range(len(cu.bars)):
+            for i in qualifying:
+                if i >= len(cu.bars):
+                    continue
                 fv = forward_realized_vol(cu.bars, i, horizon)
                 if fv is not None:
                     control_vols.append(fv)
