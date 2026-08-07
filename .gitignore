@@ -23,3 +23,7 @@ Thumbs.db
 .edgar-cache/
 tools/edgar_scrubber/crawl_state/
 tools/edgar_scrubber/.bench_cache/
+
+# generate_research_maps.py output (issue #130) — regenerable from the store
+# (or from --demo's synthetic data); never commit as if it were measured
+tools/edgar_scrubber/research_output/
