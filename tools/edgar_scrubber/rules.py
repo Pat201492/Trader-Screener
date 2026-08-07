@@ -253,6 +253,24 @@ class RuleManager:
         demoted = tracker.status == "demoted"
         return promoted, reason, demoted
 
+    def record_missing_match(self, issuer, field, *, now_iso=None):
+        """Record that a rule matched before but returns None now (template change signal).
+        Returns (promoted, reason, demoted). Demotes immediately on template change.
+        """
+        key = (issuer, field)
+        if key not in self._trackers:
+            return False, "no tracker", False
+        tracker = self._trackers[key]
+        # Treat missing match as a critical disagreement: demote the rule
+        promoted = False
+        demoted = False
+        reason = "rule returned nothing (template change)"
+        if tracker.status == "promoted":
+            tracker.status = "demoted"
+            tracker.agreements = 0
+            demoted = True
+        return promoted, reason, demoted
+
     def is_shadowing(self, issuer, field, *, now_iso=None):
         """True if this rule is in the shadow window."""
         key = (issuer, field)

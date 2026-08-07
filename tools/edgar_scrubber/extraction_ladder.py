@@ -605,16 +605,18 @@ class ExtractionLadder:
                     # Rule is in shadow window; run model in parallel to compare
                     if self.local_client is not None:
                         exemplars = _lookup_exemplars(self.exemplars, issuer, field_name)
-                        model_value, model_span, model_conf, _samples, _tin, _tout, _retries = _extract_via_model(
-                            self.local_client, self.local_model, f, text, table_context=table_context,
-                            exemplars=exemplars, n_samples=1, max_tokens=self.max_tokens)
-                        agreement = rule_match.value == model_value
-                        shadow_comp = ShadowComparison(
-                            rule_value=rule_match.value, model_value=model_value,
-                            rule_span=rule_match.span, model_span=model_span,
-                            agreement=agreement,
-                            note=None if agreement else f"rule={rule_match.value!r} vs model={model_value!r}"
-                        )
+                        # Shadow mode requires exemplars (#106) to be meaningful; skip if missing
+                        if exemplars:
+                            model_value, model_span, model_conf, _samples, _tin, _tout, _retries = _extract_via_model(
+                                self.local_client, self.local_model, f, text, table_context=table_context,
+                                exemplars=exemplars, n_samples=1, max_tokens=self.max_tokens)
+                            agreement = rule_match.value == model_value
+                            shadow_comp = ShadowComparison(
+                                rule_value=rule_match.value, model_value=model_value,
+                                rule_span=rule_match.span, model_span=model_span,
+                                agreement=agreement,
+                                note=None if agreement else f"rule={rule_match.value!r} vs model={model_value!r}"
+                            )
 
                 prov = Provenance(rung="rule", rule_id=rule_match.rule_id, document=document, span=rule_match.span)
                 result = self._finish(f, rule_match.value, rule_match.span, "rule", prov, rule_match.confidence,
@@ -683,6 +685,10 @@ class ExtractionLadder:
 
     def _finish(self, f, value, span, rung, provenance, confidence, gate, ex107, *,
                 accession, document, escalated=False, gated=False, shadow=None):
+        """Finish extraction: apply field specs, record in log, return result.
+
+        shadow: ShadowComparison when rule in shadow mode (comparing rule vs model).
+        """
         flags = self.spec.check_value(f.name, value, ex107=ex107) if value is not None else []
         if gated:
             flags = list(flags) + [Flag(

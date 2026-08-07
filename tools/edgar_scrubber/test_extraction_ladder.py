@@ -150,6 +150,7 @@ def test_rule_shadow_mode():
     ladder = el.ExtractionLadder(
         NOTE_SPEC,
         rules=mgr,
+        exemplars={("JPM", "estimated_value_per_1000"): ["Example: 972.40", "Estimated value is 972.40"]},
         local_client=local, local_model="qwen2.5:7b",
     )
 

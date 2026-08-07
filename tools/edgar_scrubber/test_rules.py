@@ -218,11 +218,33 @@ def test_validation_store_integration():
         check("tracker status still pending", tracker.status == "pending")
 
 
+# --------------------------------------------------------------------------- #
+def test_shadow_demotion_flow():
+    section("Shadow mode: agreement->disagreement->demotion->no shadow")
+    mgr = r.RuleManager(agreement_threshold=1, shadow_window_days=7)
+
+    rule = mgr.promote_rule_from_seed("JPM", "buffer_pct", "Buffer",
+                                      pattern_str=r"Buffer[:\s]+([0-9.]+)")
+    # First agreement promotes.
+    mgr.record_comparison("JPM", "buffer_pct", 50.0, 50.0)
+    tracker = mgr.get_tracker("JPM", "buffer_pct")
+    check("promoted after 1 agreement", tracker.status == "promoted")
+    check("in shadow immediately post-promotion", mgr.is_shadowing("JPM", "buffer_pct"))
+
+    # Disagreement demotes.
+    promoted, reason, demoted = mgr.record_comparison(
+        "JPM", "buffer_pct", 50.0, 45.0
+    )
+    check("disagreement demotes", demoted and tracker.status == "demoted")
+    check("shadow mode exits after demotion", not mgr.is_shadowing("JPM", "buffer_pct"))
+
+
 if __name__ == "__main__":
     test_hand_seed_and_match()
     test_agreement_tracking_and_promotion()
     test_disagreement_demotes()
     test_shadow_window()
+    test_shadow_demotion_flow()
     test_export_import()
     test_validation_store_integration()
 
