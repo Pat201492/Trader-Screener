@@ -31,6 +31,23 @@ TOTAL:                 ~7.0 GB resident  ✓ Fits with headroom
 
 **Reclaimable memory:** Close VSCode / browser before long passes (batch 4 → 8 difference is ~1.5 GB).
 
+## Step 0: Python Environment & Dependencies
+
+**Convention:** a venv at the repo root, not the system interpreter. This repo has no
+prior venv convention (nothing else here ships a `requirements.txt`), so this is the
+one being established -- later Python tools in this repo should follow the same
+`.venv/` root layout rather than each picking their own.
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r tools/edgar_scrubber/requirements.txt
+```
+
+This installs `requests`, which is all the local Ollama runtime needs. The `anthropic`
+package for Claude escalation (#104) is a separate, optional install -- see
+[Next: Claude Escalation (#104)](#next-claude-escalation-104) below.
+
 ## Step 1: Install Ollama
 
 ### Windows 11
@@ -284,19 +301,25 @@ config = OllamaConfig(
 
 To escalate to Claude when the local model hits a hard case:
 
-1. Swap `base_url` in the config (no code change):
+1. Install the Claude extra (not part of the base install above):
+   ```powershell
+   pip install -r tools/edgar_scrubber/requirements-claude.txt
+   ```
+
+2. Swap `base_url` in the config (no code change):
    ```python
    base_url="https://api.anthropic.com/v1"  # Claude instead of Ollama
    model="claude-opus-4-8"
    ```
 
-2. Set `ANTHROPIC_API_KEY` env var.
+3. Set `ANTHROPIC_API_KEY` env var.
 
-3. **Same `OllamaClient` interface** — extraction code doesn't know or care which backend is answering.
+4. **Same `OllamaClient` interface** — extraction code doesn't know or care which backend is answering.
 
 ## Acceptance Checklist
 
 - [x] Clean machine + this SETUP.md → working extraction, no manual model selection.
+- [x] `pip install -r tools/edgar_scrubber/requirements.txt` documented before any step that imports `requests` (hardware probe, Ollama client).
 - [x] Probe reports profile explicitly; never silent downgrades.
 - [x] Batch 8 at 8k context confirmed resident in VRAM (~7 GB), no CPU offload.
 - [x] Models pinned by version (`qwen2.5:7b-instruct-q4_K_M`, etc.).
