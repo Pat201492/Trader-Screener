@@ -719,7 +719,7 @@ class ValidationSession:
         validated value, tracking agreement for promotion/demotion (#107).
         The `extracted_value` is what the rule extracted (before validation);
         fv.value is the validated/corrected value. Comparison drives promotion:
-            mgr.record_comparison(issuer, fv.field, validated_value=fv.value,
+            mgr.record_comparison(form, issuer, fv.field, validated_value=fv.value,
                                   extracted_value=extracted_value)
         This happens AFTER validation and before the next batch runs, so the rule
         promotion state guides shadow mode decisions on the next document."""
@@ -733,8 +733,10 @@ class ValidationSession:
         self._write_exemplar(issuer, accession, document, fv, render_doc)
 
         if rules is not None and issuer is not None and extracted_value is not None:
-            rules.record_comparison(issuer, fv.field, validated_value=fv.value,
-                                   extracted_value=extracted_value)
+            form = getattr(self.spec, 'spec_id', None)
+            if form:
+                rules.record_comparison(form, issuer, fv.field, validated_value=fv.value,
+                                       extracted_value=extracted_value)
 
         return fv
 

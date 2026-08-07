@@ -80,7 +80,7 @@ def test_rule_rung_short_circuits():
     local = FakeChatClient([])  # scripted empty -- must never be called
     ladder = el.ExtractionLadder(
         NOTE_SPEC,
-        rules={("JPM", "estimated_value_per_1000"): el.RuleMatch(972.4, "anchor-ev1000", span=(10, 20))},
+        rules={(NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000"): el.RuleMatch(972.4, "anchor-ev1000", span=(10, 20))},
         local_client=local, local_model="qwen2.5:7b",
     )
     r = ladder.extract("estimated_value_per_1000", text="...", issuer="JPM",
@@ -103,7 +103,7 @@ def test_rule_rung_with_manager():
     local = FakeChatClient([])  # must never be called
     mgr = r.RuleManager()
     mgr.promote_rule_from_seed(
-        "JPM", "estimated_value_per_1000",
+        NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000",
         anchor="Estimated value",
         pattern_str=r"estimated\s+value.*?(\d+\.?\d*)"
     )
@@ -132,15 +132,15 @@ def test_rule_shadow_mode():
     # Create a RuleManager with a promoted rule already in shadow window.
     mgr = r.RuleManager(agreement_threshold=1, shadow_window_days=7)
     mgr.promote_rule_from_seed(
-        "JPM", "estimated_value_per_1000",
+        NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000",
         anchor="Estimated value",
         pattern_str=r"estimated\s+value.*?(\d+\.?\d*)"
     )
     # Trigger promotion by recording agreement
-    mgr.record_comparison("JPM", "estimated_value_per_1000", 972.4, 972.4)
+    mgr.record_comparison(NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000", 972.4, 972.4)
 
     # Verify it's in shadow window
-    check("rule promoted and in shadow", mgr.is_shadowing("JPM", "estimated_value_per_1000"))
+    check("rule promoted and in shadow", mgr.is_shadowing(NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000"))
 
     # Set up local client to return a DIFFERENT value than the rule (to test disagreement)
     # Rule will extract "972", but model returns "971" (simulating a template change)
@@ -150,7 +150,7 @@ def test_rule_shadow_mode():
     ladder = el.ExtractionLadder(
         NOTE_SPEC,
         rules=mgr,
-        exemplars={("JPM", "estimated_value_per_1000"): ["Example: 972.40", "Estimated value is 972.40"]},
+        exemplars={(NOTE_SPEC.spec_id, "JPM", "estimated_value_per_1000"): ["Example: 972.40", "Estimated value is 972.40"]},
         local_client=local, local_model="qwen2.5:7b",
     )
 

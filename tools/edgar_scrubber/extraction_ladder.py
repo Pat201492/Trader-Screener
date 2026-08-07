@@ -76,20 +76,20 @@ class RuleMatch:
     confidence: float = 1.0
 
 
-def _lookup_rule(rules, issuer, field_name):
+def _lookup_rule(rules, form, issuer, field_name):
     if rules is None:
         return None
     if callable(rules) and not isinstance(rules, dict):
-        return rules(issuer, field_name)
-    return rules.get((issuer, field_name))
+        return rules(form, issuer, field_name)
+    return rules.get((form, issuer, field_name))
 
 
-def _lookup_exemplars(exemplars, issuer, field_name):
+def _lookup_exemplars(exemplars, form, issuer, field_name):
     if not exemplars:
         return None
     if callable(exemplars) and not isinstance(exemplars, dict):
-        return exemplars(issuer, field_name)
-    return exemplars.get((issuer, field_name))
+        return exemplars(form, issuer, field_name)
+    return exemplars.get((form, issuer, field_name))
 
 
 # ── Constrained decode: wire schema + prompt ────────────────────────────────
@@ -576,16 +576,17 @@ class ExtractionLadder:
         f = self.spec.field(field_name)
         if f is None:
             raise KeyError(f"{field_name!r} is not defined in spec {self.spec.spec_id}")
+        form = self.spec.spec_id
 
         # Rung 1: promoted rule (#107).
         if self.rules is not None and issuer is not None:
             rule_result = None
             if hasattr(self.rules, 'apply_rule') and callable(self.rules.apply_rule):
                 # RuleManager instance: call apply_rule() with text
-                rule_result = self.rules.apply_rule(issuer, field_name, text)
+                rule_result = self.rules.apply_rule(form, issuer, field_name, text)
             else:
                 # Dict or callable returning pre-computed RuleMatch
-                rule = _lookup_rule(self.rules, issuer, field_name)
+                rule = _lookup_rule(self.rules, form, issuer, field_name)
                 if rule is not None:
                     rule_result = rule
 
@@ -601,10 +602,10 @@ class ExtractionLadder:
 
                 # Check shadow mode and run model in parallel if needed
                 shadow_comp = None
-                if hasattr(self.rules, 'is_shadowing') and self.rules.is_shadowing(issuer, field_name):
+                if hasattr(self.rules, 'is_shadowing') and self.rules.is_shadowing(form, issuer, field_name):
                     # Rule is in shadow window; run model in parallel to compare
                     if self.local_client is not None:
-                        exemplars = _lookup_exemplars(self.exemplars, issuer, field_name)
+                        exemplars = _lookup_exemplars(self.exemplars, form, issuer, field_name)
                         # Shadow mode requires exemplars (#106) to be meaningful; skip if missing
                         if exemplars:
                             model_value, model_span, model_conf, _samples, _tin, _tout, _retries = _extract_via_model(
@@ -635,8 +636,8 @@ class ExtractionLadder:
                 f"local rung (#103 must be wired up before #104 can escalate)."
             )
 
-        # Rung 3: local 7B, with (issuer, field) exemplars if available (#106).
-        exemplars = _lookup_exemplars(self.exemplars, issuer, field_name)
+        # Rung 3: local 7B, with (form, issuer, field) exemplars if available (#106).
+        exemplars = _lookup_exemplars(self.exemplars, form, issuer, field_name)
         value, span, conf, samples, tin, tout, retries = _extract_via_model(
             self.local_client, self.local_model, f, text, table_context=table_context,
             exemplars=exemplars, n_samples=self.self_consistency_samples,

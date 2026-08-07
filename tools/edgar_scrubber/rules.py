@@ -51,12 +51,13 @@ except ImportError:  # standalone: python tools/edgar_scrubber/rules.py
 
 @dataclass(frozen=True)
 class RuleDefinition:
-    """One promoted regex rule for a (issuer, field). Defines how to match and
+    """One promoted regex rule for a (form, issuer, field). Defines how to match and
     extract the value given a document's text. `pattern` is a compiled regex;
     `capture_group` names which group contains the value (1 for the first unnamed
     or named group, None to use the whole match). `anchor` describes the rule for
     operator visibility and debugging."""
 
+    form: str
     issuer: str
     field: str
     anchor: str                    # e.g. "Estimated value of the notes:"
@@ -101,6 +102,7 @@ class AgreementTracker:
     A rule is promoted when it has N consecutive agreements with validated values
     and zero disagreements. One disagreement resets the counter."""
 
+    form: str
     issuer: str
     field: str
     rule: RuleDefinition
@@ -112,6 +114,7 @@ class AgreementTracker:
     total_comparisons: int = 0
     last_comparison_at: str = None
     status: str = "pending"            # pending | promoted | demoted | dismissed
+    missing_match_count: int = 0       # track template change signal
 
     def record_match(self, validated_value, extracted_value, *, now_iso=None):
         """Record one comparison between rule and validated value. Increments
@@ -148,17 +151,23 @@ class AgreementTracker:
         return (now - first) <= timedelta(days=self.shadow_window_days)
 
     def as_dict(self):
-        """Serialize for JSON storage."""
+        """Serialize for JSON storage including tracker state."""
         return {
+            "form": self.form,
             "issuer": self.issuer,
             "field": self.field,
             "anchor": self.rule.anchor,
+            "pattern": self.rule.pattern.pattern,
+            "capture_group": self.rule.capture_group,
+            "confidence": self.rule.confidence,
+            "created_at": self.rule.created_at,
+            "comment": self.rule.comment,
             "agreements": self.agreements,
             "total_comparisons": self.total_comparisons,
             "first_agreement_at": self.first_agreement_at,
             "last_comparison_at": self.last_comparison_at,
             "status": self.status,
-            "pattern": self.rule.pattern.pattern,  # regex pattern string
+            "missing_match_count": self.missing_match_count,
         }
 
 
@@ -186,31 +195,31 @@ class RuleManager:
         self.store = store
         self.shadow_window_days = shadow_window_days
         self.agreement_threshold = agreement_threshold
-        self._rules = {}         # (issuer, field) -> RuleDefinition
-        self._trackers = {}      # (issuer, field) -> AgreementTracker
+        self._rules = {}         # (form, issuer, field) -> RuleDefinition
+        self._trackers = {}      # (form, issuer, field) -> AgreementTracker
 
     def load_rules(self, rules_dict):
-        """Load hand-seeded rules. `rules_dict` is {(issuer, field): RuleDefinition, ...}"""
+        """Load hand-seeded rules. `rules_dict` is {(form, issuer, field): RuleDefinition, ...}"""
         self._rules = dict(rules_dict) if rules_dict else {}
         return len(self._rules)
 
-    def has_rule(self, issuer, field):
-        """True if a rule exists for this (issuer, field)."""
-        return (issuer, field) in self._rules
+    def has_rule(self, form, issuer, field):
+        """True if a rule exists for this (form, issuer, field)."""
+        return (form, issuer, field) in self._rules
 
-    def get_rule(self, issuer, field):
+    def get_rule(self, form, issuer, field):
         """Return the RuleDefinition or None."""
-        return self._rules.get((issuer, field))
+        return self._rules.get((form, issuer, field))
 
-    def apply_rule(self, issuer, field, text):
+    def apply_rule(self, form, issuer, field, text):
         """Try to extract a value using the rule. Returns (value, start, end) or None
         if the rule does not match."""
-        rule = self.get_rule(issuer, field)
+        rule = self.get_rule(form, issuer, field)
         if rule is None:
             return None
         return rule.match(text)
 
-    def promote_rule_from_seed(self, issuer, field, anchor, *, pattern_str=None,
+    def promote_rule_from_seed(self, form, issuer, field, anchor, *, pattern_str=None,
                                capture_group=None):
         """Create and store a rule from a validated anchor and pattern. If
         `pattern_str` is not given, derives a simple literal-string match from
@@ -225,25 +234,25 @@ class RuleManager:
             raise ValueError(f"invalid regex pattern: {pattern_str!r}: {e}")
 
         rule = RuleDefinition(
-            issuer=issuer, field=field, anchor=anchor, pattern=pattern,
+            form=form, issuer=issuer, field=field, anchor=anchor, pattern=pattern,
             capture_group=capture_group or 1, confidence=1.0,
             created_at=datetime.now(timezone.utc).isoformat()
         )
-        self._rules[(issuer, field)] = rule
-        self._trackers[(issuer, field)] = AgreementTracker(
-            issuer=issuer, field=field, rule=rule,
+        self._rules[(form, issuer, field)] = rule
+        self._trackers[(form, issuer, field)] = AgreementTracker(
+            form=form, issuer=issuer, field=field, rule=rule,
             agreement_threshold=self.agreement_threshold,
             shadow_window_days=self.shadow_window_days,
         )
         return rule
 
-    def record_comparison(self, issuer, field, validated_value, extracted_value, *,
+    def record_comparison(self, form, issuer, field, validated_value, extracted_value, *,
                           now_iso=None):
         """Record a comparison during shadow mode. Returns (promoted, reason, demoted).
         - promoted=True if the rule crossed the agreement threshold.
         - demoted=True if a disagreement was found.
         """
-        key = (issuer, field)
+        key = (form, issuer, field)
         if key not in self._trackers:
             return False, "no tracker", False
 
@@ -253,11 +262,11 @@ class RuleManager:
         demoted = tracker.status == "demoted"
         return promoted, reason, demoted
 
-    def record_missing_match(self, issuer, field, *, now_iso=None):
+    def record_missing_match(self, form, issuer, field, *, now_iso=None):
         """Record that a rule matched before but returns None now (template change signal).
         Returns (promoted, reason, demoted). Demotes immediately on template change.
         """
-        key = (issuer, field)
+        key = (form, issuer, field)
         if key not in self._trackers:
             return False, "no tracker", False
         tracker = self._trackers[key]
@@ -271,48 +280,53 @@ class RuleManager:
             demoted = True
         return promoted, reason, demoted
 
-    def is_shadowing(self, issuer, field, *, now_iso=None):
+    def is_shadowing(self, form, issuer, field, *, now_iso=None):
         """True if this rule is in the shadow window."""
-        key = (issuer, field)
+        key = (form, issuer, field)
         if key not in self._trackers:
             return False
         return self._trackers[key].should_shadow(now_iso=now_iso)
 
-    def get_tracker(self, issuer, field):
+    def get_tracker(self, form, issuer, field):
         """Return the AgreementTracker for debugging/testing."""
-        return self._trackers.get((issuer, field))
+        return self._trackers.get((form, issuer, field))
 
     def export_rules(self):
-        """Export all rules as serializable dicts. Use for persistence."""
+        """Export all rules and tracker state as serializable dicts. Use for persistence."""
         out = {}
-        for (issuer, field), rule in self._rules.items():
-            out[(issuer, field)] = {
-                "anchor": rule.anchor,
-                "pattern": rule.pattern.pattern,
-                "capture_group": rule.capture_group,
-                "confidence": rule.confidence,
-                "created_at": rule.created_at,
-                "comment": rule.comment,
-            }
+        for (form, issuer, field), tracker in self._trackers.items():
+            out[(form, issuer, field)] = tracker.as_dict()
         return out
 
     def import_rules(self, rules_dict):
-        """Load rules from exported dicts (e.g., from JSON)."""
+        """Load rules and tracker state from exported dicts (e.g., from JSON)."""
         loaded = 0
-        for (issuer, field), data in (rules_dict or {}).items():
+        for (form, issuer, field), data in (rules_dict or {}).items():
             try:
                 pattern = re.compile(data["pattern"], re.IGNORECASE)
                 rule = RuleDefinition(
-                    issuer=issuer, field=field, anchor=data.get("anchor"),
+                    form=form, issuer=issuer, field=field, anchor=data.get("anchor"),
                     pattern=pattern, capture_group=data.get("capture_group"),
                     confidence=data.get("confidence", 1.0),
                     created_at=data.get("created_at"),
                     comment=data.get("comment"),
                 )
-                self._rules[(issuer, field)] = rule
+                tracker = AgreementTracker(
+                    form=form, issuer=issuer, field=field, rule=rule,
+                    agreement_threshold=self.agreement_threshold,
+                    shadow_window_days=self.shadow_window_days,
+                    agreements=data.get("agreements", 0),
+                    first_agreement_at=data.get("first_agreement_at"),
+                    total_comparisons=data.get("total_comparisons", 0),
+                    last_comparison_at=data.get("last_comparison_at"),
+                    status=data.get("status", "pending"),
+                    missing_match_count=data.get("missing_match_count", 0),
+                )
+                self._rules[(form, issuer, field)] = rule
+                self._trackers[(form, issuer, field)] = tracker
                 loaded += 1
             except Exception as e:
-                print(f"Warning: failed to load rule {(issuer, field)}: {e}")
+                print(f"Warning: failed to load rule {(form, issuer, field)}: {e}")
         return loaded
 
 
@@ -322,16 +336,16 @@ if __name__ == "__main__":
 
     # Hand-seed a rule.
     rule = mgr.promote_rule_from_seed(
-        "JPM", "barrier_pct",
+        "424b2", "JPM", "barrier_pct",
         anchor="Barrier",
         pattern_str=r"Barrier[:\s]+([0-9.]+)%",
     )
-    assert mgr.has_rule("JPM", "barrier_pct")
+    assert mgr.has_rule("424b2", "JPM", "barrier_pct")
     print(f"[OK] Hand-seeded rule: {rule.rule_id}")
 
     # Test matching.
     text = "The Barrier: 70.00% of Initial Value."
-    match = mgr.apply_rule("JPM", "barrier_pct", text)
+    match = mgr.apply_rule("424b2", "JPM", "barrier_pct", text)
     assert match is not None
     val, start, end = match
     assert val == "70.00" and text[start:end] == "70.00"
@@ -339,36 +353,39 @@ if __name__ == "__main__":
 
     # Test agreement tracking.
     promoted, reason, demoted = mgr.record_comparison(
-        "JPM", "barrier_pct", 70.0, 70.0  # validated vs extracted
+        "424b2", "JPM", "barrier_pct", 70.0, 70.0  # validated vs extracted
     )
     assert promoted is False and not demoted
     print(f"  Agreement 1/2: {reason}")
 
     promoted, reason, demoted = mgr.record_comparison(
-        "JPM", "barrier_pct", 70.0, 70.0
+        "424b2", "JPM", "barrier_pct", 70.0, 70.0
     )
     assert promoted is True and not demoted
     print(f"  Agreement 2/2: {reason} -> PROMOTED")
 
     # Test shadowing.
-    assert mgr.is_shadowing("JPM", "barrier_pct")
+    assert mgr.is_shadowing("424b2", "JPM", "barrier_pct")
     print(f"[OK] Rule is in shadow window")
 
     # Test disagreement -> demotion.
     promoted, reason, demoted = mgr.record_comparison(
-        "JPM", "barrier_pct", 70.0, 65.0  # mismatch!
+        "424b2", "JPM", "barrier_pct", 70.0, 65.0  # mismatch!
     )
     assert not promoted and demoted
     print(f"[OK] Disagreement demotes rule: {reason}")
 
-    # Test export/import.
+    # Test export/import preserves tracker state.
     exported = mgr.export_rules()
-    assert ("JPM", "barrier_pct") in exported
+    assert ("424b2", "JPM", "barrier_pct") in exported
     print(f"[OK] Export rules: {len(exported)} rule(s)")
 
     mgr2 = RuleManager()
     loaded = mgr2.import_rules(exported)
-    assert loaded == 1 and mgr2.has_rule("JPM", "barrier_pct")
-    print(f"[OK] Import rules: {loaded} rule(s) loaded")
+    assert loaded == 1 and mgr2.has_rule("424b2", "JPM", "barrier_pct")
+    # Check that tracker state was restored.
+    tracker = mgr2.get_tracker("424b2", "JPM", "barrier_pct")
+    assert tracker.status == "demoted", f"Expected demoted status, got {tracker.status}"
+    print(f"[OK] Import rules: {loaded} rule(s) loaded with tracker state preserved")
 
     print("\nrules self-check: PASS")
