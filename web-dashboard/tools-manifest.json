@@ -13,24 +13,24 @@
     "doc_link": "../tools/edgar_scrubber/OUTPUT_STORE.md"
   },
   {
-    "id": "data-gathering-example",
-    "kind": "gather",
-    "name": "Example Data Gatherer",
-    "purpose": "Pulls raw data from external source",
+    "id": "magic-formula",
+    "kind": "model",
+    "name": "Magic Formula Rank",
+    "purpose": "Greenblatt composite: rank(ROIC) + rank(EBIT/EV) among screener-eligible names → a single quality-value rank.",
     "status": "working",
-    "source": "demo",
-    "refresh_cadence": "daily",
+    "inputs": ["fundamentals.roic", "fundamentals.ebit_ev_yield"],
+    "output_field": "magic_rank",
     "last_run": "2026-08-04T09:30:00Z",
-    "doc_link": "#"
+    "doc_link": "../Education/summaries/greenblatt-magic-formula.md"
   },
   {
-    "id": "analysis-model-example",
+    "id": "smart-money-score",
     "kind": "model",
-    "name": "Example Analysis Model",
-    "purpose": "Consumes data and produces a classification",
-    "status": "working",
-    "inputs": ["data"],
-    "output_field": "score",
+    "name": "Smart Money Score",
+    "purpose": "Congress + insider + news-sentiment composite → a signed conviction score per ticker. Out-of-sample validation still pending (#47), so it reads as a candidate signal, not a promoted one.",
+    "status": "building",
+    "inputs": ["congress_buys_90d", "insider_buys_90d", "news_sentiment_30d"],
+    "output_field": "smart_money_score",
     "last_run": "2026-08-04T09:30:00Z",
     "doc_link": "#"
   },
