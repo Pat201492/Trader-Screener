@@ -29,3 +29,7 @@ tools/edgar_scrubber/.bench_cache/
 # would otherwise look like a real finding sourced from real filings
 Research/structured_note_issuance/output/*.png
 Research/structured_note_issuance/output/findings.md
+
+# generate_research_maps.py output (issue #130) — regenerable from the store
+# (or from --demo's synthetic data); never commit as if it were measured
+tools/edgar_scrubber/research_output/
