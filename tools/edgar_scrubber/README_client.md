@@ -70,6 +70,20 @@ resumable state to disk.
 
 ## Test
 
+Canonical invocation, from the repo root (issue #138):
+
+```
+python -m pytest tools/edgar_scrubber/
+```
+
+`test_edgar_client.py` and its siblings still import their subjects flat (`import edgar_client as
+ec`), same as `__init__.py`'s **relative** imports (`from .edgar_client import ...`) expect a
+different `sys.path` state. `tools/edgar_scrubber/conftest.py` reconciles the two by putting this
+directory on `sys.path` before collection, so pytest resolves the flat imports regardless of where
+it's invoked from.
+
+Script mode also still works, since Python already puts the script's own directory on `sys.path`:
+
 ```
 python tools/edgar_scrubber/test_edgar_client.py
 ```
