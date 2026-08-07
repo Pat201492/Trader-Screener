@@ -2410,7 +2410,8 @@ async function renderToolsGather(){
     let html='<div class="cards">';
     gather.forEach(t=>{
       const lastRun=t.last_run?new Date(t.last_run).toLocaleDateString():'–';
-      html+=`<div class="card" style="cursor:pointer;transition:border-color .2s" onclick="location.href='${t.doc_link}'">
+      const hasDoc=t.doc_link&&t.doc_link!=='#';
+      html+=`<div class="card" style="${hasDoc?'cursor:pointer;':''}transition:border-color .2s"${hasDoc?` onclick="location.href='${t.doc_link}'"`:''}>
         <div class="name">${t.name}</div>
         <div class="muted" style="font-size:12px;line-height:1.4;margin:6px 0">${t.purpose}</div>
         <div style="margin:8px 0;display:flex;gap:6px;flex-wrap:wrap">
@@ -2443,7 +2444,8 @@ async function renderToolsModels(){
     let html='<div class="cards">';
     models.forEach(t=>{
       const lastRun=t.last_run?new Date(t.last_run).toLocaleDateString():'–';
-      html+=`<div class="card" style="cursor:pointer;transition:border-color .2s" onclick="location.href='${t.doc_link}'">
+      const hasDoc=t.doc_link&&t.doc_link!=='#';
+      html+=`<div class="card" style="${hasDoc?'cursor:pointer;':''}transition:border-color .2s"${hasDoc?` onclick="location.href='${t.doc_link}'"`:''}>
         <div class="name">${t.name}</div>
         <div class="muted" style="font-size:12px;line-height:1.4;margin:6px 0">${t.purpose}</div>
         <div style="margin:8px 0;display:flex;gap:6px;flex-wrap:wrap">

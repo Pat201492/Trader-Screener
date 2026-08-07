@@ -152,7 +152,7 @@
         last_run: '2026-04-20T09:30:00Z',
         output_path: '~/.edgar-scrubber/store/extractions.sqlite (local)',
         graduatedTo: null,
-        doc_link: '#'
+        doc_link: 'https://github.com/Pat201492/Trader-Screener/blob/master/tools/edgar_scrubber/README.md'
       },
       {
         id: 'fred-ingest',
@@ -179,7 +179,7 @@
         inputs: ['fundamentals', 'valuation'],
         output_field: 'magic_rank',
         last_run: '2026-08-04T09:30:00Z',
-        doc_link: '#'
+        doc_link: 'https://github.com/Pat201492/Trader-Screener/blob/master/Education/summaries/greenblatt-magic-formula.md'
       },
       {
         id: 'smart-money-score',
@@ -201,7 +201,7 @@
         inputs: ['edgar_scrubber.filing_date', 'edgar_scrubber.underlyings', 'prices', 'realized_vol', 'options_oi', 'adv'],
         output_field: 'dealer_hedging_verdict',
         last_run: '2026-08-07T00:00:00Z',
-        doc_link: '#'
+        doc_link: 'https://github.com/Pat201492/Trader-Screener/blob/master/Research/dealer_hedging_causal_test.py'
       }
     ];
   }
