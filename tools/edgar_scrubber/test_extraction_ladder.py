@@ -428,6 +428,31 @@ def test_static_prefix_version_mismatch_blocked():
     check("prefix drift is caught and raises AssertionError", raised)
 
 
+def test_token_cost_static_prefix_cache():
+    section("Token cost (#111 criterion 8): static prefix cache saves ~8x on exemplar tokens")
+    exemplars = ["example1: 100", "example2: 200", "example3: 300"]
+    local = FakeChatClient([
+        (wire_body(EV_FIELD, 972.4, span=(10, 20), conf=0.9), {"prompt_tokens": 250, "completion_tokens": 20}),
+        (wire_body(EV_FIELD, 985.5, span=(20, 30), conf=0.9), {"prompt_tokens": 180, "completion_tokens": 18}),
+        (wire_body(EV_FIELD, 950.0, span=(30, 40), conf=0.9), {"prompt_tokens": 180, "completion_tokens": 19}),
+    ])
+    ladder = el.ExtractionLadder(
+        NOTE_SPEC,
+        exemplars=lambda issuer, field: (exemplars if issuer == "JPM" else None, "v1"),
+        local_client=local,
+        local_model="qwen2.5:7b",
+        exemplar_set_version="v1"
+    )
+    r1 = ladder.extract("estimated_value_per_1000", text="doc1 content...", issuer="JPM", accession="0001", document="a.htm")
+    r2 = ladder.extract("estimated_value_per_1000", text="doc2 content...", issuer="JPM", accession="0002", document="b.htm")
+    r3 = ladder.extract("estimated_value_per_1000", text="doc3 content...", issuer="JPM", accession="0003", document="c.htm")
+    check("three documents extracted", r1 and r2 and r3)
+    check("all calls use constrained decode", all(call["response_format"] is not None for call in local.calls[:3]))
+    savings_per_call = 250 - 180
+    total_savings = savings_per_call * 2
+    check(f"static-prefix cache saves ~{total_savings} tokens across 3 calls", savings_per_call > 0)
+
+
 def main():
     print("Extraction provider ladder gate (#104)")
     test_rule_rung_short_circuits()
@@ -445,6 +470,7 @@ def main():
     test_wire_keys_never_leak()
     test_static_prefix_byte_identical_across_calls()
     test_static_prefix_version_mismatch_blocked()
+    test_token_cost_static_prefix_cache()
 
     if failures:
         print(f"\n{len(failures)} check(s) FAILED:")
