@@ -111,6 +111,7 @@ See **SETUP.md** for full troubleshooting + remote Ollama setup.
 - **[VALIDATION_UI.md](VALIDATION_UI.md)** — *teach it first*: the human-in-loop side-by-side validation loop that seeds exemplars/rules/eval (issue #105)
 - **[EVAL_HARNESS.md](EVAL_HARNESS.md)** — *is it still right*: held-out set + per-field precision/recall/span-accuracy regression gate (issue #108)
 - **[THROUGHPUT_BENCHMARK.md](THROUGHPUT_BENCHMARK.md)** — *is it actually fast*: measured prefill/decode tok/s + peak VRAM, replacing every estimate (issue #108)
+- **[RESEARCH_MAPS.md](RESEARCH_MAPS.md)** — *what does the output say*: issuance-by-underlying, barrier clustering vs spot, issuer markup league table — chart + written finding each, no modeling/controls/p-values (issue #130, Part A of #110)
 
 ## References
 
@@ -118,5 +119,6 @@ See **SETUP.md** for full troubleshooting + remote Ollama setup.
 - Issue #104 (Claude escalation)
 - Issue #101 (document expansion + span-preserving reduction to the #103 token budget)
 - Issue #108 (eval harness: held-out regression gate + measured throughput benchmark, including the 3B model comparison)
+- Issue #130 (structured-note issuance maps, Part A of #110 — descriptive only)
 - Ollama: https://ollama.ai
 - Qwen2.5: https://huggingface.co/Qwen/Qwen2.5-7B-Instruct
