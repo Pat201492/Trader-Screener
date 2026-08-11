@@ -310,11 +310,50 @@
       "unit": "usd_per_1000",
       "extraction_path": "fixed-anchor",
       "required": true,
+      "required_unless": {
+        "field": "filing_stage",
+        "equals": "preliminary",
+        "flag_code": "unavailable_on_preliminary",
+        "severity": "info",
+        "message": "estimated_value_per_1000 is not yet determined on a preliminary pricing supplement -- the filing states a range (see estimated_value_low/estimated_value_high) and the point value is deferred to the final pricing supplement."
+      },
       "sections": ["cover", "estimated_value"],
       "wire_key": "ev1000",
       "anchors": ["our estimated value", "estimated value of the notes", "Estimated Value:"],
       "bounds": { "min": 900, "max": 1000 },
-      "description": "SEC-mandated 'our estimated value of the notes'. Against the $1,000 issue price this is the issuer markup. Outside 900-1000 the model almost certainly grabbed the wrong number."
+      "description": "SEC-mandated 'our estimated value of the notes'. Against the $1,000 issue price this is the issuer markup. Outside 900-1000 the model almost certainly grabbed the wrong number. Null and unflagged-as-error on a preliminary filing (#144) -- see required_unless and estimated_value_low/estimated_value_high."
+    },
+    {
+      "name": "estimated_value_low",
+      "type": "number",
+      "unit": "usd_per_1000",
+      "extraction_path": "fixed-anchor",
+      "sections": ["cover", "estimated_value"],
+      "wire_key": "ev1000lo",
+      "anchors": ["expected to be between", "estimated initial value"],
+      "bounds": { "min": 900, "max": 1000 },
+      "description": "Low end of the preliminary estimated-value RANGE ('expected to be between $X and $Y'). A preliminary 424B2 discloses this instead of a point value (#144); populated alongside estimated_value_high, not instead of trying estimated_value_per_1000 first."
+    },
+    {
+      "name": "estimated_value_high",
+      "type": "number",
+      "unit": "usd_per_1000",
+      "extraction_path": "fixed-anchor",
+      "sections": ["cover", "estimated_value"],
+      "wire_key": "ev1000hi",
+      "anchors": ["expected to be between", "estimated initial value"],
+      "bounds": { "min": 900, "max": 1000 },
+      "description": "High end of the preliminary estimated-value RANGE. See estimated_value_low."
+    },
+    {
+      "name": "filing_stage",
+      "type": "enum",
+      "enum": ["preliminary", "final"],
+      "extraction_path": "fixed-anchor",
+      "sections": ["cover"],
+      "wire_key": "stage",
+      "anchors": ["Subject to Completion", "Preliminary Pricing Supplement", "Final Pricing Supplement"],
+      "description": "Preliminary vs final 424B2 (#144), from the SEC-mandated cover-page legend. Deterministic from field_spec.detect_filing_stage() -- not something that needs a model guess -- but carried as a spec field too so a stored record is self-describing about which required fields it may legitimately be missing."
     },
     {
       "name": "agent_commission_pct",

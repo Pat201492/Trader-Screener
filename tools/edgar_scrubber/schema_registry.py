@@ -143,6 +143,30 @@ def _validate_bounds(val):
     return (len(errs) == 0, errs)
 
 
+def _validate_required_unless(val):
+    """#144: a required field can be conditionally waived (e.g.
+    `estimated_value_per_1000` is legitimately null on a preliminary 424B2,
+    which states a range instead of a determined value). `field`/`equals`
+    name the OTHER record value the waiver is keyed on; `flag_code` lets the
+    waived-but-still-null case surface as something more specific than a
+    plain error, e.g. `unavailable_on_preliminary`, so it is flagged rather
+    than passing silently AND is not confused with a genuine data defect."""
+    if not isinstance(val, dict):
+        return (False, ["required_unless must be an object"])
+    errs = []
+    if not isinstance(val.get("field"), str) or not val.get("field"):
+        errs.append("required_unless.field is required and must be a non-empty string")
+    if "equals" not in val:
+        errs.append("required_unless.equals is required")
+    if "flag_code" in val and not isinstance(val["flag_code"], str):
+        errs.append("required_unless.flag_code must be a string")
+    if "severity" in val and val["severity"] not in FLAG_SEVERITIES:
+        errs.append(f"required_unless.severity must be one of {FLAG_SEVERITIES}")
+    if "message" in val and not isinstance(val["message"], str):
+        errs.append("required_unless.message must be a string")
+    return (len(errs) == 0, errs)
+
+
 FIELD_DEFINITION_FIELDS = {
     # canonical name — the ONLY name that may reach a stored record (#104).
     "name": {"type": "string", "required": True},
@@ -153,6 +177,9 @@ FIELD_DEFINITION_FIELDS = {
 
     "unit": {"type": "string", "required": False},
     "required": {"type": "boolean", "required": False},
+    # #144: waives `required` when another record value matches -- e.g. the
+    # estimated value is legitimately absent on a preliminary filing.
+    "required_unless": {"type": "object", "required": False, "validator": _validate_required_unless},
     # short transport key for #104 to cut decode tokens. TRANSPORT ONLY — mapped
     # back to `name` in code; must never reach a stored record.
     "wire_key": {"type": "string", "required": False},

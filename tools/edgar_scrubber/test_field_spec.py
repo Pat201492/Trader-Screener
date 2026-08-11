@@ -223,6 +223,75 @@ def run_checks():
     check("canonical name inventory excludes wire keys",
           "ev1000" not in fs.canonical_field_names(specs)["structured_note"])
 
+    # ── #144: fabricated point value on a range-stating preliminary filing ──
+    section("AC (#144): a preliminary range no longer yields an unflagged point value")
+
+    # detect_filing_stage: deterministic, zero-token, from the cover-page legend.
+    prelim_doc = ("PRELIMINARY PRICING SUPPLEMENT Subject to Completion, dated "
+                  "June 6, 2024. The estimated initial value of the notes as of "
+                  "the trade date is expected to be between $962.60 and $992.60 "
+                  "per note. It will be set forth in the final pricing supplement.")
+    final_doc = ("PRICING SUPPLEMENT. The estimated value of the notes as of "
+                 "the pricing date was $972.30 per $1,000 note.")
+    check("detect_filing_stage flags the preliminary legend",
+          fs.detect_filing_stage(prelim_doc) == "preliminary")
+    check("detect_filing_stage flags the final/determined-value legend",
+          fs.detect_filing_stage(final_doc) == "final")
+    check("detect_filing_stage returns None absent either legend",
+          fs.detect_filing_stage("Nothing about pricing stage here.") is None)
+
+    # A record that (correctly) has no point value, on a preliminary filing:
+    # must be flagged as unavailable-on-preliminary, NOT missing_required, and
+    # NOT silently clean.
+    prelim_record = {k: v for k, v in GOOD_NOTE.items() if k != "estimated_value_per_1000"}
+    prelim_record["estimated_value_low"] = 962.60
+    prelim_record["estimated_value_high"] = 992.60
+    prelim_flags = note.validate_record(prelim_record, filing_stage="preliminary")
+    ev_flags = [f for f in prelim_flags if f.field == "estimated_value_per_1000"]
+    check("null estimated_value_per_1000 on a preliminary filing is still flagged (not silent)",
+          len(ev_flags) == 1)
+    check("...specifically as unavailable_on_preliminary, not missing_required",
+          ev_flags[0].code == "unavailable_on_preliminary" and ev_flags[0].severity == "info")
+    check("the range is represented on the record instead (#144 direction 1)",
+          prelim_record["estimated_value_low"] == 962.60
+          and prelim_record["estimated_value_high"] == 992.60)
+
+    # The SAME null value on a filing that is NOT known to be preliminary is
+    # still a hard error -- the waiver is conditional, not a blanket exemption.
+    unknown_stage_flags = note.validate_record(prelim_record)  # no filing_stage
+    check("null estimated_value_per_1000 with no filing_stage is still missing_required",
+          any(f.field == "estimated_value_per_1000" and f.code == "missing_required"
+              for f in unknown_stage_flags))
+
+    # A fabricated IN-BOUNDS point value on a preliminary filing is exactly
+    # #144's original bug (989.5 inside 900-1000, non-null, no bounds/enum
+    # violation) -- validate_record alone cannot catch that it was invented
+    # (that is span_supports_value's job in extraction_ladder, run before a
+    # value ever reaches a record); confirm this module's job is unchanged:
+    # a non-null value is still bounds/type-checked either way.
+    fabricated = note.validate_record({**GOOD_NOTE, "estimated_value_per_1000": 989.5},
+                                      filing_stage="preliminary")
+    check("a present (even if wrong) point value is not touched by the waiver",
+          not any(f.field == "estimated_value_per_1000" for f in fabricated))
+
+    # required_unless is registered, not inline (#86 pattern) -- a bad shape
+    # fails loudly at load, same as every other field-definition attribute.
+    bad_waiver = {"spec_id": "x", "form_type": "424B2", "population": "x",
+                 "version": "1", "detection": {"signals": [{"pattern": "z"}]},
+                 "fields": [{"name": "bad", "type": "number",
+                             "extraction_path": "table-resident", "sections": [],
+                             "required": True, "required_unless": {"equals": "x"}}]}
+    raised_ru = False
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "bad_ru.json"
+        p.write_text(json.dumps(bad_waiver), encoding="utf-8")
+        try:
+            fs.load_spec(p)
+        except fs.SpecError:
+            raised_ru = True
+    check("required_unless missing its 'field' key fails loudly at load",
+          raised_ru)
+
 
 def main():
     print("424B2 field spec gate (#102)")
