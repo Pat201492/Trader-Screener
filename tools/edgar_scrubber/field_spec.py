@@ -55,6 +55,10 @@ class FieldDefinition:
     item_enum: tuple = None
     bounds: dict = None
     description: str = ""
+    # #144: {field, equals, flag_code?, severity?, message?} -- waives
+    # `required` when another record value (usually filing_stage) equals
+    # `equals`. See FieldSpec._required_waived / validate_record.
+    required_unless: dict = None
     raw: dict = _dc_field(default_factory=dict, repr=False)
 
     @classmethod
@@ -73,6 +77,7 @@ class FieldDefinition:
             item_enum=tuple(d["item_enum"]) if d.get("item_enum") is not None else None,
             bounds=d.get("bounds"),
             description=d.get("description", ""),
+            required_unless=d.get("required_unless"),
             raw=d,
         )
 
@@ -210,16 +215,23 @@ class FieldSpec:
 
     # -- record validation -------------------------------------------------
 
-    def validate_record(self, record, ex107=None):
+    def validate_record(self, record, ex107=None, filing_stage=None):
         """Check a canonical-keyed extraction record against the spec.
 
         Returns a list of Flag. The record is NEVER modified or dropped — a bad
         extraction is caught here and travels flagged, so it can be held back
         from a chart (#110) rather than corrupting it. `ex107` is the optional
-        EX-107 fee-exhibit dict for external cross-checks (#101).
+        EX-107 fee-exhibit dict for external cross-checks (#101). `filing_stage`
+        is the optional `detect_filing_stage()` result ("preliminary" | "final");
+        it waives a field's `required_unless` the same way an explicit
+        `record["filing_stage"]` would (#144) -- pass it, or set the record key,
+        whichever the caller already has on hand.
         """
         flags = []
         known = set(self.field_names())
+        waiver_context = dict(record)
+        if filing_stage is not None:
+            waiver_context["filing_stage"] = filing_stage
 
         for f in self.fields:
             present = f.name in record
@@ -227,8 +239,12 @@ class FieldSpec:
 
             if not present or val is None:
                 if f.required:
-                    flags.append(Flag(f.name, "missing_required", "error",
-                                      f"required field {f.name} is missing"))
+                    waiver = self._required_waiver(f, waiver_context)
+                    if waiver is None:
+                        flags.append(Flag(f.name, "missing_required", "error",
+                                          f"required field {f.name} is missing"))
+                    else:
+                        flags.append(waiver)
                 continue
 
             flags.extend(self._check_value(f, val))
@@ -248,6 +264,23 @@ class FieldSpec:
 
         flags.extend(self._check_cross(record, ex107))
         return flags
+
+    def _required_waiver(self, f, waiver_context):
+        """None if `f.required_unless` doesn't apply or isn't declared; else
+        the Flag a waived-but-still-null required field gets instead of
+        `missing_required` (#144) -- still surfaced, just as the specific,
+        non-error thing it is: e.g. `estimated_value_per_1000` genuinely has
+        no point value yet on a preliminary filing, so this is not a defect."""
+        ru = f.required_unless
+        if not ru or waiver_context.get(ru["field"]) != ru.get("equals"):
+            return None
+        return Flag(
+            f.name,
+            ru.get("flag_code", "conditionally_unavailable"),
+            ru.get("severity", "info"),
+            ru.get("message", f"{f.name} is not required while "
+                              f"{ru['field']}={ru.get('equals')!r}"),
+        )
 
     def check_value(self, name, value, ex107=None):
         """Bounds/type/enum flags for ONE extracted value in isolation --
@@ -433,6 +466,52 @@ def detect_population(text, specs=None):
     return Detection(best_spec, best_pop, best_score, scores, confident)
 
 
+# ── Preliminary vs final detection (#144) ────────────────────────────────────
+#
+# The other half of #144: a preliminary 424B2 discloses `estimated_value_per_1000`
+# as a range ("expected to be between $962.60 and $992.60") with the point value
+# "set forth in the final pricing supplement" -- it does not exist in the document
+# yet, so a null there is CORRECT, not a missing extraction. A final pricing
+# supplement states the determined value outright. SEC form convention marks the
+# distinction on the cover page in fixed legend text, so -- like detect_population
+# -- this is zero-token and deterministic, never a model guess about its own
+# document.
+
+_PRELIMINARY_SIGNALS = (
+    "subject to completion",
+    "preliminary pricing supplement",
+    "preliminary terms",
+    "information in this preliminary pricing supplement is not complete",
+    "may be changed",
+    "expected to be between",   # the range phrasing itself -- see module docstring
+)
+
+_FINAL_SIGNALS = (
+    "final pricing supplement",
+    "final terms",
+    "as of the pricing date was",   # determined-value phrasing, past tense
+    "as of the trade date was",
+)
+
+
+def detect_filing_stage(text):
+    """Returns "preliminary" or "final" from the SEC-mandated cover-page
+    legend, or None when neither is found (caller should not assume either --
+    an absent signal is not evidence of "final").
+
+    Preliminary signals are checked first: a document can carry both a
+    boilerplate reference to "the final pricing supplement" (describing what
+    is still to come) AND its own "Subject to Completion" legend, and the
+    legend is the authoritative one.
+    """
+    low = text.lower()
+    if any(s in low for s in _PRELIMINARY_SIGNALS):
+        return "preliminary"
+    if any(s in low for s in _FINAL_SIGNALS):
+        return "final"
+    return None
+
+
 # ── Convenience: canonical field-name inventory (#86) ────────────────────────
 
 def canonical_field_names(specs=None):
@@ -467,4 +546,26 @@ if __name__ == "__main__":
     d2 = detect_population(shelf_text, specs)
     print(f"detect(shelf text)            -> {d2.population} "
           f"score={d2.score} confident={d2.confident}")
+
+    prelim_text = ("PRELIMINARY PRICING SUPPLEMENT Subject to Completion. The "
+                   "estimated initial value of the notes as of the trade date is "
+                   "expected to be between $962.60 and $992.60. It will be set "
+                   "forth in the final pricing supplement.")
+    final_text = ("PRICING SUPPLEMENT. The estimated value of the notes as of "
+                  "the pricing date was $972.30 per $1,000 note.")
+    print(f"\ndetect_filing_stage(preliminary text) -> {detect_filing_stage(prelim_text)!r}")
+    print(f"detect_filing_stage(final text)       -> {detect_filing_stage(final_text)!r}")
+    assert detect_filing_stage(prelim_text) == "preliminary"
+    assert detect_filing_stage(final_text) == "final"
+
+    note = specs["structured_note"]
+    waived = note.validate_record(
+        {"estimated_value_low": 962.60, "estimated_value_high": 992.60},
+        filing_stage="preliminary",
+    )
+    waiver_flag = next(f for f in waived if f.field == "estimated_value_per_1000")
+    print(f"\npreliminary record, no point value -> "
+          f"{waiver_flag.code!r} ({waiver_flag.severity})")
+    assert waiver_flag.code == "unavailable_on_preliminary" and waiver_flag.severity == "info"
+
     print("\nfield_spec self-check: PASS")

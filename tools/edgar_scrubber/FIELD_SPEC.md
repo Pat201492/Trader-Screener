@@ -75,6 +75,39 @@ Cross-field / cross-exhibit checks live in `cross_checks[]`:
 - `aggregate_principal` vs the EX-107 fee exhibit (#101) — an exact value to check
   the prose read against (`external_equals`, pass `ex107=` to `validate_record`).
 
+### `required_unless` — a required field that can be legitimately absent (#144)
+
+A required field is not *always* required: a preliminary 424B2 discloses
+`estimated_value_per_1000` as a range ("expected to be between $962.60 and
+$992.60") with the point value deferred to the final pricing supplement — a
+null there is correct, not a missing extraction. `required_unless` waives the
+plain `missing_required` error and replaces it with a more specific flag when
+another record value matches:
+
+```json
+{
+  "name": "estimated_value_per_1000",
+  "required": true,
+  "required_unless": {
+    "field": "filing_stage",
+    "equals": "preliminary",
+    "flag_code": "unavailable_on_preliminary",
+    "severity": "info",
+    "message": "..."
+  }
+}
+```
+
+`filing_stage` itself is deterministic, not a model guess: `field_spec.detect_filing_stage(text)`
+reads the SEC-mandated cover-page legend ("Subject to Completion" /
+"Preliminary Pricing Supplement" vs a determined-value statement) the same
+way `detect_population` reads the note-vs-shelf markers. Pass its result as
+`validate_record(record, filing_stage=...)`, or store it on the record under
+`filing_stage` directly — either satisfies the waiver. The waived-but-null
+case is still a `Flag` (never silent) — just an `info`, not an `error`.
+`estimated_value_low` / `estimated_value_high` are the companion fields that
+represent the range itself when a preliminary filing has one.
+
 ## Wire format vs stored format
 
 #104 uses short output keys (`ev1000`) on the model boundary to cut decode
