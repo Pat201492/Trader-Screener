@@ -93,6 +93,56 @@ Expected output:
 qwen2.5:7b-instruct-q4_K_M    4.7 GB    ...
 ```
 
+### Step 2b: BUILD the 8k-context model (not optional)
+
+Pulling the base tag is not enough. `Modelfile.qwen2.5-7b` carries
+`PARAMETER num_ctx 8192`, and a Modelfile only takes effect through
+`ollama create` -- nothing applies it at request time:
+
+```bash
+ollama create edgar-qwen7b -f tools/edgar_scrubber/Modelfile.qwen2.5-7b
+```
+
+Then point the runtime at it (the client reads `OLLAMA_MODEL`):
+
+```powershell
+setx OLLAMA_MODEL edgar-qwen7b:latest
+```
+
+**Why this is load-bearing.** Run against the *base* tag, ollama sizes the
+context itself -- Qwen2.5's trained 32768 -- and at `OLLAMA_NUM_PARALLEL=8`
+that KV cache does not fit in 12GB. Ollama does not fail: it silently runs part
+of the model on the CPU. Measured on this machine:
+
+| | context | resident | CPU offload | one 9-field document |
+|---|---|---|---|---|
+| base tag `qwen2.5:7b-instruct-q4_K_M` | 32768 | 13.74GB (10.40 in VRAM) | **3.35GB / 24%** | **13 min** |
+| `edgar-qwen7b` (this Modelfile) | 8192 | 6.66GB | 0% | **37 s** |
+
+Same hardware, same prompts: **21x**. The CPU-offload path also extracted less
+(an empty `cusip` where the 8k model read `48136CYQ6`), so a spilled model
+reads as a *quality* problem and gets misattributed to the prompt.
+
+`OllamaConfig.context_length` is computed by the probe but never sent on the
+`/v1/chat/completions` path, and `OLLAMA_NUM_CTX` is not read by the server, so
+the Modelfile is the only place this can be set.
+
+### Check what is actually resident
+
+`verify_server_runtime()` measures KV bytes per context token -- it confirms the
+cache type and slot count, but it does **not** catch a context the server sized
+itself or layers spilled to the CPU. `/api/ps` does:
+
+```bash
+curl -s http://localhost:11434/api/ps
+# size == size_vram  -> fully on GPU
+# size  > size_vram  -> the difference is running on the CPU
+```
+
+The Tools tab of the dashboard shows this in its banner when the tool runner is
+up (`ctx 8192 · fully on GPU`), so a spilled model is visible before you blame a
+slow extraction on the model.
+
 ### No embeddings model needed
 
 Section routing (issue #101) turned out to be deterministic keyword/heading
