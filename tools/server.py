@@ -422,6 +422,7 @@ def scrubber_run(run_id, targets, fields, home):
                 continue
 
             nd = primary.normalized
+            low_text = nd.text.lower()
             sections = split_sections(nd)
             ex107 = bundle.ex107.as_dict() if bundle.ex107 else None
             RUNS.log(run_id, f"{accession}: {primary.name} "
@@ -452,9 +453,27 @@ def scrubber_run(run_id, targets, fields, home):
                 # value's evidence has to be text that actually states it,
                 # otherwise the store fills up with spans that point nowhere and
                 # the #105 review loop has nothing to review.
-                span, span_method = locate_value(nd.text, p.value, p.source_span)
+                fdef = spec.field(name)
+                vocab = field_vocabulary_present(low_text, fdef)
+                if vocab is False:
+                    span, span_method = None, None
+                else:
+                    span, span_method = locate_value(
+                        nd.text, p.value, p.source_span,
+                        near=anchor_positions(low_text, fdef))
                 p_flags = list(p.flags or [])
-                if span is None and p.value not in (None, "", []):
+                if vocab is False and p.value not in (None, "", []):
+                    # The filing never uses this field's vocabulary. A value
+                    # here is almost certainly invented to fill the slot, and
+                    # it must not enter the store looking like a reading.
+                    p_flags.append({
+                        "field": p.field, "code": "field_absent_from_document",
+                        "severity": "warn",
+                        "message": "none of this field's anchors appear in the filing; "
+                                   "this note type likely does not carry it, so the "
+                                   "value is unsupported",
+                    })
+                elif span is None and p.value not in (None, "", []):
                     p_flags.append({
                         "field": p.field, "code": "span_unlocatable", "severity": "warn",
                         "message": "the value is not stated verbatim anywhere in the "
@@ -481,7 +500,8 @@ def scrubber_run(run_id, targets, fields, home):
                 out.append({
                     "field": name, "value": p.value, "unit": p.unit,
                     "rung": p.rung, "confidence": p.confidence, "gated": gated,
-                    "anchor": label_before(nd.text, span, spec.field(name)),
+                    "anchor": label_before(nd.text, span, fdef),
+                    "likely_absent": vocab is False,
                     "span": list(span) if span else None,
                     "span_source": span_method,
                     "span_text": nd.text[span[0]:span[1]] if span else None,
@@ -765,7 +785,42 @@ def document_cues(text, spec, fields=None, max_per_cue=40):
     return hits
 
 
-def locate_value(text, value, hint_span=None):
+def field_vocabulary_present(low_text, field):
+    """Does this field's own wording appear in the filing at all?
+
+    Structured notes are not one product. An autocallable has no buffer, a
+    growth note has no coupon barrier, and a filing that never says "buffer"
+    cannot state one. Asked for a number anyway, a model produces one -- so
+    this is checked BEFORE any value is believed.
+
+    Returns None for a field the spec gives no anchors for (nothing to test),
+    which is different from False (tested, and the vocabulary is absent).
+    """
+    anchors = getattr(field, "anchors", None) or []
+    if not anchors:
+        return None
+    return any(a.lower().rstrip(": ").strip() in low_text for a in anchors)
+
+
+def anchor_positions(low_text, field):
+    """Every offset where one of this field's anchors occurs -- the places a
+    value for it could legitimately be stated."""
+    out = []
+    for a in (getattr(field, "anchors", None) or []):
+        key = a.lower().rstrip(": ").strip()
+        if not key:
+            continue
+        start = 0
+        while True:
+            at = low_text.find(key, start)
+            if at < 0:
+                break
+            out.append(at + len(key))
+            start = at + len(key)
+    return sorted(out)
+
+
+def locate_value(text, value, hint_span=None, near=None):
     """Find where `value` is actually stated in `text`.
 
     The model's own span is not trustworthy -- measured against real filings it
@@ -816,7 +871,15 @@ def locate_value(text, value, hint_span=None):
             if at < 0:
                 break
             span = (at, at + len(cand))
-            distance = abs(at - hint_span[0]) if hint_span else at
+            # A match near one of the field's own labels is evidence; the same
+            # digits elsewhere in a 60k-character filing are a coincidence. When
+            # anchor positions are known they outrank the model's guess.
+            if near:
+                distance = min(abs(at - n) for n in near)
+            elif hint_span:
+                distance = abs(at - hint_span[0])
+            else:
+                distance = at
             # Nearest wins; on a tie the LONGER match wins, so a highlight lands
             # on the whole printed number ("70.00", "$979.00") rather than the
             # bare digits inside it.
@@ -874,6 +937,7 @@ def preview_document(params, run_id=None):
     ex107 = bundle.ex107.as_dict() if bundle.ex107 else None
 
     text = nd.text
+    low_text = text.lower()
     out = []
     t0 = time.time()
     # One field at a time even though propose() takes a list: a 9-field check is
@@ -886,17 +950,33 @@ def preview_document(params, run_id=None):
         p = extractor.propose(render_doc, issuer=params.get("issuer"), ex107=ex107,
                               accession=params.get("accession"),
                               document=doc["document"], fields=[name])[0]
-        span, method = locate_value(text, p.value, p.source_span)
+        # Does this field's own vocabulary appear in the filing AT ALL? Plenty
+        # of structured notes carry no coupon barrier, no autocall, no buffer --
+        # the honest answer there is "not in this note", and a model asked for
+        # a number produces one anyway.
+        fdef = spec.field(p.field)
+        anchor_present = field_vocabulary_present(low_text, fdef)
+        if anchor_present is False:
+            # Nothing in this filing can be evidence for a field it never
+            # mentions. Matching the digits elsewhere manufactures exactly the
+            # false confidence this is meant to prevent -- the first cut
+            # "located" buffer_pct 0.7 in a filing that never says "buffer".
+            span, method = None, None
+        else:
+            span, method = locate_value(text, p.value, p.source_span,
+                                        near=anchor_positions(low_text, fdef))
         # The label the value sits under ("Interest Barrier", "Coupon Rate") --
         # the same anchor #107 induces rules from. Shown next to the value
         # because a number with its label is checkable at a glance and a bare
         # number is not.
-        anchor = label_before(text, span, spec.field(p.field))
+        anchor = label_before(text, span, fdef)
         out.append({
             "field": p.field, "value": p.value, "unit": p.unit,
             "rung": p.rung, "confidence": p.confidence,
             "provenance": p.provenance,
             "anchor": anchor,
+            "anchor_present": anchor_present,
+            "likely_absent": anchor_present is False,
             "span": list(span) if span else None,
             "span_source": method,
             "model_span": list(p.source_span) if p.source_span else None,
@@ -968,6 +1048,36 @@ def save_annotation(params):
     than accumulating contradictory ground truth.
     """
     from validation import FieldVerdict, render_exemplar
+
+    # "This filing has no coupon barrier" is an answer, not a missing answer.
+    # It rules the field absent for this document and writes a NEGATIVE
+    # exemplar, which teaches the ladder that null is valid here and suppresses
+    # the number a model would otherwise invent to fill the slot.
+    if params.get("absent"):
+        for required in ("accession", "document", "field"):
+            if not params.get(required):
+                raise ValueError(f"'{required}' is required")
+        session = params.get("session") or "dashboard"
+        field = params["field"]
+        rendered = render_exemplar("negative", field=field)
+        store = validation_store()
+        try:
+            store.ensure_session(session, spec_id="424b2.structured_note", now=utcnow())
+            store.write_verdict(session, params["accession"], params["document"],
+                                FieldVerdict.reject(field, note=params.get("note")),
+                                now=utcnow())
+            held_out = store.is_held_out(session, params["accession"], params["document"])
+            taught = bool(params.get("issuer")) and not held_out
+            if taught:
+                store.write_exemplar(params.get("issuer"), field, "negative", rendered,
+                                     accession=params["accession"],
+                                     document=params["document"],
+                                     form="424b2.structured_note", now=utcnow())
+        finally:
+            store.close()
+        return {"saved": True, "field": field, "value": None, "span": None,
+                "session": session, "verdict": "reject", "exemplar": taught,
+                "held_out": held_out, "rendered": rendered, "absent": True}
 
     for required in ("accession", "document", "field", "span"):
         if not params.get(required):
@@ -1178,7 +1288,7 @@ def store_coverage(min_documents=1):
     # store; it is the difference between "the model is consistent" and "we
     # know it is right", so the matrix carries both rather than implying one
     # from the other.
-    taught = {}
+    taught, absent = {}, {}
     vpath = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser() \
         / "store" / "validation.sqlite"
     if vpath.exists():
@@ -1188,6 +1298,14 @@ def store_coverage(min_documents=1):
                     "SELECT issuer, field, COUNT(*) FROM exemplars "
                     "WHERE kind IN ('positive','corrected') GROUP BY issuer, field"):
                 taught[(issuer, field)] = n
+            # Fields a human ruled ABSENT for this issuer. Not every note has a
+            # coupon barrier or an autocall; scoring "this note does not have
+            # one" as "we cannot extract it" would push the tool to invent
+            # values to make its own numbers look better.
+            for issuer, field, n in vconn.execute(
+                    "SELECT issuer, field, COUNT(*) FROM exemplars "
+                    "WHERE kind = 'negative' GROUP BY issuer, field"):
+                absent[(issuer, field)] = n
         except sqlite3.Error:
             pass
         finally:
@@ -1199,10 +1317,17 @@ def store_coverage(min_documents=1):
             continue
         attempts = r["attempts"] or 0
         r["taught"] = taught.get((r["issuer"], r["field"]), 0)
-        r["value_rate"] = round((r["values_got"] or 0) / attempts, 3) if attempts else 0
-        r["located_rate"] = round((r["located"] or 0) / attempts, 3) if attempts else 0
+        r["absent_marked"] = absent.get((r["issuer"], r["field"]), 0)
+        # Rate over filings the field could apply to. A field ruled absent is
+        # removed from the denominator rather than counted as a miss -- "this
+        # note has no coupon barrier" is an answer, and the alternative is a
+        # score that rewards inventing one.
+        applicable = max(0, attempts - r["absent_marked"])
+        r["applicable"] = applicable
+        r["value_rate"] = round((r["values_got"] or 0) / applicable, 3) if applicable else None
+        r["located_rate"] = round((r["located"] or 0) / applicable, 3) if applicable else None
         out.append(r)
-    out.sort(key=lambda r: (r["issuer"] or "", -r["located_rate"], r["field"]))
+    out.sort(key=lambda r: (r["issuer"] or "", -(r["located_rate"] or 0), r["field"]))
 
     issuers = sorted({r["issuer"] for r in out})
     fields = sorted({r["field"] for r in out})

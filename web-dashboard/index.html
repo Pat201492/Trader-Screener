@@ -2682,6 +2682,15 @@ async function stopPreview(){
   await fetch(`/api/runs/${DOC.previewRunId}/stop`,{method:'POST',
     headers:{'Content-Type':'application/json'},body:'{}'});
 }
+// Absence is an answer. A note with no coupon barrier should teach that null is
+// valid for this issuer+field, not sit there as a field we "failed" to get.
+async function markAbsent(field){
+  await fetch('/api/tools/edgar-scrubber/annotate',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({accession:DOC.accession,document:DOC.document,
+                         issuer:DOC.issuer,field,absent:true})});
+  await loadAnnotations();
+}
 async function acceptProposal(idx){
   const p=DOC.proposals[idx];
   if(!p.span){ alert('No span to accept — highlight the right text by hand instead.'); return; }
@@ -2872,8 +2881,12 @@ function renderDocPanel(keepScroll){
                   ${p.span?`<button onclick="jumpTo(${p.span[0]})" style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:4px;font-size:10.5px;padding:1px 6px;cursor:pointer">go</button>
                     <button onclick="acceptProposal(${idx})" style="background:transparent;border:1px solid var(--green);color:var(--green);border-radius:4px;font-size:10.5px;padding:1px 6px;cursor:pointer">✓</button>`
                    :'<span style="margin-left:auto;color:var(--red);font-size:10.5px">no span found</span>'}
+                  <button onclick="markAbsent('${esc(p.field)}')"
+                          title="This filing has no such term. Records it as absent and teaches the model that null is a valid answer here."
+                          style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:4px;font-size:10.5px;padding:1px 6px;cursor:pointer">not here</button>
                 </div>
                 <div>${p.anchor?`<span style="color:var(--accent)">${esc(p.anchor)}:</span> `:''}${fmtValue(p.value)}${p.unit?` <span class="muted">${esc(p.unit)}</span>`:''}</div>
+                ${p.likely_absent?`<div style="color:#e3b341;font-size:10.5px">no wording for this field appears anywhere in the filing — this note probably does not have one, so treat the value as invented</div>`:''}
                 ${p.span?`<div class="muted" style="font-size:10.5px">located by ${esc(p.span_source)} · chars ${p.span.join('–')}</div>`
                         :'<div class="muted" style="font-size:10.5px">the value is not stated anywhere in this text — treat it as unverified</div>'}
                 ${p.flags&&p.flags.length?`<div>${flagPills(p.flags)}</div>`:''}
@@ -2887,8 +2900,10 @@ function renderDocPanel(keepScroll){
                 <button onclick="jumpTo(${a.span?a.span[0]:0})" style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:4px;font-size:10.5px;padding:1px 6px;cursor:pointer">go</button>
                 <button onclick="removeMark('${esc(a.field)}')" style="background:transparent;border:1px solid var(--border);color:var(--red);border-radius:4px;font-size:10.5px;padding:1px 6px;cursor:pointer">×</button>
               </div>
-              <div class="muted" style="word-break:break-word">${esc(String(a.value===null?'':a.value)).slice(0,90)}</div>
-              <div class="muted" style="font-size:10.5px">chars ${a.span?a.span.join('–'):'?'}</div>
+              <div class="muted" style="word-break:break-word">${a.verdict==='reject'
+                ?'<span style="color:#e3b341">not present in this filing</span>'
+                :esc(String(a.value===null?'':a.value)).slice(0,90)}</div>
+              <div class="muted" style="font-size:10.5px">${a.verdict==='reject'?'teaches null is valid here':`chars ${a.span?a.span.join('–'):'?'}`}</div>
             </div>`).join('')
             :'<div class="muted" style="font-size:11.5px">Nothing marked yet. Highlight the text that holds a term and label it — it is stored as ground truth and fed to the model as a corrected exemplar next run.</div>'}
         </div>
@@ -3304,16 +3319,18 @@ async function renderToolsCoverage(minDocs){
   // Rank fields by how well they do across every issuer, so the left of the
   // table is what this tool can be trusted for and the right is what it cannot.
   const fieldScore=f=>{
-    const rs=data.rows.filter(r=>r.field===f);
-    return rs.reduce((a,r)=>a+r.located_rate*r.attempts,0)/Math.max(1,rs.reduce((a,r)=>a+r.attempts,0));
+    const rs=data.rows.filter(r=>r.field===f&&r.located_rate!==null);
+    return rs.reduce((a,r)=>a+r.located_rate*r.applicable,0)/Math.max(1,rs.reduce((a,r)=>a+r.applicable,0));
   };
   const fields=[...data.fields].sort((a,b)=>fieldScore(b)-fieldScore(a));
   const issuers=[...data.issuers].sort((a,b)=>
     data.rows.filter(r=>r.issuer===b).reduce((x,r)=>x+r.documents,0)-
     data.rows.filter(r=>r.issuer===a).reduce((x,r)=>x+r.documents,0));
 
+  // A field that does not apply to an issuer (every filing ruled absent) must
+  // neither prove nor disprove reliability — it is excluded, not scored as 0.
   const reliable=f=>{
-    const rs=data.rows.filter(r=>r.field===f&&r.documents>=3);
+    const rs=data.rows.filter(r=>r.field===f&&r.applicable>=3&&r.located_rate!==null);
     return rs.length&&rs.every(r=>r.located_rate>=0.9);
   };
   v.innerHTML=`
@@ -3339,13 +3356,19 @@ async function renderToolsCoverage(minDocs){
           ${fields.map(f=>{
             const r=cell[iss+'|'+f];
             if(!r) return '<td class="num muted">–</td>';
+            // Every filing of this issuer was ruled "no such term" -> the field
+            // does not apply here, which is not the same as failing to read it.
+            if(r.located_rate===null) return `<td class="num muted"
+              title="${esc(`${r.field} · ${iss}\nruled absent in all ${r.absent_marked} filing(s) — this note type does not carry it`)}"
+              style="opacity:.6">n/a</td>`;
             const pct=Math.round(r.located_rate*100);
             const tip=`${r.field} · ${iss}\n${r.documents} filing(s), ${r.attempts} extraction(s)\n`
+              +`applicable ${r.applicable} (ruled absent ${r.absent_marked})\n`
               +`value returned ${r.values_got}, located ${r.located}, unlocatable ${r.unlocatable}\n`
               +`gated (wanted escalation) ${r.gated}\nconfirmed examples you marked: ${r.taught}`;
-            return `<td class="num" title="${esc(tip)}" style="${coverageColor(r.located_rate,r.attempts)}">
+            return `<td class="num" title="${esc(tip)}" style="${coverageColor(r.located_rate,r.applicable)}">
               ${pct}%${r.taught?`<sup title="human-confirmed examples" style="color:var(--accent)">${r.taught}</sup>`:''}
-              <div style="font-size:9.5px;opacity:.7">${r.documents}f</div></td>`;
+              <div style="font-size:9.5px;opacity:.7">${r.applicable}f${r.absent_marked?` <span title="ruled absent" style="color:#e3b341">−${r.absent_marked}</span>`:''}</div></td>`;
           }).join('')}
         </tr>`).join('')}
       </table>

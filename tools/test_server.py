@@ -19,6 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "edgar_scrubber"))
 
 import server
+import field_spec as _fs
+
+# Loaded once, up here: the span-location checks below need the real spec's
+# per-field anchors, not a hand-written stand-in for them.
+_spec = _fs.load_spec(Path(__file__).resolve().parent / "edgar_scrubber" /
+                      "field_specs" / "424b2_structured_note.json")
 
 failures = []
 
@@ -104,14 +110,34 @@ check("an absurdly wide model span is not believed",
 check("a list value gets no span rather than a wrong one",
       server.locate_value(SAMPLE, ["a", "b"]) == (None, None))
 
+# Not every note carries every field. A filing that never says "buffer" cannot
+# state a buffer, and the same digits appearing elsewhere are a coincidence,
+# not evidence.
+AUTOCALL = ("Interest Barrier: 70.00% of the Initial Stock Price. "
+            "Downside Leverage Factor: 1.42857. Coupon paid quarterly.")
+buffer_field = _spec.field("buffer_pct")
+barrier_field = _spec.field("coupon_barrier_pct")
+
+check("a field whose vocabulary is absent is reported absent",
+      server.field_vocabulary_present(AUTOCALL.lower(), buffer_field) is False)
+check("a field whose vocabulary is present is reported present",
+      server.field_vocabulary_present(AUTOCALL.lower(), barrier_field) is True)
+check("a field the spec gives no anchors for is untestable, not absent",
+      server.field_vocabulary_present(AUTOCALL.lower(), _spec.field("underlyings")) is None)
+check("anchor positions are found for a present field",
+      len(server.anchor_positions(AUTOCALL.lower(), barrier_field)) == 1)
+
+# 1.42857 IS in the text (as the leverage factor), so a bare value match would
+# happily "locate" a fabricated buffer of 1.42857.
+near = server.anchor_positions(AUTOCALL.lower(), barrier_field)
+span, how = server.locate_value(AUTOCALL, 70.0, None, near=near)
+check("a value near its own anchor is preferred over the same digits elsewhere",
+      AUTOCALL[span[0]:span[1]] == "70.00" and how == "value-match")
+
 # --------------------------------------------------------------------------- #
 section("cues -- where to look before any model runs")
 # --------------------------------------------------------------------------- #
 
-import field_spec as _fs
-
-_spec = _fs.load_spec(Path(__file__).resolve().parent / "edgar_scrubber" /
-                      "field_specs" / "424b2_structured_note.json")
 CUE_TEXT = ("Key Terms\n"
             "Interest Barrier: 70.00% of the Initial Stock Price\n"
             "Contingent Interest Rate: 9.15% per annum, paid quarterly\n"
@@ -395,6 +421,33 @@ check("min_documents filters out issuers with too little evidence",
       all(r["documents"] >= 2 for r in server.store_coverage(2)["rows"]))
 check("human-confirmed examples are counted per issuer+field",
       by[("ISSUER A", "cusip")]["taught"] == 0)
+
+# A field the note type simply does not carry (no coupon barrier on a growth
+# note) must not be scored as a field we failed to read -- otherwise the metric
+# rewards inventing a value.
+vs = server.validation_store()
+vs.ensure_session("dashboard", spec_id="424b2.structured_note", now="2026-08-14T00:00:00Z")
+vs.write_exemplar("ISSUER B", "barrier_pct", "negative",
+                  "barrier_pct: absent in a prior filing", form="424b2.structured_note",
+                  now="2026-08-14T00:00:00Z")
+vs.close()
+
+after = {(r["issuer"], r["field"]): r for r in server.store_coverage()["rows"]}
+check("a filing ruled absent leaves the denominator",
+      after[("ISSUER B", "barrier_pct")]["applicable"] == 0
+      and after[("ISSUER B", "barrier_pct")]["absent_marked"] == 1)
+check("a field absent in every filing reads n/a, not 0%",
+      after[("ISSUER B", "barrier_pct")]["located_rate"] is None)
+check("another issuer's score is untouched by that ruling",
+      after[("ISSUER A", "barrier_pct")]["located_rate"] == 1.0)
+
+absent_res = server.save_annotation({
+    "accession": "0002-26-1", "document": "d.htm", "issuer": "ISSUER B",
+    "field": "coupon_barrier_pct", "absent": True})
+check("marking a field absent needs no span", absent_res["saved"] is True)
+check("absence is filed as a reject verdict", absent_res["verdict"] == "reject")
+check("absence teaches that null is valid rather than teaching a value",
+      "null is a valid answer" in absent_res["rendered"])
 
 # --------------------------------------------------------------------------- #
 section("health")
