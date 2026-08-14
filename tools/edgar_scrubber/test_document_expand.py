@@ -193,6 +193,64 @@ except ImportError:
     print("  [skip] field_spec not importable standalone here")
 
 # --------------------------------------------------------------------------- #
+section("LIVE-shaped manifest: index.json `type` is an icon, not a form type")
+# --------------------------------------------------------------------------- #
+
+# Verbatim shape of the real endpoint for accession 0001013762-25-000407
+# (JPMorgan 424B2, fetched 2026-08-13). Every text item reports "text.gif" --
+# the directory icon. Nothing here says "424B2" anywhere, which is why the
+# fabricated INDEX_JSON above passed while every live filing resolved no
+# primary document at all.
+LIVE_INDEX_JSON = {
+    "directory": {
+        "item": [
+            {"name": f"{ACCESSION}-index-headers.html", "type": "text.gif", "size": ""},
+            {"name": f"{ACCESSION}-index.html", "type": "text.gif", "size": ""},
+            {"name": f"{ACCESSION}.txt", "type": "text.gif", "size": ""},
+            {"name": "ea0234769-01_424b2.htm", "type": "text.gif", "size": 155803},
+            {"name": "image_001.jpg", "type": "image2.gif", "size": 5462},
+        ]
+    }
+}
+
+check("live-shaped item classifies as 'other' on type alone",
+      de.classify_document("ea0234769-01_424b2.htm", "text.gif") == "other")
+check("size heuristic picks the rendered prospectus over the index pages",
+      de.primary_by_size(LIVE_INDEX_JSON["directory"]["item"]) == "ea0234769-01_424b2.htm")
+
+LIVE_ROUTES = {
+    f"{BASE}/index.json": ok_json(LIVE_INDEX_JSON),
+    f"{BASE}/{ACCESSION}-index-headers.html": ok_html("<html><body>headers</body></html>"),
+    f"{BASE}/{ACCESSION}-index.html": ok_html("<html><body>index</body></html>"),
+    f"{BASE}/{ACCESSION}.txt": (200, {}, b"full submission text"),
+    f"{BASE}/ea0234769-01_424b2.htm": ok_html(PRIMARY_HTML),
+}
+
+import tempfile as _tempfile
+live_client = EdgarClient(UA, _tempfile.mkdtemp(prefix="edgar-live-shape-test-"),
+                          transport=FakeTransport(LIVE_ROUTES))
+live_bundle = de.expand_accession(live_client, CIK, ACCESSION)
+live_primary = live_bundle.primary()
+
+check("live-shaped manifest still resolves a primary document",
+      live_primary is not None)
+check("the primary is the prospectus, not an index page or the .txt submission",
+      live_primary is not None and live_primary.name == "ea0234769-01_424b2.htm")
+check("the primary carries normalized text",
+      live_primary is not None and live_primary.normalized is not None
+      and "Contingent Coupon Rate" in live_primary.normalized.text)
+check("exactly one document is tagged primary",
+      sum(1 for d in live_bundle.documents if d.category == "primary") == 1)
+
+# The manifest's own type still wins where it exists -- the fallback must not
+# start overriding a correctly-typed manifest.
+typed_client = EdgarClient(UA, _tempfile.mkdtemp(prefix="edgar-typed-shape-test-"),
+                           transport=FakeTransport(ROUTES))
+typed_primary_doc = de.expand_accession(typed_client, CIK, ACCESSION).primary()
+check("a typed manifest still resolves its declared primary",
+      typed_primary_doc is not None and typed_primary_doc.name == "primary424b2.htm")
+
+# --------------------------------------------------------------------------- #
 if failures:
     print(f"\n{len(failures)} FAILURE(S):")
     for f in failures:

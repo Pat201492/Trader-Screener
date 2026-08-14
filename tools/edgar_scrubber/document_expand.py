@@ -79,6 +79,43 @@ def classify_document(name, doc_type, size=None):
     return "other"
 
 
+def primary_by_size(items):
+    """Fallback primary-document pick for a manifest whose `type` carries no
+    form label.
+
+    The live `index.json` does NOT report a form type per item -- measured
+    against the real endpoint, `directory.item[].type` is the *directory-icon*
+    filename, the same value for every text item in the folder:
+
+        {"name": "ea0234769-01_424b2.htm", "type": "text.gif", "size": 155803}
+        {"name": "image_001.jpg",          "type": "image2.gif", "size": 5462}
+
+    So `classify_document` can never see "424B2" there and would tag every
+    prose item "other", leaving `AccessionDocuments.primary()` None on every
+    real filing. Only the fabricated manifests in the tests carry
+    `type: "424B2"`.
+
+    Same heuristic as `EdgarClient.primary_document` (#99) -- deliberately
+    duplicated rather than imported, because this module is stdlib-only and
+    does not depend on the network client.
+    """
+    def size(it):
+        try:
+            return int(it.get("size") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def pick(pred):
+        cands = [it for it in items if pred((it.get("name") or "").lower())]
+        return max(cands, key=size)["name"] if cands else None
+
+    return (
+        pick(lambda n: n.endswith(_HTML_EXTS) and not n.startswith(("0001", "index")))
+        or pick(lambda n: n.endswith(_HTML_EXTS))
+        or pick(lambda n: n.endswith(".txt"))
+    )
+
+
 def is_normalizable(name, category):
     """Whether this item is text/HTML worth running through `normalize_html`
     (as opposed to a graphic or a raw XBRL/XSD sidecar that has no prose)."""
@@ -152,6 +189,15 @@ def expand_accession(client, cik, accession, *, fetch_graphics=False):
     index_json = client.filing_index(cik, accession)
     items = ((index_json.get("directory", {}) or {}).get("item", []) or [])
 
+    # A manifest whose `type` never says "424B2" (which is every LIVE one --
+    # see `primary_by_size`) gets the size heuristic instead, so the bundle
+    # always resolves a primary. The manifest's own type wins when it has one.
+    typed_primary = any(
+        classify_document(it.get("name", ""), it.get("type", "")) == "primary"
+        for it in items
+    )
+    fallback_primary = None if typed_primary else primary_by_size(items)
+
     documents = []
     ex107 = None
     for item in items:
@@ -162,6 +208,8 @@ def expand_accession(client, cik, accession, *, fetch_graphics=False):
         except (TypeError, ValueError):
             size = 0
         category = classify_document(name, doc_type, size)
+        if fallback_primary and name == fallback_primary and category == "other":
+            category = "primary"
 
         if category == "graphic" and not fetch_graphics:
             documents.append(ExpandedDocument(name, doc_type, size, category))
