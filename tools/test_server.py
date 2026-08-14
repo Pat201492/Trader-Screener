@@ -105,6 +105,72 @@ check("a list value gets no span rather than a wrong one",
       server.locate_value(SAMPLE, ["a", "b"]) == (None, None))
 
 # --------------------------------------------------------------------------- #
+section("cues -- where to look before any model runs")
+# --------------------------------------------------------------------------- #
+
+import field_spec as _fs
+
+_spec = _fs.load_spec(Path(__file__).resolve().parent / "edgar_scrubber" /
+                      "field_specs" / "424b2_structured_note.json")
+CUE_TEXT = ("Key Terms\n"
+            "Interest Barrier: 70.00% of the Initial Stock Price\n"
+            "Contingent Interest Rate: 9.15% per annum, paid quarterly\n"
+            "The estimated value is $979.00 per $1,000 principal amount note.\n")
+
+cues = server.document_cues(CUE_TEXT, _spec)
+anchors = [c for c in cues if c["kind"] == "anchor"]
+units = [c for c in cues if c["kind"] == "unit"]
+
+check("a spec anchor is found and knows which field it belongs to",
+      any(c["cue"].startswith("Interest Barrier") and c["field"] == "coupon_barrier_pct"
+          for c in anchors))
+check("the number after an anchor is captured as the candidate value",
+      any(c["value_guess"] == "70.00%" for c in anchors))
+check("that candidate carries its own span, so it can be marked in one click",
+      all(CUE_TEXT[c["value_span"][0]:c["value_span"][1]] == c["value_guess"]
+          for c in anchors if c["value_span"]))
+check("unit phrases are found where no anchor is labelled",
+      any(c["cue"].lower() == "per annum" for c in units)
+      and any(c["cue"].lower() == "per $1,000" for c in units))
+check("unit cues are typed so the UI can group them",
+      {c["cue_kind"] for c in units if c["cue"].lower() == "per annum"} == {"rate"})
+check("a unit cue carries no field -- it says 'a number lives here', not which one",
+      all(c["field"] is None for c in units))
+check("cues come back in document order", [c["span"][0] for c in cues] ==
+      sorted(c["span"][0] for c in cues))
+check("restricting to one field drops the other fields' anchors",
+      all(c["field"] in (None, "barrier_pct")
+          for c in server.document_cues(CUE_TEXT, _spec, fields=["barrier_pct"])))
+
+# The label a value sits under, shown next to it. `validation.derive_anchor`
+# splits the preceding line on its FIRST colon, which is several labels too
+# early when a whole key-terms table shares one line -- the shape these filings
+# actually have.
+ONE_LINE = ("Valuation Date::: April 6, 2026 Maturity Date::: April 9, 2026 "
+            "CUSIP:: 48136CYQ6  and more")
+
+
+def label_at(text, frag, field_name):
+    at = text.index(frag)
+    return server.label_before(text, (at, at + len(frag)), _spec.field(field_name))
+
+
+check("the label ADJACENT to the value wins, not the first one on the line",
+      label_at(ONE_LINE, "48136CYQ6", "cusip") == "CUSIP")
+check("a second value on the same line gets its own label",
+      label_at(ONE_LINE, "April 9, 2026", "maturity_date") == "Maturity Date")
+check("a canonical spec anchor is preferred over raw preceding text",
+      label_at("Key Terms Interest Barrier:: 70.00%", "70.00", "coupon_barrier_pct")
+      == "Interest Barrier")
+check("a term named AFTER the value is still found",
+      label_at("equal to 70.00% of the Initial Stock Price, which we refer to as "
+               "the Interest Barrier.", "70.00", "coupon_barrier_pct")
+      == "Interest Barrier")
+check("no label either side returns nothing rather than a sentence fragment",
+      label_at("the notes will pay you 70.00 dollars at some point", "70.00",
+               "barrier_pct") is None)
+
+# --------------------------------------------------------------------------- #
 section("query resolution -- what a run will actually extract")
 # --------------------------------------------------------------------------- #
 

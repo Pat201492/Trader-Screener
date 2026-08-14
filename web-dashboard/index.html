@@ -2408,10 +2408,11 @@ function flagPills(flags){
 function fieldsTable(fields){
   if(!fields||!fields.length) return '<div class="muted" style="font-size:12px">no fields</div>';
   return `<table style="margin-top:6px">
-    <tr><th>Field</th><th>Value</th><th>Unit</th><th>Rung</th><th class="num">Conf</th><th>Flags</th></tr>
+    <tr><th>Field</th><th>Value</th><th>Found under</th><th>Unit</th><th>Rung</th><th class="num">Conf</th><th>Flags</th></tr>
     ${fields.map(f=>`<tr>
       <td>${esc(f.field)}</td>
       <td>${f.error?`<span style="color:var(--red)">${esc(f.error)}</span>`:fmtValue(f.value)}</td>
+      <td class="muted" title="The label this value sits under in the filing">${esc(f.anchor||'')}</td>
       <td class="muted">${esc(f.unit||'')}</td>
       <td class="muted">${esc(f.rung||(f.provenance||'').split(':')[0]||'')}</td>
       <td class="num">${f.confidence==null?'':Number(f.confidence).toFixed(2)}</td>
@@ -2703,7 +2704,8 @@ async function openDocument(i,withPreview){
     const doc=await (await fetch('/api/tools/edgar-scrubber/document?'+qs)).json();
     if(doc.error) throw new Error(doc.error);
     DOC={...doc,issuer:hit.issuer,filed:hit.file_date||hit.sample_day,
-         annotations:[],find:'',findHits:[],proposals:null,previewing:false};
+         annotations:[],find:'',findHits:[],proposals:null,previewing:false,
+         showCues:false,cueField:null};
     await loadAnnotations();
     if(withPreview) runPreview();
   }catch(e){
@@ -2743,6 +2745,11 @@ function docHTML(){
   const text=DOC.text, spans=[];
   DOC.annotations.forEach(a=>{ if(a.span) spans.push({s:a.span[0],e:a.span[1],cls:'ann',label:a.field}); });
   (DOC.proposals||[]).forEach(p=>{ if(p.span) spans.push({s:p.span[0],e:p.span[1],cls:'prop',label:p.field+' (proposed)'}); });
+  if(DOC.showCues) (DOC.cues||[]).forEach(c=>{
+    if(DOC.cueField&&c.field&&c.field!==DOC.cueField) return;
+    if(DOC.cueField&&!c.field) return;
+    spans.push({s:c.span[0],e:c.span[1],cls:'cue',label:(c.field||c.cue_kind||'cue')});
+  });
   const needle=(DOC.find||'').trim();
   if(needle.length>=2){
     const low=text.toLowerCase(), n=needle.toLowerCase();
@@ -2763,6 +2770,8 @@ function docHTML(){
       ? 'background:#2f81f733;border-bottom:2px solid var(--accent);border-radius:2px'
       : sp.cls==='prop'
       ? 'background:#3fb95033;border-bottom:2px dashed var(--green);border-radius:2px'
+      : sp.cls==='cue'
+      ? 'background:transparent;border-bottom:1px dotted #8b949e;color:inherit'
       : 'background:#e3b34155;border-radius:2px';
     html+=`<mark id="${sp.cls==='ann'?'ann-'+esc(sp.label):''}" title="${esc(sp.label||'match')}" style="color:inherit;${style}">${esc(text.slice(sp.s,sp.e))}</mark>`;
     pos=sp.e;
@@ -2825,6 +2834,22 @@ function renderDocPanel(keepScroll){
                     height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;
                     font:12.5px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace">${docHTML()}</div>
         <div>
+          <div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:10px">
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+              <strong style="font-size:12.5px">Where to look</strong>
+              <span class="muted" style="font-size:10.5px">${(DOC.cues||[]).length} cues</span>
+              <label class="muted" style="margin-left:auto;font-size:10.5px;cursor:pointer">
+                <input type="checkbox" ${DOC.showCues?'checked':''} onchange="toggleCues(this.checked)"> underline in text</label>
+            </div>
+            <select onchange="setCueField(this.value)" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:4px;font-size:11.5px;margin-bottom:6px">
+              <option value="">labelled anchors + unit phrases (all)</option>
+              ${[...new Set((DOC.cues||[]).filter(c=>c.field).map(c=>c.field))]
+                 .map(f=>`<option value="${esc(f)}" ${DOC.cueField===f?'selected':''}>${esc(f)} — its spec anchors</option>`).join('')}
+            </select>
+            <div style="max-height:150px;overflow:auto">
+              ${cueList()}
+            </div>
+          </div>
           <div id="markBox" style="display:none;border:1px solid var(--accent);border-radius:6px;padding:10px;margin-bottom:10px">
             <div class="muted" style="font-size:11px">selected text</div>
             <div id="markText" style="font-size:12px;max-height:70px;overflow:auto;margin:4px 0 8px"></div>
@@ -2848,7 +2873,7 @@ function renderDocPanel(keepScroll){
                     <button onclick="acceptProposal(${idx})" style="background:transparent;border:1px solid var(--green);color:var(--green);border-radius:4px;font-size:10.5px;padding:1px 6px;cursor:pointer">✓</button>`
                    :'<span style="margin-left:auto;color:var(--red);font-size:10.5px">no span found</span>'}
                 </div>
-                <div>${fmtValue(p.value)}${p.unit?` <span class="muted">${esc(p.unit)}</span>`:''}</div>
+                <div>${p.anchor?`<span style="color:var(--accent)">${esc(p.anchor)}:</span> `:''}${fmtValue(p.value)}${p.unit?` <span class="muted">${esc(p.unit)}</span>`:''}</div>
                 ${p.span?`<div class="muted" style="font-size:10.5px">located by ${esc(p.span_source)} · chars ${p.span.join('–')}</div>`
                         :'<div class="muted" style="font-size:10.5px">the value is not stated anywhere in this text — treat it as unverified</div>'}
                 ${p.flags&&p.flags.length?`<div>${flagPills(p.flags)}</div>`:''}
@@ -2870,6 +2895,53 @@ function renderDocPanel(keepScroll){
       </div>
     </div>`;
   if(keepScroll){ const p2=document.getElementById('docText'); if(p2) p2.scrollTop=scroll; }
+}
+// "Where to look": the spec's own per-field anchors ("Interest Barrier:",
+// "Coupon Rate:") plus generic unit phrases ("per annum", "%", "per $1,000").
+// A labelled anchor knows its field, so its nearby number can be marked in one
+// click; a unit phrase does not, but it is where numbers live when the issuer
+// worded the label differently than the spec expects.
+function toggleCues(on){ DOC.showCues=on; renderDocPanel(true); }
+function setCueField(f){ DOC.cueField=f||null; DOC.showCues=true; renderDocPanel(true); }
+function cueList(){
+  let cues=(DOC.cues||[]);
+  cues=DOC.cueField?cues.filter(c=>c.field===DOC.cueField)
+                   :cues.filter(c=>c.kind==='anchor');
+  if(!cues.length){
+    const units=(DOC.cues||[]).filter(c=>c.kind==='unit').slice(0,25);
+    if(!units.length) return '<div class="muted" style="font-size:11px">No cues found in this filing.</div>';
+    return `<div class="muted" style="font-size:10.5px;margin-bottom:4px">No labelled anchor matched — showing unit phrases, where the numbers usually are.</div>`
+      +units.map(cueRow).join('');
+  }
+  return cues.slice(0,40).map(cueRow).join('');
+}
+function cueRow(c){
+  const i=(DOC.cues||[]).indexOf(c);
+  return `<div style="border-bottom:1px solid var(--border);padding:4px 0;font-size:11.5px">
+    <div style="display:flex;gap:6px;align-items:center">
+      <span style="color:${c.kind==='anchor'?'var(--accent)':'var(--muted)'}">${esc(c.cue)}</span>
+      ${c.value_guess?`<strong>${esc(c.value_guess)}</strong>`:''}
+      <button onclick="jumpTo(${c.span[0]})" style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:4px;font-size:10px;padding:0 5px;cursor:pointer">go</button>
+      ${c.value_span&&c.field?`<button onclick="markFromCue(${i})" title="Mark that number as ${esc(c.field)}" style="background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:4px;font-size:10px;padding:0 5px;cursor:pointer">mark</button>`:''}
+    </div>
+    <div class="muted" style="font-size:10px;word-break:break-word">…${esc((c.snippet||'').slice(0,110))}…</div>
+  </div>`;
+}
+// A cue hit already knows the field and the number next to it, so marking is a
+// click rather than a hunt-and-drag through 60k characters.
+function markFromCue(i){
+  const c=DOC.cues[i];
+  if(!c||!c.value_span) return;
+  DOC.pending={start:c.value_span[0],end:c.value_span[1],
+               text:DOC.text.slice(c.value_span[0],c.value_span[1])};
+  const box=document.getElementById('markBox');
+  box.style.display='block';
+  document.getElementById('markText').textContent=DOC.pending.text;
+  const num=DOC.pending.text.replace(/[,$%]/g,'').match(/-?\d+(\.\d+)?/);
+  document.getElementById('markValue').value=num?num[0]:DOC.pending.text;
+  const sel=document.getElementById('markField');
+  if(c.field) sel.value=c.field;
+  jumpTo(c.span[0]);
 }
 let FIND_AT=-1;
 function jumpToMatch(step){

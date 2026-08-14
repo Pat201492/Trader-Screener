@@ -481,6 +481,7 @@ def scrubber_run(run_id, targets, fields, home):
                 out.append({
                     "field": name, "value": p.value, "unit": p.unit,
                     "rung": p.rung, "confidence": p.confidence, "gated": gated,
+                    "anchor": label_before(nd.text, span, spec.field(name)),
                     "span": list(span) if span else None,
                     "span_source": span_method,
                     "span_text": nd.text[span[0]:span[1]] if span else None,
@@ -619,6 +620,9 @@ def load_document(cik, accession, document=None):
     if doc is None or doc.normalized is None:
         raise ValueError(f"{accession}: no readable document to open")
 
+    import field_spec
+    spec = field_spec.load_spec(SCRUBBER / "field_specs" / "424b2_structured_note.json")
+
     nd = doc.normalized
     sections = [{"name": name, "start": s.text_start, "end": s.text_end}
                 for name, spans in split_sections(nd).items() for s in spans]
@@ -626,10 +630,139 @@ def load_document(cik, accession, document=None):
     return {
         "accession": accession, "cik": cik, "document": doc.name,
         "chars": len(nd.text), "text": nd.text, "sections": sections,
+        # Shipped with the document so "where do I look" is answered before the
+        # first model call, not after it.
+        "cues": document_cues(nd.text, spec),
         "manifest": bundle.manifest(),
         "ex107": bundle.ex107.as_dict() if bundle.ex107 else None,
         **edgar_urls(cik, accession, doc.name),
     }
+
+
+# Phrases that mark where numbers live in a 424B2 regardless of which field
+# they belong to. The spec's own per-field `anchors` say "this label means this
+# field"; these say "a number near here is probably a term worth reading" --
+# which is what you want when the labelled anchor is absent or worded oddly,
+# and what makes the document skimmable by eye.
+UNIT_CUES = [
+    ("per annum", "rate"), ("per year", "rate"), ("annually", "rate"),
+    ("per quarter", "rate"), ("quarterly", "rate"), ("monthly", "rate"),
+    ("percent", "percent"), ("%", "percent"),
+    ("per $1,000", "per-note"), ("$1,000 principal", "per-note"),
+    ("principal amount", "per-note"),
+    ("of the initial", "level"), ("of the Initial Stock Price", "level"),
+    ("greater than or equal to", "level"), ("less than", "level"),
+]
+
+_NUM_RE = re.compile(r"\$?\d[\d,]*(?:\.\d+)?%?")
+
+# "Label::" or "Label:" sitting immediately before a value, anchored to the END
+# of the preceding text.
+_LABEL_RE = re.compile(r"([A-Z][A-Za-z0-9 ()/$&.,'’–-]{2,40}?)\s*:{1,2}\s*$")
+
+
+def label_before(text, span, field=None, window=220):
+    """The label a value sits under -- "Interest Barrier", "CUSIP", "Maturity Date".
+
+    `validation.derive_anchor` exists for this and is used by the terminal
+    validation loop, but its fallback splits the preceding LINE on its first
+    colon. These filings put a whole key-terms table on one line
+    ("... Valuation Date:: April 6, 2026 Maturity Date:: April 9, 2026 CUSIP::
+    48136CYQ6"), so the first colon is several labels too early and the anchor
+    comes back as a sentence. That function is left alone -- its own tests pin
+    its behavior -- and this reads the label ADJACENT to the value instead:
+    a canonical spec anchor if one sits just before, else the last "Label:"
+    immediately preceding it.
+    """
+    if not span:
+        return None
+    pre = text[max(0, span[0] - window):span[0]]
+    if field is not None:
+        low = pre.lower()
+        best = None
+        for a in (getattr(field, "anchors", None) or []):
+            key = a.lower().rstrip(": ").strip()
+            at = low.rfind(key) if key else -1
+            if at >= 0 and (best is None or at > best[0]):
+                best = (at, a.rstrip(": ").strip())
+        if best:
+            return best[1]
+    m = _LABEL_RE.search(pre)
+    if m:
+        return m.group(1).strip(" .,")
+
+    # Prose states the term AFTER the number as often as before it -- "70.00%
+    # of the Initial Stock Price, which we refer to as the Interest Barrier".
+    # Looking only backwards misses those entirely.
+    if field is not None:
+        post = text[span[1]:span[1] + window].lower()
+        best = None
+        for a in (getattr(field, "anchors", None) or []):
+            key = a.lower().rstrip(": ").strip()
+            at = post.find(key) if key else -1
+            if at >= 0 and (best is None or at < best[0]):
+                best = (at, a.rstrip(": ").strip())
+        if best:
+            return best[1]
+
+    # No label either side: say so. A sentence fragment dressed up as a label is
+    # worse than an empty cell -- it reads as evidence that the value was found
+    # somewhere structured when it was not.
+    return None
+
+
+def document_cues(text, spec, fields=None, max_per_cue=40):
+    """Where to look: every place this filing says something that usually sits
+    next to a term worth reading.
+
+    Two sources, deliberately kept apart:
+
+      * the spec's per-field `anchors` ("Interest Barrier:", "Coupon Rate:") --
+        a labelled hit, so the field is known and the number after it is a
+        candidate value;
+      * generic unit phrases ("per annum", "% ", "per $1,000") -- unlabelled,
+        but they are where numbers live, which is what you need when the
+        issuer worded the label differently than the spec expects.
+
+    Each hit carries the nearest number after it, so a cue is one click from a
+    marked span rather than just a place to scroll to.
+    """
+    wanted = set(fields) if fields else None
+    hits = []
+    low = text.lower()
+
+    def scan(needle, kind, field=None, cue_kind=None):
+        start, found = 0, 0
+        n = needle.lower()
+        while found < max_per_cue:
+            at = low.find(n, start)
+            if at < 0:
+                break
+            tail = text[at + len(needle): at + len(needle) + 90]
+            num = _NUM_RE.search(tail)
+            hits.append({
+                "span": [at, at + len(needle)],
+                "cue": text[at:at + len(needle)],
+                "kind": kind, "field": field, "cue_kind": cue_kind,
+                "value_guess": num.group(0) if num else None,
+                "value_span": ([at + len(needle) + num.start(),
+                                at + len(needle) + num.end()] if num else None),
+                "snippet": text[max(0, at - 70): at + len(needle) + 90].replace("\n", " "),
+            })
+            start = at + len(needle)
+            found += 1
+
+    for f in spec.fields:
+        if wanted and f.name not in wanted:
+            continue
+        for a in (getattr(f, "anchors", None) or []):
+            scan(a, "anchor", field=f.name)
+
+    for phrase, cue_kind in UNIT_CUES:
+        scan(phrase, "unit", cue_kind=cue_kind)
+
+    hits.sort(key=lambda h: (h["span"][0], h["kind"] != "anchor"))
+    return hits
 
 
 def locate_value(text, value, hint_span=None):
@@ -754,10 +887,16 @@ def preview_document(params, run_id=None):
                               accession=params.get("accession"),
                               document=doc["document"], fields=[name])[0]
         span, method = locate_value(text, p.value, p.source_span)
+        # The label the value sits under ("Interest Barrier", "Coupon Rate") --
+        # the same anchor #107 induces rules from. Shown next to the value
+        # because a number with its label is checkable at a glance and a bare
+        # number is not.
+        anchor = label_before(text, span, spec.field(p.field))
         out.append({
             "field": p.field, "value": p.value, "unit": p.unit,
             "rung": p.rung, "confidence": p.confidence,
             "provenance": p.provenance,
+            "anchor": anchor,
             "span": list(span) if span else None,
             "span_source": method,
             "model_span": list(p.source_span) if p.source_span else None,
