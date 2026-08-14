@@ -2600,6 +2600,9 @@ function renderHits(){
       <button onclick="previewFirst()" title="Dry run on the first filing: see every value it would pull, highlighted in the text it came from. Nothing is written to the store."
               style="background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:4px 11px;font-size:12px;cursor:pointer">
         check the first filing</button>
+      <button onclick="scanAvailability()" title="No model: checks which fields each selected filing actually carries, so you know what is pullable before spending extraction time."
+              style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:4px 11px;font-size:12px;cursor:pointer">
+        what can I pull from these?</button>
       <button id="extractBtn" onclick="extractSelected()" style="margin-left:auto;background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">
         Extract ${SEARCH.selected.size} selected</button>
     </div>
@@ -2634,6 +2637,95 @@ async function previewFirst(){
   const first=Array.from(SEARCH.selected).sort((a,b)=>a-b)[0];
   await openDocument(first===undefined?0:first, true);
 }
+// ── availability: what is even IN these filings ─────────────
+// Ordering matters: a vocabulary check per field costs one cached fetch per
+// filing and answers "is this query returning notes that carry coupon terms at
+// all" in seconds. Extracting first and discovering the answer afterwards costs
+// ~40s per filing to learn the same thing.
+let SCAN_POLL=null;
+function stopScanPolling(){ if(SCAN_POLL){ clearInterval(SCAN_POLL); SCAN_POLL=null; } }
+async function scanAvailability(){
+  const picked=Array.from(SEARCH.selected).sort((a,b)=>a-b).map(i=>SEARCH.hits[i]);
+  const panel=document.getElementById('runPanel');
+  panel.style.display='block';
+  if(!picked.length){ panel.innerHTML='<div class="err">Nothing selected.</div>'; return; }
+  panel.innerHTML='<div class="loading">starting scan…</div>';
+  let res;
+  try{
+    const r=await fetch('/api/tools/edgar-scrubber/availability',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({accessions:picked,limit:picked.length,fields:chosenFields()})});
+    res=await r.json();
+    if(!r.ok) throw new Error(res.error||`HTTP ${r.status}`);
+  }catch(e){ panel.innerHTML=`<div class="err">${esc(e.message)}</div>`; return; }
+  pollScan(res.run_id);
+}
+async function pollScan(runId){
+  stopScanPolling();
+  const tick=async()=>{
+    let run;
+    try{ run=await (await fetch(`/api/runs/${runId}`)).json(); }catch(e){ return; }
+    renderScanPanel(run);
+    if(['done','error','stopped'].includes(run.status)) stopScanPolling();
+  };
+  await tick();
+  SCAN_POLL=setInterval(tick,1000);
+}
+function availCell(state){
+  if(state==='present') return '<td class="num" style="background:#3fb95022;color:var(--green)">✓</td>';
+  if(state==='absent')  return '<td class="num muted" title="this filing never uses this field\'s wording">–</td>';
+  return '<td class="num muted" title="the spec gives this field no anchors, so presence cannot be tested">?</td>';
+}
+function renderScanPanel(run){
+  const panel=document.getElementById('runPanel');
+  if(!panel){ stopScanPolling(); return; }
+  const p=run.progress||{};
+  const pct=p.fields_total?Math.round(100*(p.fields_done||0)/p.fields_total):0;
+  const live=run.status==='running'||run.status==='queued';
+  const rows=run.rows||[];
+  const fields=(run.summary_fields||[]).map(s=>s.field);
+  const cols=fields.length?fields:Object.keys((rows[0]||{present:{}}).present);
+  panel.innerHTML=`
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="name">What these filings carry</div>
+        <span class="muted" style="font-size:12px">${rows.length}/${p.fields_total||0} scanned · no model used</span>
+        ${live?`<button onclick="stopRun('${esc(run.id)}')" style="background:transparent;border:1px solid var(--red);color:var(--red);border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer">stop</button>`:''}
+        <button style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer"
+                onclick="stopScanPolling();document.getElementById('runPanel').style.display='none'">close</button>
+      </div>
+      <div style="height:8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;margin:10px 0 6px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:${live?'#e3b341':'var(--green)'};transition:width .3s"></div>
+      </div>
+      ${run.error?`<div class="err">${esc(run.error)}</div>`:''}
+      ${(run.summary_fields||[]).length?`
+        <div style="font-weight:600;font-size:12.5px;margin:10px 0 4px">Across these ${run.scanned||rows.length} filing(s)</div>
+        <div class="muted" style="font-size:11px;margin-bottom:6px">Measured in this sample — evidence about these filings, not a statement of what any rule requires.</div>
+        <div style="max-height:190px;overflow:auto"><table>
+          <tr><th>Field</th><th class="num">Carried by</th><th>How universal here</th></tr>
+          ${run.summary_fields.map(s=>`<tr>
+            <td>${esc(s.field)}</td>
+            <td class="num">${s.rate===null?'—':Math.round(s.rate*100)+'%'} <span class="muted">(${s.present}/${s.testable})</span></td>
+            <td>${s.class==='universal'?'<span style="color:var(--green)">in every filing here</span>'
+                 :s.class==='common'?'<span style="color:#e3b341">in most</span>'
+                 :s.class==='product-specific'?'<span class="muted">only some notes</span>'
+                 :'<span class="muted">not testable</span>'}</td></tr>`).join('')}
+        </table></div>`:''}
+      ${rows.length?`
+        <div style="font-weight:600;font-size:12.5px;margin:12px 0 4px">Per filing</div>
+        <div style="overflow:auto;max-height:300px;border:1px solid var(--border);border-radius:6px"><table style="font-size:11.5px">
+          <tr><th style="position:sticky;left:0;background:var(--bg)">Filing</th>
+            ${cols.map(f=>`<th class="num" title="${esc(f)}">${esc(f.length>14?f.slice(0,13)+'…':f)}</th>`).join('')}</tr>
+          ${rows.map(r=>`<tr>
+            <td style="position:sticky;left:0;background:var(--bg);white-space:nowrap">
+              ${esc((r.issuer||'').slice(0,22))} <span class="muted">${esc(r.filed||'')}</span>
+              ${r.error?`<div style="color:var(--red);font-size:10px">${esc(r.error)}</div>`:''}</td>
+            ${cols.map(f=>availCell((r.present||{})[f])).join('')}
+          </tr>`).join('')}
+        </table></div>`:''}
+    </div>`;
+}
+
 let PREVIEW_POLL=null;
 function stopPreviewPolling(){ if(PREVIEW_POLL){ clearInterval(PREVIEW_POLL); PREVIEW_POLL=null; } }
 async function runPreview(){
@@ -2708,8 +2800,9 @@ async function openDocument(i,withPreview){
   panel.innerHTML='<div class="loading">fetching the filing…</div>';
   panel.scrollIntoView({behavior:'smooth',block:'start'});
   try{
+    // The hit's `document` is where the search phrase matched — often the tiny
+    // fee exhibit, not the prospectus. Read the primary document.
     const qs=new URLSearchParams({cik:hit.cik,accession:hit.accession});
-    if(hit.document) qs.set('document',hit.document);
     const doc=await (await fetch('/api/tools/edgar-scrubber/document?'+qs)).json();
     if(doc.error) throw new Error(doc.error);
     DOC={...doc,issuer:hit.issuer,filed:hit.file_date||hit.sample_day,

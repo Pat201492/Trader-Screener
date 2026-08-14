@@ -135,6 +135,54 @@ check("a value near its own anchor is preferred over the same digits elsewhere",
       AUTOCALL[span[0]:span[1]] == "70.00" and how == "value-match")
 
 # --------------------------------------------------------------------------- #
+section("availability scan -- what these filings carry, before any model runs")
+# --------------------------------------------------------------------------- #
+
+PROSPECTUS = ("Interest Barrier: 70.00% of the Initial Stock Price. "
+              "CUSIP:: 48136CYQ6. Maturity Date:: April 9, 2026.")
+GROWTH_NOTE = ("Participation Rate: 150%. Buffer: 10.00%. "
+               "CUSIP:: 06744AAA1. Maturity Date:: May 1, 2027.")
+_docs = {"0001-26-1": PROSPECTUS, "0001-26-2": GROWTH_NOTE}
+_asked = []
+
+_real_load = server.load_document
+server.load_document = lambda cik, accession, document=None: (
+    _asked.append((accession, document)) or
+    {"accession": accession, "document": "primary.htm", "chars": len(_docs[accession]),
+     "text": _docs[accession], "document_url": "u"})
+try:
+    scan = server.scan_availability(
+        [{"cik": "1", "accession": "0001-26-1", "issuer": "A",
+          "document": "exfilingfees.htm"},
+         {"cik": "1", "accession": "0001-26-2", "issuer": "B",
+          "document": "exfilingfees.htm"}],
+        ["coupon_barrier_pct", "buffer_pct", "cusip", "underlyings"])
+finally:
+    server.load_document = _real_load
+
+check("the scan reads the PRIMARY document, never the hit's matched file",
+      all(document is None for _, document in _asked))
+by_acc = {r["accession"]: r for r in scan["rows"]}
+check("a field the filing carries reads present",
+      by_acc["0001-26-1"]["present"]["coupon_barrier_pct"] == "present")
+check("a field that note type lacks reads absent, not missing",
+      by_acc["0001-26-1"]["present"]["buffer_pct"] == "absent")
+check("the other note type is the mirror image",
+      by_acc["0001-26-2"]["present"]["buffer_pct"] == "present"
+      and by_acc["0001-26-2"]["present"]["coupon_barrier_pct"] == "absent")
+check("a field with no spec anchors reads untestable rather than absent",
+      by_acc["0001-26-1"]["present"]["underlyings"] == "untestable")
+
+summ = {s["field"]: s for s in scan["summary"]}
+check("a field in every scanned filing is classed universal here",
+      summ["cusip"]["class"] == "universal" and summ["cusip"]["rate"] == 1.0)
+check("a field in half of them is classed product-specific",
+      summ["buffer_pct"]["class"] == "product-specific"
+      and summ["buffer_pct"]["present"] == 1)
+check("untestable fields are excluded from the rate, not scored zero",
+      summ["underlyings"]["rate"] is None and summ["underlyings"]["testable"] == 0)
+
+# --------------------------------------------------------------------------- #
 section("cues -- where to look before any model runs")
 # --------------------------------------------------------------------------- #
 

@@ -998,6 +998,118 @@ def preview_document(params, run_id=None):
             "located": sum(1 for p in out if p["span"]), "total": len(out)}
 
 
+def scan_availability(targets, fields, run_id=None):
+    """Which fields does each of these filings actually CARRY?
+
+    No model: this is a vocabulary check per field per filing (does any of the
+    field's spec anchors occur in the text), so it costs one cached fetch per
+    filing and runs in seconds rather than the ~40s/filing extraction takes.
+    That ordering is the point -- you find out a query returns growth notes
+    with no coupon terms BEFORE spending an hour extracting coupon fields from
+    them.
+
+    The per-field summary reports how universal a field is ACROSS the scanned
+    filings. That is a measurement of this sample, not a statement about what
+    any rule requires: "present in 100% of 20 filings" is evidence, not a legal
+    determination, and it is labelled as such.
+    """
+    import field_spec
+    spec = field_spec.load_spec(SCRUBBER / "field_specs" / "424b2_structured_note.json")
+    names = [f for f in (fields or [f.name for f in spec.fields]) if spec.field(f)]
+
+    rows, t0 = [], time.time()
+    for meta in targets:
+        if run_id and RUNS.stop_requested(run_id):
+            RUNS.log(run_id, "scan stopped -- filings already scanned are kept")
+            break
+        try:
+            # Deliberately NOT meta["document"]: a full-text hit names the file
+            # the phrase matched in, which is routinely the 300-character
+            # EX-FILING FEES exhibit rather than the prospectus. Scanning that
+            # for note terms reports every field absent -- correctly, and
+            # uselessly. Analysis always reads the primary document.
+            doc = load_document(meta.get("cik"), meta.get("accession"))
+        except Exception as exc:
+            rows.append({"accession": meta.get("accession"), "issuer": meta.get("issuer"),
+                         "filed": meta.get("file_date") or meta.get("sample_day"),
+                         "error": f"{type(exc).__name__}: {exc}", "present": {}})
+            if run_id:
+                RUNS.tick_field(run_id, meta.get("accession"), "fetch", time.time() - t0)
+            continue
+
+        low = doc["text"].lower()
+        present = {}
+        for name in names:
+            got = field_vocabulary_present(low, spec.field(name))
+            present[name] = ("untestable" if got is None else
+                             "present" if got else "absent")
+        rows.append({
+            "accession": doc["accession"], "document": doc["document"],
+            "issuer": meta.get("issuer"),
+            "filed": meta.get("file_date") or meta.get("sample_day"),
+            "chars": doc["chars"], "present": present,
+            "document_url": doc.get("document_url"),
+        })
+        if run_id:
+            RUNS.update(run_id, rows=list(rows))
+            RUNS.tick_field(run_id, doc["accession"], "scan", time.time() - t0)
+
+    scanned = [r for r in rows if not r.get("error")]
+    summary = []
+    for name in names:
+        testable = [r for r in scanned if r["present"].get(name) != "untestable"]
+        got = sum(1 for r in testable if r["present"][name] == "present")
+        rate = (got / len(testable)) if testable else None
+        summary.append({
+            "field": name, "present": got, "testable": len(testable),
+            "rate": round(rate, 3) if rate is not None else None,
+            # Measured across THIS sample, not a claim about what is mandated.
+            # A coin flip is not "most": 50% means the field tracks the product
+            # type, which is the thing this table exists to reveal.
+            "class": (None if rate is None else
+                      "universal" if rate >= 0.95 else
+                      "common" if rate >= 0.6 else
+                      "product-specific"),
+        })
+    summary.sort(key=lambda s: (-(s["rate"] or 0), s["field"]))
+    return {"rows": rows, "summary": summary, "fields": names,
+            "scanned": len(scanned), "failed": len(rows) - len(scanned)}
+
+
+def start_availability(params):
+    """Background scan so the browser gets a progress bar and a stop."""
+    targets, provenance = resolve_targets(params)
+    if not targets:
+        raise ValueError("nothing to scan -- the query returned no filings")
+    fields = params.get("fields")
+    run_id = RUNS.create("availability", {**provenance, "limit": len(targets),
+                                           "fields": ["scan"]})
+    RUNS.update(run_id, rows=[])
+    # One tick per FILING here (the unit of work is a fetch, not a field).
+    RUNS.update(run_id, progress={**RUNS.get(run_id)["progress"],
+                                   "fields_total": len(targets),
+                                   "total": len(targets)})
+
+    def worker():
+        try:
+            RUNS.update(run_id, status="running")
+            RUNS.log(run_id, f"scanning {len(targets)} filing(s) for field availability")
+            result = scan_availability(targets, fields, run_id=run_id)
+            RUNS.update(run_id,
+                        status="stopped" if RUNS.stop_requested(run_id) else "done",
+                        finished_at=utcnow(), rows=result["rows"],
+                        summary_fields=result["summary"], scanned=result["scanned"])
+            RUNS.log(run_id, f"scanned {result['scanned']} filing(s), "
+                             f"{result['failed']} failed")
+        except Exception as exc:
+            RUNS.update(run_id, status="error", finished_at=utcnow(),
+                        error=f"{type(exc).__name__}: {exc}")
+            RUNS.log(run_id, traceback.format_exc().strip().splitlines()[-1])
+
+    threading.Thread(target=worker, daemon=True, name=f"scan-{run_id}").start()
+    return run_id
+
+
 def start_preview(params):
     """Run a check in the background so the browser can watch it.
 
@@ -1690,6 +1802,11 @@ class Handler(SimpleHTTPRequestHandler):
             ok = RUNS.request_stop(m.group(1))
             return self._json({"stopping": ok, "run_id": m.group(1)},
                               200 if ok else 409)
+        if path == "/api/tools/edgar-scrubber/availability":
+            try:
+                return self._json({"run_id": start_availability(params)}, 202)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
         if path == "/api/tools/edgar-scrubber/preview":
             try:
                 # `sync` blocks and returns the proposals directly (handy from a
