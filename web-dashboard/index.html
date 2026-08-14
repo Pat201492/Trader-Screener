@@ -2364,6 +2364,630 @@ async function renderEducation(){
 }
 
 // ── TOOLS ──────────────────────────────────────────────────
+// A tool card used to be a LINK: clicking it navigated to a README on GitHub,
+// so "open the tool" meant "go read a repo and install it by hand". When
+// `tools/server.py` is serving this page, the same card gets a Run button and
+// the extraction renders in place. The runner is probed once at load; without
+// it the cards degrade to docs-only (which is all file:// or GitHub Pages can
+// offer) instead of showing a button that cannot work.
+let RUNNER=null;
+async function probeRunner(){
+  if(DEMO_ON){ RUNNER=null; return null; }
+  try{
+    const r=await fetch('/api/health');
+    RUNNER = r.ok ? await r.json() : null;
+  }catch(e){ RUNNER=null; }
+  return RUNNER;
+}
+// Docs open INSIDE the app when the runner can serve them (rendered markdown,
+// no network, no install). Falls back to the manifest's GitHub link otherwise.
+function docHref(t){
+  if(RUNNER && t.local_doc) return `/api/docs?path=${encodeURIComponent(t.local_doc)}`;
+  return (t.doc_link && t.doc_link!=='#') ? t.doc_link : null;
+}
+function runnerBlockers(){
+  if(!RUNNER) return ['tool runner not running — start it with: python tools/server.py'];
+  const out=[];
+  if(!RUNNER.ollama || !RUNNER.ollama.ok) out.push(`local model not ready — ${(RUNNER.ollama&&RUNNER.ollama.detail)||'ollama unreachable'}`);
+  if(!RUNNER.edgar_user_agent) out.push('EDGAR_USER_AGENT not set — the SEC requires a contactable "<name> <email>" (see SETUP.md)');
+  return out;
+}
+function esc(s){ return String(s==null?'':s).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
+function fmtValue(v){
+  if(v===null||v===undefined) return '<span class="muted">null</span>';
+  if(Array.isArray(v)) return esc(v.join(', '));
+  return esc(v);
+}
+// A flag is the point, not noise: `gated_no_claude` means the confidence gate
+// wanted to escalate and could not, so the value is UNRESOLVED — it must not
+// read the same as a clean extraction.
+function flagPills(flags){
+  if(!flags||!flags.length) return '<span style="color:var(--green);font-size:11px">clean</span>';
+  return flags.map(f=>`<span title="${esc(f)}" style="background:#e3b3411a;color:#e3b341;padding:1px 5px;border-radius:4px;font-size:10.5px;margin-right:3px">${esc(f)}</span>`).join('');
+}
+function fieldsTable(fields){
+  if(!fields||!fields.length) return '<div class="muted" style="font-size:12px">no fields</div>';
+  return `<table style="margin-top:6px">
+    <tr><th>Field</th><th>Value</th><th>Unit</th><th>Rung</th><th class="num">Conf</th><th>Flags</th></tr>
+    ${fields.map(f=>`<tr>
+      <td>${esc(f.field)}</td>
+      <td>${f.error?`<span style="color:var(--red)">${esc(f.error)}</span>`:fmtValue(f.value)}</td>
+      <td class="muted">${esc(f.unit||'')}</td>
+      <td class="muted">${esc(f.rung||(f.provenance||'').split(':')[0]||'')}</td>
+      <td class="num">${f.confidence==null?'':Number(f.confidence).toFixed(2)}</td>
+      <td>${flagPills(f.flags)}</td></tr>`).join('')}
+  </table>`;
+}
+
+// ── the scrubber's own query surface ────────────────────────
+// Discovery and extraction are separate steps on purpose. A canned query means
+// the tool answers one question; a form means you ask your own, see what EDGAR
+// actually returns, and only then spend model time on the filings you picked.
+let SEARCH={hits:[],selected:new Set(),fields:null,defaults:[],query:null};
+
+async function openToolPanel(toolId){
+  const panel=document.getElementById('toolPanel');
+  panel.style.display='block';
+  panel.innerHTML='<div class="loading">loading the query form…</div>';
+  let presets=[],fieldInfo={fields:[],default:[]};
+  try{
+    [presets,fieldInfo]=await Promise.all([
+      fetch('/api/tools/edgar-scrubber/queries').then(r=>r.json()),
+      fetch('/api/tools/edgar-scrubber/fields').then(r=>r.json())]);
+  }catch(e){
+    panel.innerHTML=`<div class="err">Could not load the tool: ${esc(e.message)}</div>`;
+    return;
+  }
+  SEARCH={hits:[],selected:new Set(),fields:fieldInfo.fields,defaults:fieldInfo.default,query:null};
+  const inp='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:6px 9px;font-size:13px';
+  panel.innerHTML=`
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+        <div class="name">EDGAR full-text search</div>
+        <span class="muted" style="font-size:11.5px">search first, then extract only what you pick</span>
+        <button style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer"
+                onclick="closeToolPanel()">close</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-top:10px">
+        <label style="font-size:11.5px;color:var(--muted)">Phrase (exact match in quotes)
+          <input id="sq_q" style="${inp};width:100%;margin-top:3px" placeholder='"contingent coupon"'></label>
+        <label style="font-size:11.5px;color:var(--muted)">Form types (comma separated)
+          <input id="sq_forms" value="424B2" style="${inp};width:100%;margin-top:3px" placeholder="424B2,424B5"></label>
+        <label style="font-size:11.5px;color:var(--muted)">Filed from
+          <input id="sq_start" type="date" style="${inp};width:100%;margin-top:3px"></label>
+        <label style="font-size:11.5px;color:var(--muted)">Filed to
+          <input id="sq_end" type="date" style="${inp};width:100%;margin-top:3px"></label>
+        <label style="font-size:11.5px;color:var(--muted)">CIK(s) — optional filter
+          <input id="sq_ciks" style="${inp};width:100%;margin-top:3px" placeholder="0000019617"></label>
+        <label style="font-size:11.5px;color:var(--muted)">Max hits
+          <input id="sq_max" type="number" min="1" max="100" value="25" style="${inp};width:100%;margin-top:3px"></label>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;margin-top:10px;flex-wrap:wrap;font-size:12px">
+        <label style="display:flex;gap:5px;align-items:center;cursor:pointer">
+          <input type="radio" name="sq_mode" value="flat" checked onchange="toggleMode()"> one search</label>
+        <label style="display:flex;gap:5px;align-items:center;cursor:pointer"
+               title="Sample a fixed number of filings on each day that has any, so an average over the series is an average over time rather than over filing volume.">
+          <input type="radio" name="sq_mode" value="daily" onchange="toggleMode()"> by day (time series)</label>
+        <span id="dailyOpts" style="display:none;gap:8px;align-items:center">
+          <label style="color:var(--muted)">filings per day
+            <input id="sq_perday" type="number" min="1" max="100" value="5" oninput="estimateDaily()" style="${inp};width:70px;margin-left:4px"></label>
+          <label style="color:var(--muted)">days back (with filings)
+            <input id="sq_days" type="number" min="1" max="365" value="90" oninput="estimateDaily()" style="${inp};width:80px;margin-left:4px"></label>
+          <span id="dailyEstimate" class="muted"></span>
+        </span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap">
+        <button onclick="runSearch()" style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">Search EDGAR</button>
+        <span class="muted" style="font-size:11.5px">preset:</span>
+        <select id="sq_preset" onchange="applyPreset(this.value)" style="${inp};padding:5px 8px">
+          <option value="">—</option>
+          ${presets.map((p,i)=>`<option value="${i}">${esc(p.id)}</option>`).join('')}
+        </select>
+        <span id="searchNote" class="muted" style="font-size:11.5px"></span>
+      </div>
+      <details style="margin-top:12px">
+        <summary class="muted" style="cursor:pointer;font-size:12px">fields to extract (<span id="fieldCount">${fieldInfo.default.length}</span> of ${fieldInfo.fields.length})</summary>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:4px;margin-top:8px">
+          ${fieldInfo.fields.map(f=>`<label style="font-size:12px;display:flex;gap:6px;align-items:center" title="${esc(f.description||'')}">
+            <input type="checkbox" class="fieldbox" value="${esc(f.name)}" ${fieldInfo.default.includes(f.name)?'checked':''} onchange="countFields()">
+            <span>${esc(f.name)}</span>${f.unit?`<span class="muted" style="font-size:10.5px">${esc(f.unit)}</span>`:''}</label>`).join('')}
+        </div>
+      </details>
+      <div id="searchResults"></div>
+    </div>
+    <div id="docPanel" style="display:none"></div>
+    <div id="runPanel" style="display:none"></div>`;
+  window.__PRESETS__=presets;
+}
+function closeToolPanel(){
+  stopPolling();
+  const p=document.getElementById('toolPanel');
+  if(p){ p.style.display='none'; p.innerHTML=''; }
+}
+function applyPreset(idx){
+  const p=(window.__PRESETS__||[])[idx];
+  if(!p) return;
+  document.getElementById('sq_q').value=p.q||'';
+  document.getElementById('sq_forms').value=(p.forms||[]).join(',');
+  document.getElementById('sq_start').value=p.startdt||'';
+  document.getElementById('sq_end').value=p.enddt||'';
+  document.getElementById('sq_ciks').value=(p.ciks||[]).join(',');
+}
+function countFields(){
+  document.getElementById('fieldCount').textContent=
+    document.querySelectorAll('.fieldbox:checked').length;
+}
+function chosenFields(){
+  return Array.from(document.querySelectorAll('.fieldbox:checked')).map(b=>b.value);
+}
+function searchMode(){
+  const r=document.querySelector('input[name="sq_mode"]:checked');
+  return r?r.value:'flat';
+}
+function toggleMode(){
+  const daily=searchMode()==='daily';
+  document.getElementById('dailyOpts').style.display=daily?'inline-flex':'none';
+  if(daily) estimateDaily();
+}
+// 90 days x 5/day is 450 filings and hours of local model time. Say so before
+// the click, not after.
+function estimateDaily(){
+  const n=(parseInt(document.getElementById('sq_perday').value,10)||0)*
+          (parseInt(document.getElementById('sq_days').value,10)||0);
+  const mins=Math.round(n*40/60);
+  document.getElementById('dailyEstimate').textContent=
+    `= up to ${n} filings · ~${mins<90?mins+' min':(mins/60).toFixed(1)+' h'} to extract`;
+}
+async function runSearch(){
+  const daily=searchMode()==='daily';
+  const body={
+    mode:daily?'daily':'flat',
+    q:document.getElementById('sq_q').value.trim(),
+    forms:document.getElementById('sq_forms').value.trim(),
+    startdt:document.getElementById('sq_start').value||null,
+    enddt:document.getElementById('sq_end').value||null,
+    ciks:document.getElementById('sq_ciks').value.trim(),
+    max_results:parseInt(document.getElementById('sq_max').value,10)||25,
+  };
+  if(daily){
+    body.per_day=parseInt(document.getElementById('sq_perday').value,10)||5;
+    body.days=parseInt(document.getElementById('sq_days').value,10)||90;
+    body.startdt=document.getElementById('sq_start').value||null;
+  }
+  const out=document.getElementById('searchResults');
+  out.innerHTML=daily
+    ? '<div class="loading">walking back day by day — one request per day with filings…</div>'
+    : '<div class="loading">searching EDGAR…</div>';
+  let data;
+  try{
+    const r=await fetch('/api/tools/edgar-scrubber/search',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    data=await r.json();
+    if(!r.ok) throw new Error(data.error||`HTTP ${r.status}`);
+  }catch(e){
+    out.innerHTML=`<div class="err">${esc(e.message)}</div>`;
+    return;
+  }
+  SEARCH.hits=data.hits; SEARCH.selected=new Set(data.hits.map((h,i)=>i));
+  SEARCH.query=data.query; SEARCH.days=data.days||null; SEARCH.url=data.search_url;
+  // The efts total saturates at 10000 (#100) — say "at least" rather than
+  // print a count that is not one.
+  document.getElementById('searchNote').innerHTML= data.mode==='daily'
+    ? `<strong>${data.days_covered}</strong> day(s) with filings · ${data.returned} sampled `
+      +`(${data.per_day}/day) · ${data.days_scanned} day(s) scanned, ${data.days_empty} empty`
+    : `${data.saturated?'at least ':''}<strong>${data.total}</strong> filing(s) match · showing ${data.returned}`;
+  renderHits();
+}
+function renderHits(){
+  const out=document.getElementById('searchResults');
+  if(!SEARCH.hits.length){
+    out.innerHTML='<div class="muted" style="margin-top:12px;font-size:12.5px">No filings matched. Widen the dates, drop the CIK filter, or loosen the phrase.</div>';
+    return;
+  }
+  const dayRows=SEARCH.days
+    ? `<details style="margin:8px 0"><summary class="muted" style="cursor:pointer;font-size:12px">per-day coverage (${SEARCH.days.length} days)</summary>
+       <div style="max-height:150px;overflow:auto;margin-top:6px"><table>
+       <tr><th>Day</th><th class="num">Sampled</th><th class="num">Available that day</th></tr>
+       ${SEARCH.days.map(d=>`<tr><td>${esc(d.day)}</td><td class="num">${d.sampled}</td>
+         <td class="num">${d.saturated?'10000+':d.available}</td></tr>`).join('')}
+       </table></div></details>` : '';
+  out.innerHTML=`
+    <div style="display:flex;align-items:center;gap:10px;margin:14px 0 6px;flex-wrap:wrap">
+      <div style="font-weight:600;font-size:13px">Results</div>
+      <button onclick="toggleAllHits()" style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:3px 9px;font-size:11.5px;cursor:pointer">select / clear all</button>
+      ${SEARCH.url?`<a href="${SEARCH.url}" target="_blank" rel="noopener" style="font-size:11.5px;color:var(--accent)">open this search on EDGAR ↗</a>`:''}
+      <button onclick="previewFirst()" title="Dry run on the first filing: see every value it would pull, highlighted in the text it came from. Nothing is written to the store."
+              style="background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:4px 11px;font-size:12px;cursor:pointer">
+        check the first filing</button>
+      <button id="extractBtn" onclick="extractSelected()" style="margin-left:auto;background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">
+        Extract ${SEARCH.selected.size} selected</button>
+    </div>
+    ${dayRows}
+    <div style="max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:6px">
+    <table><tr><th></th><th>Filed</th><th>Form</th><th>Issuer</th><th>Accession</th><th>Read</th></tr>
+    ${SEARCH.hits.map((h,i)=>`<tr>
+      <td><input type="checkbox" ${SEARCH.selected.has(i)?'checked':''} onchange="toggleHit(${i},this.checked)"></td>
+      <td class="muted">${esc(h.file_date||h.sample_day||'')}</td>
+      <td class="muted">${esc(h.form||'')}</td>
+      <td>${esc(h.issuer||'')}${(h.tickers&&h.tickers.length)?` <span class="muted">(${esc(h.tickers.join(', '))})</span>`:''}</td>
+      <td class="muted" style="font-family:ui-monospace,Consolas,monospace;font-size:11.5px">${esc(h.accession)}</td>
+      <td style="white-space:nowrap">
+        <button onclick="openDocument(${i})" style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:2px 8px;font-size:11.5px;cursor:pointer">open + highlight</button>
+        ${h.document_url?`<a href="${h.document_url}" target="_blank" rel="noopener" style="margin-left:6px;font-size:11.5px;color:var(--accent)">EDGAR ↗</a>`:''}
+      </td></tr>`).join('')}
+    </table></div>
+    <div class="muted" style="font-size:11.5px;margin-top:6px">Extraction runs locally, ~40s per filing for 9 fields.</div>`;
+}
+
+// ── document reader + hand-marked spans ─────────────────────
+// The model's spans are a proposal; this is where a human overrules them. A
+// marked span is written as a CORRECT verdict and a `corrected` exemplar, which
+// is exactly what the ladder reads on rung 3 — so highlighting here is training
+// data, not a note to self (#105/#106).
+let DOC=null;
+// Validate before committing: dry-run the ladder on ONE filing and show every
+// value it would pull, highlighted in the sentence it came from. Nothing is
+// written to the output store, so this costs one filing's model time and
+// answers "is this query pulling the right thing" before 450 of them.
+async function previewFirst(){
+  const first=Array.from(SEARCH.selected).sort((a,b)=>a-b)[0];
+  await openDocument(first===undefined?0:first, true);
+}
+async function runPreview(){
+  if(!DOC) return;
+  const fields=chosenFields();
+  DOC.previewing=true; renderDocPanel(true);
+  try{
+    const r=await fetch('/api/tools/edgar-scrubber/preview',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({cik:DOC.cik,accession:DOC.accession,document:DOC.document,
+                           issuer:DOC.issuer,fields})});
+    const res=await r.json();
+    if(!r.ok) throw new Error(res.error||`HTTP ${r.status}`);
+    DOC.proposals=res.proposals; DOC.located=res.located;
+  }catch(e){ DOC.previewError=e.message; }
+  DOC.previewing=false;
+  renderDocPanel(true);
+}
+async function acceptProposal(idx){
+  const p=DOC.proposals[idx];
+  if(!p.span){ alert('No span to accept — highlight the right text by hand instead.'); return; }
+  await fetch('/api/tools/edgar-scrubber/annotate',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({accession:DOC.accession,document:DOC.document,issuer:DOC.issuer,
+                         field:p.field,value:p.value,span:p.span,span_text:p.span_text,
+                         accepted:true})});
+  await loadAnnotations();
+}
+async function openDocument(i,withPreview){
+  const hit=SEARCH.hits[i];
+  const panel=document.getElementById('docPanel');
+  panel.style.display='block';
+  panel.innerHTML='<div class="loading">fetching the filing…</div>';
+  panel.scrollIntoView({behavior:'smooth',block:'start'});
+  try{
+    const qs=new URLSearchParams({cik:hit.cik,accession:hit.accession});
+    if(hit.document) qs.set('document',hit.document);
+    const doc=await (await fetch('/api/tools/edgar-scrubber/document?'+qs)).json();
+    if(doc.error) throw new Error(doc.error);
+    DOC={...doc,issuer:hit.issuer,filed:hit.file_date||hit.sample_day,
+         annotations:[],find:'',findHits:[],proposals:null,previewing:false};
+    await loadAnnotations();
+    if(withPreview) runPreview();
+  }catch(e){
+    panel.innerHTML=`<div class="err">Could not open the filing: ${esc(e.message)}</div>`;
+  }
+}
+async function loadAnnotations(){
+  const qs=new URLSearchParams({accession:DOC.accession,document:DOC.document});
+  try{ DOC.annotations=await (await fetch('/api/tools/edgar-scrubber/annotations?'+qs)).json(); }
+  catch(e){ DOC.annotations=[]; }
+  renderDocPanel();
+}
+function closeDoc(){
+  DOC=null;
+  const p=document.getElementById('docPanel');
+  if(p){ p.style.display='none'; p.innerHTML=''; }
+}
+// Patch the text pane in place. Re-rendering the whole panel here would destroy
+// the input element mid-keystroke and take focus with it, so only one character
+// ever landed before the field went dead.
+function docFind(){
+  DOC.find=document.getElementById('docFind').value;
+  const pane=document.getElementById('docText');
+  const at=pane.scrollTop;
+  pane.innerHTML=docHTML();
+  pane.scrollTop=at;
+  const note=document.getElementById('findCount');
+  if(note) note.textContent=DOC.findHits.length?`${DOC.findHits.length} match(es)`:'';
+}
+// Marks + find matches are rendered by splicing the ORIGINAL text, so the
+// pane's textContent stays character-identical to what the server sent — the
+// offsets a selection produces are therefore the offsets the store gets.
+function docHTML(){
+  const text=DOC.text, spans=[];
+  DOC.annotations.forEach(a=>{ if(a.span) spans.push({s:a.span[0],e:a.span[1],cls:'ann',label:a.field}); });
+  (DOC.proposals||[]).forEach(p=>{ if(p.span) spans.push({s:p.span[0],e:p.span[1],cls:'prop',label:p.field+' (proposed)'}); });
+  const needle=(DOC.find||'').trim();
+  if(needle.length>=2){
+    const low=text.toLowerCase(), n=needle.toLowerCase();
+    let at=low.indexOf(n), count=0;
+    DOC.findHits=[];
+    while(at>=0 && count<400){
+      DOC.findHits.push(at);
+      spans.push({s:at,e:at+n.length,cls:'find'});
+      at=low.indexOf(n,at+n.length); count++;
+    }
+  } else { DOC.findHits=[]; }
+  spans.sort((a,b)=>a.s-b.s);
+  let html='', pos=0;
+  spans.forEach(sp=>{
+    if(sp.s<pos) return;                       // overlapping marks: first wins
+    html+=esc(text.slice(pos,sp.s));
+    const style=sp.cls==='ann'
+      ? 'background:#2f81f733;border-bottom:2px solid var(--accent);border-radius:2px'
+      : sp.cls==='prop'
+      ? 'background:#3fb95033;border-bottom:2px dashed var(--green);border-radius:2px'
+      : 'background:#e3b34155;border-radius:2px';
+    html+=`<mark id="${sp.cls==='ann'?'ann-'+esc(sp.label):''}" title="${esc(sp.label||'match')}" style="color:inherit;${style}">${esc(text.slice(sp.s,sp.e))}</mark>`;
+    pos=sp.e;
+  });
+  html+=esc(text.slice(pos));
+  return html;
+}
+function renderDocPanel(keepScroll){
+  const panel=document.getElementById('docPanel');
+  const pane=document.getElementById('docText');
+  const scroll=keepScroll&&pane?pane.scrollTop:0;
+  const fields=(SEARCH.fields||[]).map(f=>f.name);
+  panel.innerHTML=`
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="name">${esc(DOC.issuer||'')} · ${esc(DOC.document)}</div>
+        <span class="muted" style="font-size:11.5px">${esc(DOC.accession)} · ${DOC.chars.toLocaleString()} chars · ${DOC.sections.length} sections</span>
+        <a href="${DOC.document_url}" target="_blank" rel="noopener" style="font-size:11.5px;color:var(--accent)">this document on EDGAR ↗</a>
+        <a href="${DOC.filing_url}" target="_blank" rel="noopener" style="font-size:11.5px;color:var(--accent)">filing index ↗</a>
+        <button style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer" onclick="closeDoc()">close</button>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap">
+        <input id="docFind" value="${esc(DOC.find||'')}" placeholder="find in document…" oninput="docFind()"
+               style="background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:5px 9px;font-size:12.5px;width:240px">
+        <span id="findCount" class="muted" style="font-size:11.5px">${DOC.findHits.length?DOC.findHits.length+' match(es)':''}</span>
+        <button onclick="jumpToMatch(1)" style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:3px 9px;font-size:11.5px;cursor:pointer">next match</button>
+        <button onclick="runPreview()" ${DOC.previewing?'disabled':''}
+                title="Dry run: what would the extractor pull from THIS filing, and from where? Nothing is written to the store."
+                style="background:transparent;border:1px solid var(--green);color:var(--green);border-radius:5px;padding:3px 10px;font-size:11.5px;cursor:pointer">
+          ${DOC.previewing?'checking…':(DOC.proposals?'re-check':'check what it would pull')}</button>
+        <span class="muted" style="font-size:11.5px;margin-left:auto">select any text below, then label it</span>
+      </div>
+      ${DOC.previewError?`<div class="err">${esc(DOC.previewError)}</div>`:''}
+      ${DOC.proposals?`<div class="muted" style="font-size:11.5px;margin-bottom:8px">
+        <span style="color:var(--green)">■</span> proposed by the extractor (${DOC.located}/${DOC.proposals.length} located in the text) ·
+        <span style="color:var(--accent)">■</span> confirmed by you (${DOC.annotations.length})</div>`:''}
+      <div style="display:grid;grid-template-columns:1fr 280px;gap:12px">
+        <div id="docText" onmouseup="onDocSelect()"
+             style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;
+                    height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+                    font:12.5px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace">${docHTML()}</div>
+        <div>
+          <div id="markBox" style="display:none;border:1px solid var(--accent);border-radius:6px;padding:10px;margin-bottom:10px">
+            <div class="muted" style="font-size:11px">selected text</div>
+            <div id="markText" style="font-size:12px;max-height:70px;overflow:auto;margin:4px 0 8px"></div>
+            <label class="muted" style="font-size:11px">field
+              <select id="markField" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:4px;font-size:12px;margin:3px 0 6px">
+                ${fields.map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join('')}
+              </select></label>
+            <label class="muted" style="font-size:11px">value stored
+              <input id="markValue" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:4px;font-size:12px;margin:3px 0 8px"></label>
+            <button onclick="saveMark()" style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:5px;padding:5px 10px;font-size:12px;cursor:pointer;width:100%">Save highlight</button>
+          </div>
+          ${DOC.proposals?`<div style="font-weight:600;font-size:12.5px;margin-bottom:6px">What it would pull</div>
+            <div style="max-height:230px;overflow:auto;margin-bottom:12px">
+            ${DOC.proposals.map((p,idx)=>{
+              const confirmed=DOC.annotations.some(a=>a.field===p.field);
+              return `<div style="border:1px solid ${p.span?'var(--border)':'var(--red)'};border-radius:6px;padding:7px;margin-bottom:6px;font-size:12px">
+                <div style="display:flex;gap:6px;align-items:center">
+                  <strong>${esc(p.field)}</strong>
+                  ${confirmed?'<span style="color:var(--green);font-size:10.5px">confirmed</span>':''}
+                  ${p.span?`<button onclick="jumpTo(${p.span[0]})" style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:4px;font-size:10.5px;padding:1px 6px;cursor:pointer">go</button>
+                    <button onclick="acceptProposal(${idx})" style="background:transparent;border:1px solid var(--green);color:var(--green);border-radius:4px;font-size:10.5px;padding:1px 6px;cursor:pointer">✓</button>`
+                   :'<span style="margin-left:auto;color:var(--red);font-size:10.5px">no span found</span>'}
+                </div>
+                <div>${fmtValue(p.value)}${p.unit?` <span class="muted">${esc(p.unit)}</span>`:''}</div>
+                ${p.span?`<div class="muted" style="font-size:10.5px">located by ${esc(p.span_source)} · chars ${p.span.join('–')}</div>`
+                        :'<div class="muted" style="font-size:10.5px">the value is not stated anywhere in this text — treat it as unverified</div>'}
+                ${p.flags&&p.flags.length?`<div>${flagPills(p.flags)}</div>`:''}
+              </div>`;}).join('')}
+            </div>`:''}
+          <div style="font-weight:600;font-size:12.5px;margin-bottom:6px">Marked spans (${DOC.annotations.length})</div>
+          ${DOC.annotations.length?DOC.annotations.map(a=>`
+            <div style="border:1px solid var(--border);border-radius:6px;padding:7px;margin-bottom:6px;font-size:12px">
+              <div style="display:flex;gap:6px;align-items:center">
+                <strong>${esc(a.field)}</strong>
+                <button onclick="jumpTo(${a.span?a.span[0]:0})" style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:4px;font-size:10.5px;padding:1px 6px;cursor:pointer">go</button>
+                <button onclick="removeMark('${esc(a.field)}')" style="background:transparent;border:1px solid var(--border);color:var(--red);border-radius:4px;font-size:10.5px;padding:1px 6px;cursor:pointer">×</button>
+              </div>
+              <div class="muted" style="word-break:break-word">${esc(String(a.value===null?'':a.value)).slice(0,90)}</div>
+              <div class="muted" style="font-size:10.5px">chars ${a.span?a.span.join('–'):'?'}</div>
+            </div>`).join('')
+            :'<div class="muted" style="font-size:11.5px">Nothing marked yet. Highlight the text that holds a term and label it — it is stored as ground truth and fed to the model as a corrected exemplar next run.</div>'}
+        </div>
+      </div>
+    </div>`;
+  if(keepScroll){ const p2=document.getElementById('docText'); if(p2) p2.scrollTop=scroll; }
+}
+let FIND_AT=-1;
+function jumpToMatch(step){
+  if(!DOC||!DOC.findHits.length) return;
+  FIND_AT=(FIND_AT+step+DOC.findHits.length)%DOC.findHits.length;
+  jumpTo(DOC.findHits[FIND_AT]);
+  const note=document.getElementById('findCount');
+  if(note) note.textContent=`${FIND_AT+1} of ${DOC.findHits.length}`;
+}
+function jumpTo(offset){
+  // Scroll proportionally — good enough to land on the span in a 65k-char pane.
+  const pane=document.getElementById('docText');
+  pane.scrollTop=Math.max(0,(offset/DOC.text.length)*pane.scrollHeight-120);
+}
+function onDocSelect(){
+  const pane=document.getElementById('docText');
+  const sel=window.getSelection();
+  const box=document.getElementById('markBox');
+  if(!sel||sel.isCollapsed||!pane.contains(sel.anchorNode)){ box.style.display='none'; return; }
+  const r=sel.getRangeAt(0);
+  const pre=document.createRange();
+  pre.selectNodeContents(pane);
+  pre.setEnd(r.startContainer,r.startOffset);
+  const start=pre.toString().length;
+  const picked=r.toString();
+  if(!picked.trim()){ box.style.display='none'; return; }
+  DOC.pending={start,end:start+picked.length,text:picked};
+  document.getElementById('markText').textContent=picked.length>200?picked.slice(0,200)+'…':picked;
+  // Prefill the value with the number if the selection is numeric-ish, else the
+  // text itself — the stored value is what the field is worth, not necessarily
+  // the characters that were highlighted.
+  const num=picked.replace(/[,$]/g,'').match(/-?\d+(\.\d+)?/);
+  document.getElementById('markValue').value=(num&&picked.length<25)?num[0]:picked.trim();
+  box.style.display='block';
+}
+async function saveMark(){
+  if(!DOC.pending) return;
+  const body={
+    accession:DOC.accession, document:DOC.document, issuer:DOC.issuer,
+    field:document.getElementById('markField').value,
+    value:document.getElementById('markValue').value,
+    span:[DOC.pending.start,DOC.pending.end], span_text:DOC.pending.text,
+  };
+  try{
+    const r=await fetch('/api/tools/edgar-scrubber/annotate',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const res=await r.json();
+    if(!r.ok) throw new Error(res.error||`HTTP ${r.status}`);
+  }catch(e){ alert('Could not save: '+e.message); return; }
+  DOC.pending=null;
+  window.getSelection().removeAllRanges();
+  await loadAnnotations();
+}
+async function removeMark(field){
+  await fetch('/api/tools/edgar-scrubber/annotate/delete',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({accession:DOC.accession,document:DOC.document,field})});
+  await loadAnnotations();
+}
+function toggleHit(i,on){
+  if(on) SEARCH.selected.add(i); else SEARCH.selected.delete(i);
+  const b=document.getElementById('extractBtn');
+  if(b) b.textContent=`Extract ${SEARCH.selected.size} selected`;
+}
+function toggleAllHits(){
+  const all=SEARCH.selected.size===SEARCH.hits.length;
+  SEARCH.selected=all?new Set():new Set(SEARCH.hits.map((h,i)=>i));
+  renderHits();
+}
+
+let RUN_POLL=null;
+async function extractSelected(){
+  const picked=Array.from(SEARCH.selected).sort((a,b)=>a-b).map(i=>SEARCH.hits[i]);
+  const panel=document.getElementById('runPanel');
+  if(!picked.length){
+    panel.style.display='block';
+    panel.innerHTML='<div class="err">Nothing selected.</div>';
+    return;
+  }
+  const fields=chosenFields();
+  if(!fields.length){
+    panel.style.display='block';
+    panel.innerHTML='<div class="err">Pick at least one field to extract.</div>';
+    return;
+  }
+  panel.style.display='block';
+  panel.innerHTML='<div class="loading">starting extraction…</div>';
+  let res;
+  try{
+    const r=await fetch('/api/tools/edgar-scrubber/run',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({accessions:picked,fields,limit:picked.length})});
+    res=await r.json();
+    if(!r.ok) throw new Error(res.error||`HTTP ${r.status}`);
+  }catch(e){
+    panel.innerHTML=`<div class="err">Could not start the run: ${esc(e.message)}</div>`;
+    return;
+  }
+  pollRun(res.run_id);
+}
+function stopPolling(){ if(RUN_POLL){ clearInterval(RUN_POLL); RUN_POLL=null; } }
+async function pollRun(runId){
+  stopPolling();
+  const tick=async()=>{
+    let run;
+    try{ run=await (await fetch(`/api/runs/${runId}`)).json(); }
+    catch(e){ return; }
+    renderRunPanel(run);
+    if(['done','error','stopped'].includes(run.status)) stopPolling();
+  };
+  await tick();
+  RUN_POLL=setInterval(tick,1500);
+}
+function fmtDuration(s){
+  if(s==null) return '';
+  if(s<90) return `${Math.round(s)}s`;
+  const m=Math.round(s/60);
+  return m<90?`${m} min`:`${(m/60).toFixed(1)} h`;
+}
+async function stopRun(runId){
+  const r=await fetch(`/api/runs/${runId}/stop`,{method:'POST',
+    headers:{'Content-Type':'application/json'},body:'{}'});
+  const btn=document.getElementById('stopBtn');
+  if(btn){ btn.disabled=true; btn.textContent='stopping after this field…'; }
+}
+function renderRunPanel(run){
+  const panel=document.getElementById('runPanel');
+  if(!panel) { stopPolling(); return; }
+  const p=run.progress||{done:0,total:0};
+  // Percent by FIELD, not by document: a document is minutes wide, and a bar
+  // that only moves on document boundaries looks stuck.
+  const pct=p.fields_total?Math.round(100*p.fields_done/p.fields_total)
+                          :(p.total?Math.round(100*p.done/p.total):0);
+  const statusColor={queued:'var(--muted)',running:'#e3b341',done:'var(--green)',
+                     stopped:'#e3b341',error:'var(--red)'}[run.status]||'var(--muted)';
+  const live=run.status==='running'||run.status==='queued';
+  panel.innerHTML=`
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="name">Run ${esc(run.id)}</div>
+        <span style="color:${statusColor};font-weight:600;font-size:12px">${esc(run.status)}</span>
+        <span class="muted" style="font-size:12px">${p.done}/${p.total} filings · ${p.fields_done||0}/${p.fields_total||0} fields</span>
+        ${live?`<button id="stopBtn" onclick="stopRun('${esc(run.id)}')"
+             title="Finishes the field in flight, writes the document, then stops. Nothing already extracted is lost."
+             style="background:transparent;border:1px solid var(--red);color:var(--red);border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer">stop</button>`:''}
+        <button style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer"
+                onclick="stopPolling();document.getElementById('runPanel').style.display='none'">close</button>
+      </div>
+      <div style="height:8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;margin:10px 0 4px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:${statusColor};transition:width .3s"></div>
+      </div>
+      <div class="muted" style="font-size:11.5px;display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+        <span><strong>${pct}%</strong></span>
+        ${p.current?`<span>now: ${esc(p.current.field)} · ${esc(p.current.accession)}</span>`:''}
+        ${p.seconds_elapsed?`<span>elapsed ${fmtDuration(p.seconds_elapsed)}</span>`:''}
+        ${live&&p.seconds_remaining!=null?`<span>~${fmtDuration(p.seconds_remaining)} left</span>`:''}
+      </div>
+      ${run.error?`<div class="err">${esc(run.error)}</div>`:''}
+      ${run.store_run_id?`<div class="muted" style="font-size:11px">writing to local store run <code>${esc(run.store_run_id)}</code></div>`:''}
+      <details style="margin-top:8px"${run.status==='running'?' open':''}>
+        <summary class="muted" style="cursor:pointer;font-size:12px">log (${(run.log||[]).length})</summary>
+        <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:11.5px;max-height:170px;overflow:auto;margin:6px 0 0">${(run.log||[]).map(l=>esc(l.message)).join('\n')}</pre>
+      </details>
+      ${(run.documents||[]).map(d=>`
+        <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:10px">
+          <div style="font-weight:600;font-size:13px">${esc(d.issuer||'')} · ${esc(d.accession)}</div>
+          <div class="muted" style="font-size:11px">${esc(d.document||'no readable primary document')}${d.filed?` · filed ${esc(d.filed)}`:''}</div>
+          ${d.skipped?'<div class="muted" style="font-size:12px;margin-top:6px">skipped</div>':fieldsTable(d.fields)}
+        </div>`).join('')}
+      ${run.status==='running'&&!(run.documents||[]).length?'<div class="loading">extracting — the first document includes the model prefill…</div>':''}
+    </div>`;
+}
+
 function statusBadge(status){
   const colors={
     planned:{bg:'#8b949e1a',txt:'#8b949e',label:'planned'},
@@ -2397,21 +3021,68 @@ function usageAge(t){
     : `<span class="muted">used ${lab}</span>`;
 }
 
+async function loadManifest(demoFn){
+  if(DEMO_ON) return demoFn();
+  if(RUNNER){ try{ return await (await fetch('/api/tools')).json(); }catch(e){} }
+  return fetch('tools-manifest.json').then(r=>r.json());
+}
+// Buttons, not a whole-card link. A card that navigates away on any click is
+// how "open the tool" turned into "leave the app and read a repo".
+function toolActions(t){
+  const doc=docHref(t);
+  const btn=(label,attrs,style='')=>`<button ${attrs} style="border-radius:6px;padding:5px 11px;font-size:12px;cursor:pointer;${style}">${label}</button>`;
+  const parts=[];
+  if(t.runnable && RUNNER){
+    const blocked=runnerBlockers();
+    parts.push(blocked.length
+      ? btn('▶ Open', `disabled title="${esc(blocked.join(' · '))}"`,
+            'background:#21262d;border:1px solid var(--border);color:var(--muted);cursor:not-allowed')
+      : btn('▶ Open', `onclick="openToolPanel('${t.id}')"`,
+            'background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600'));
+  }
+  parts.push(doc
+    ? btn('Docs', `onclick="location.href='${doc}'"`,
+          'background:transparent;border:1px solid var(--border);color:var(--txt)')
+    : btn('No doc yet', 'disabled title="This tool has no documentation link in the manifest"',
+          'background:transparent;border:1px solid var(--border);color:var(--muted);cursor:not-allowed'));
+  return `<div style="display:flex;gap:8px;margin-top:10px;align-items:center">${parts.join('')}</div>`;
+}
+function runnerBanner(){
+  if(DEMO_ON) return `<div class="muted" style="font-size:12px;margin-bottom:12px">Demo mode — cards are catalog entries only. Serve the repo with <code>python tools/server.py</code> to actually run a tool.</div>`;
+  if(!RUNNER) return `<div class="muted" style="font-size:12px;margin-bottom:12px">Tool runner not detected. Start it with <code>python tools/server.py</code> and reload to get Run buttons.</div>`;
+  const blocked=runnerBlockers();
+  const bits=[`<span style="color:var(--green)">runner up</span>`,
+              `model <code>${esc(RUNNER.ollama.model||'?')}</code> ${RUNNER.ollama.ok?'<span style="color:var(--green)">ready</span>':'<span style="color:var(--red)">not ready</span>'}`,
+              `EDGAR UA ${RUNNER.edgar_user_agent?'<span style="color:var(--green)">set</span>':'<span style="color:var(--red)">missing</span>'}`];
+  // Resident-vs-selected profile. A model 24% on the CPU is ~10x slower and
+  // otherwise invisible — it reads as "the local model is just slow".
+  const rt=RUNNER.ollama.runtime;
+  if(rt&&rt.loaded){
+    bits.push(`ctx <code>${rt.context_length}</code>`);
+    bits.push(rt.cpu_offload_pct>0
+      ? `<span style="color:#e3b341" title="Part of the model is running on the CPU — expect roughly 10x slower extraction. Build the 8k-context model: ollama create edgar-qwen7b -f tools/edgar_scrubber/Modelfile.qwen2.5-7b">⚠ ${rt.cpu_offload_pct}% on CPU (${rt.cpu_offload_gb}GB)</span>`
+      : `<span style="color:var(--green)">fully on GPU</span>`);
+  }
+  return `<div style="font-size:12px;margin-bottom:12px;color:var(--muted)">${bits.join(' · ')}
+    ${blocked.length?`<div style="color:#e3b341;margin-top:4px">${blocked.map(esc).join('<br>')}</div>`:''}
+  </div>`;
+}
+
 async function renderToolsGather(){
   const v=document.getElementById('view');
   v.innerHTML='<div class="loading">Loading data gathering tools…</div>';
+  stopPolling();
   try{
-    const manifest=await (DEMO_ON ? Promise.resolve(window.__DEMO_TOOLS_GATHER__()) : fetch('tools-manifest.json').then(r=>r.json()));
+    const manifest=await loadManifest(window.__DEMO_TOOLS_GATHER__);
     const gather=manifest.filter(t=>t.kind==='gather');
     if(!gather.length){
       v.innerHTML='<div style="padding:30px;text-align:center"><div class="muted">No data gathering tools yet.</div></div>';
       return;
     }
-    let html='<div class="cards">';
+    let html=runnerBanner()+'<div class="cards">';
     gather.forEach(t=>{
       const lastRun=t.last_run?new Date(t.last_run).toLocaleDateString():'–';
-      const hasDoc=t.doc_link&&t.doc_link!=='#';
-      html+=`<div class="card" style="${hasDoc?'cursor:pointer;':''}transition:border-color .2s"${hasDoc?` onclick="location.href='${t.doc_link}'"`:''}>
+      html+=`<div class="card" style="transition:border-color .2s">
         <div class="name">${t.name}</div>
         <div class="muted" style="font-size:12px;line-height:1.4;margin:6px 0">${t.purpose}</div>
         <div style="margin:8px 0;display:flex;gap:6px;flex-wrap:wrap">
@@ -2422,20 +3093,102 @@ async function renderToolsGather(){
         <div class="muted" style="font-size:11px">Cadence: ${t.refresh_cadence}</div>
         ${t.output_path?`<div class="muted" style="font-size:11px">Output: ${t.output_path}</div>`:''}
         <div style="font-size:11px">Last run: <span class="muted">${lastRun}</span> · ${usageAge(t)}</div>
+        ${toolActions(t)}
       </div>`;
     });
-    html+='</div>';
+    html+='</div><div id="toolPanel" style="display:none"></div>';
     v.innerHTML=html;
   }catch(e){
     v.innerHTML=`<div class="err">Failed to load tools manifest: ${e.message}</div>`;
   }
 }
 
+// Past runs, straight out of the scrubber's local sqlite store. No model, no
+// network: this is the "what did it already extract" view, so a run's output
+// outlives the browser tab that started it.
+async function renderToolsResults(){
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Reading the local tool store…</div>';
+  stopPolling();
+  if(DEMO_ON || !RUNNER){
+    v.innerHTML=`<div style="padding:26px"><div class="muted">Stored results are read from the scrubber's local sqlite store, which needs the tool runner: <code>python tools/server.py</code>.</div></div>`;
+    return;
+  }
+  try{
+    const data=await (await fetch('/api/store/extractions')).json();
+    if(!data.exists||!data.documents.length){
+      v.innerHTML=`<div style="padding:26px"><div class="muted">Nothing extracted yet — run the EDGAR scrubber from the Data Gathering tab.</div>
+        <div class="muted" style="font-size:11px;margin-top:6px">store: <code>${esc(data.store)}</code></div></div>`;
+      return;
+    }
+    const runs=await (await fetch('/api/store/runs')).json();
+    let html=`<div class="muted" style="font-size:12px;margin-bottom:12px">
+        ${data.documents.length} document(s) across ${runs.runs.length} run(s) ·
+        store <code>${esc(data.store)}</code> · local only, never a pipeline write (#109)</div>
+      <div id="dailyView"></div>`;
+    data.documents.forEach(d=>{
+      html+=`<div class="card" style="margin-bottom:12px">
+        <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
+          <div class="name">${esc(d.accession)}</div>
+          <span class="muted" style="font-size:11px">${esc(d.document||'')}</span>
+          <span class="muted" style="font-size:11px;margin-left:auto">run ${esc(d.run_id)}${d.started_at?` · ${esc(d.started_at)}`:''}</span>
+        </div>
+        ${fieldsTable(d.fields)}
+      </div>`;
+    });
+    v.innerHTML=html;
+    renderDaily();
+  }catch(e){
+    v.innerHTML=`<div class="err">Failed to read the store: ${esc(e.message)}</div>`;
+  }
+}
+
+// The point of sampling N filings a day: a series you can average. Grouped on
+// the FILING date, not the run date, so re-extracting old filings tomorrow does
+// not move the series.
+async function renderDaily(field){
+  const box=document.getElementById('dailyView');
+  if(!box) return;
+  let data;
+  try{ data=await (await fetch('/api/store/daily'+(field?`?field=${encodeURIComponent(field)}`:''))).json(); }
+  catch(e){ return; }
+  if(!data.exists||!data.series.length){
+    box.innerHTML=`<div class="muted" style="font-size:12px;margin-bottom:14px">No dated numeric extractions yet — run a <strong>by day</strong> search to build a series.</div>`;
+    return;
+  }
+  const chosen=field||data.numeric_fields[0];
+  const rows=data.series.filter(r=>r.field===chosen);
+  const means=rows.map(r=>r.mean);
+  const lo=Math.min(...means), hi=Math.max(...means), span=(hi-lo)||1;
+  box.innerHTML=`
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <div class="name">Average over time</div>
+        <select onchange="renderDaily(this.value)" style="background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:4px 8px;font-size:12px">
+          ${data.numeric_fields.map(f=>`<option value="${esc(f)}" ${f===chosen?'selected':''}>${esc(f)}</option>`).join('')}
+        </select>
+        <span class="muted" style="font-size:11.5px">${rows.length} day(s) · mean ${(means.reduce((a,b)=>a+b,0)/means.length).toFixed(3)} · range ${lo}–${hi}</span>
+      </div>
+      <div style="display:flex;align-items:flex-end;gap:2px;height:70px;margin:12px 0 4px">
+        ${rows.map(r=>`<div title="${esc(r.day)}: ${r.mean} (n=${r.n})"
+             style="flex:1;min-width:2px;background:var(--accent);opacity:.75;height:${Math.max(3,Math.round(100*(r.mean-lo)/span))}%"></div>`).join('')}
+      </div>
+      <div class="muted" style="font-size:10.5px;display:flex;justify-content:space-between">
+        <span>${esc(rows[0].day)}</span><span>${esc(rows[rows.length-1].day)}</span></div>
+      <details style="margin-top:8px"><summary class="muted" style="cursor:pointer;font-size:12px">table</summary>
+        <div style="max-height:220px;overflow:auto;margin-top:6px"><table>
+        <tr><th>Filing day</th><th class="num">Mean</th><th class="num">Min</th><th class="num">Max</th><th class="num">n</th><th class="num">Filings</th></tr>
+        ${rows.map(r=>`<tr><td>${esc(r.day)}</td><td class="num">${r.mean}</td><td class="num">${r.min}</td>
+          <td class="num">${r.max}</td><td class="num">${r.n}</td><td class="num">${r.filings}</td></tr>`).join('')}
+        </table></div></details>
+    </div>`;
+}
+
 async function renderToolsModels(){
   const v=document.getElementById('view');
   v.innerHTML='<div class="loading">Loading analysis models…</div>';
   try{
-    const manifest=await (DEMO_ON ? Promise.resolve(window.__DEMO_TOOLS_MODELS__()) : fetch('tools-manifest.json').then(r=>r.json()));
+    const manifest=await loadManifest(window.__DEMO_TOOLS_MODELS__);
     const models=manifest.filter(t=>t.kind==='model');
     if(!models.length){
       v.innerHTML='<div style="padding:30px;text-align:center"><div class="muted">No analysis models yet.</div></div>';
@@ -2444,8 +3197,7 @@ async function renderToolsModels(){
     let html='<div class="cards">';
     models.forEach(t=>{
       const lastRun=t.last_run?new Date(t.last_run).toLocaleDateString():'–';
-      const hasDoc=t.doc_link&&t.doc_link!=='#';
-      html+=`<div class="card" style="${hasDoc?'cursor:pointer;':''}transition:border-color .2s"${hasDoc?` onclick="location.href='${t.doc_link}'"`:''}>
+      html+=`<div class="card" style="transition:border-color .2s">
         <div class="name">${t.name}</div>
         <div class="muted" style="font-size:12px;line-height:1.4;margin:6px 0">${t.purpose}</div>
         <div style="margin:8px 0;display:flex;gap:6px;flex-wrap:wrap">
@@ -2454,6 +3206,7 @@ async function renderToolsModels(){
         </div>
         <div class="muted" style="font-size:11px">Inputs: ${t.inputs.join(', ')}</div>
         <div class="muted" style="font-size:11px">Last run: ${lastRun}</div>
+        ${toolActions(t)}
       </div>`;
     });
     html+='</div>';
@@ -2619,7 +3372,7 @@ const SECTIONS={
   education:{label:'Education', icon:'🎓', desc:'Learning the business of trading — metric significance, source overlap, example signals',
           tabs:[['learn','Learn',renderEducation]]},
   tools: {label:'Tools', icon:'🧰', desc:'Modules that gather data or analyze it',
-          tabs:[['gather','Data Gathering',renderToolsGather],['models','Analysis Models',renderToolsModels]]},
+          tabs:[['gather','Data Gathering',renderToolsGather],['models','Analysis Models',renderToolsModels],['results','Results',renderToolsResults]]},
   research:{label:'Research', icon:'🔬', desc:'Hypothesis projects — prediction, evidence, verdict',
           tabs:[['projects','Projects',renderResearchProjects]]},
 };
@@ -2650,6 +3403,10 @@ function renderHome(){
 document.getElementById('brand').onclick=goHome;
 document.getElementById('apiBase').onchange=()=>{ ping(); if(SECTION&&TAB) goTab(TAB); else renderHome(); };
 loadTradeLog(); // discipline layer (issue #47) — so a cool-down flag can show up even before the Discipline tab is opened
+// Probe the tool runner before the first render, so the Tools cards know
+// whether a Run button is real. A failed probe is the normal static case, not
+// an error — the page still works, it just has nothing to run.
+probeRunner().then(()=>{ if(SECTION==='tools'&&TAB) goTab(TAB); });
 ping(); goHome();
 setInterval(ping, 30000);
 </script>

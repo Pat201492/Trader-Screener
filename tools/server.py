@@ -1,0 +1,1319 @@
+#!/usr/bin/env python3
+"""
+Local tool-runner service for the Trader Screener dashboard.
+
+Why this exists: the Tools workspace was a CATALOG -- every card was a link to a
+README, so "open the tool" meant "go read a repo and install it by hand". This
+serves the same static dashboard AND a small JSON API next to it, so a card can
+actually RUN its tool and show the result in the page.
+
+Ownership boundary is unchanged (ARCHITECTURE.md, #109): this process is a
+READER of shared pipeline data and a writer only of the scrubber's own LOCAL
+store (`OutputStore` enforces that at open time). It stands up nothing
+always-on -- it is a local dev service you start when you want to use a tool,
+not a second collector.
+
+stdlib only, one origin (static + API on the same port, so no CORS).
+
+Run:
+    python tools/server.py                  # http://127.0.0.1:8137/
+    python tools/server.py --port 9000
+"""
+import argparse
+import json
+import mimetypes
+import os
+import re
+import sys
+import threading
+import time
+import traceback
+from datetime import datetime, timezone
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse, parse_qs, quote
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRUBBER = REPO_ROOT / "tools" / "edgar_scrubber"
+sys.path.insert(0, str(SCRUBBER))
+
+DEFAULT_HOME = Path.home() / ".edgar-scrubber"
+DEFAULT_FIELDS = [
+    "issuer", "cusip", "underlyings", "product_type", "contingent_coupon_rate",
+    "coupon_barrier_pct", "barrier_pct", "maturity_date",
+    "estimated_value_per_1000",
+]
+
+# Docs a card may link to. An allowlist, not a path join on user input -- this
+# server binds to loopback but still has no business reading outside the repo.
+DOC_ROOTS = ("tools/", "Research/", "Education/", "Project folder/")
+
+
+def utcnow():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+# --------------------------------------------------------------------------- #
+# Run registry
+# --------------------------------------------------------------------------- #
+
+class RunRegistry:
+    """In-memory record of runs this process started. The extractions
+    themselves are durable (they land in the scrubber's sqlite store); this is
+    just the live progress view a browser polls."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._runs = {}
+        self._seq = 0
+
+    def create(self, kind, params):
+        with self._lock:
+            self._seq += 1
+            run_id = f"{kind}-{self._seq:03d}"
+            docs = params.get("limit", 0)
+            per_doc = len(params.get("fields") or [])
+            self._runs[run_id] = {
+                "id": run_id, "kind": kind, "params": params,
+                "status": "queued", "started_at": utcnow(), "finished_at": None,
+                "log": [], "documents": [], "error": None, "store_run_id": None,
+                "stop_requested": False,
+                # Documents AND fields: a run of 5 filings x 9 fields moves 45
+                # times, and a bar that only steps on document boundaries sits
+                # frozen for minutes at a stretch.
+                "progress": {"done": 0, "total": docs,
+                             "fields_done": 0, "fields_total": docs * per_doc,
+                             "current": None, "started_epoch": None,
+                             "seconds_elapsed": 0, "seconds_remaining": None},
+            }
+            return run_id
+
+    def tick_field(self, run_id, accession, field, elapsed):
+        """One field finished. Elapsed time is measured, not assumed, so the
+        estimate reflects THIS machine and this document size."""
+        with self._lock:
+            p = self._runs[run_id]["progress"]
+            p["fields_done"] += 1
+            p["current"] = {"accession": accession, "field": field}
+            p["seconds_elapsed"] = round(elapsed, 1)
+            if p["fields_done"] and p["fields_total"]:
+                per = elapsed / p["fields_done"]
+                left = max(0, p["fields_total"] - p["fields_done"])
+                p["seconds_remaining"] = round(per * left)
+
+    def request_stop(self, run_id):
+        """Ask a run to stop at its next field boundary.
+
+        Cooperative, not a kill: the in-flight model call finishes and the
+        document it belongs to is written out, so stopping never leaves a
+        half-written document in the store. Everything already extracted stays
+        -- stopping is not undoing.
+        """
+        with self._lock:
+            run = self._runs.get(run_id)
+            if not run:
+                return False
+            if run["status"] in ("done", "error", "stopped"):
+                return False
+            run["stop_requested"] = True
+            return True
+
+    def stop_requested(self, run_id):
+        with self._lock:
+            return bool(self._runs.get(run_id, {}).get("stop_requested"))
+
+    def update(self, run_id, **fields):
+        with self._lock:
+            self._runs[run_id].update(fields)
+
+    def log(self, run_id, message):
+        with self._lock:
+            self._runs[run_id]["log"].append({"t": utcnow(), "message": message})
+
+    def add_document(self, run_id, doc):
+        with self._lock:
+            r = self._runs[run_id]
+            r["documents"].append(doc)
+            r["progress"]["done"] = len(r["documents"])
+
+    def get(self, run_id):
+        with self._lock:
+            r = self._runs.get(run_id)
+            return json.loads(json.dumps(r)) if r else None
+
+    def list(self):
+        with self._lock:
+            return [
+                {k: v for k, v in r.items() if k not in ("log", "documents")}
+                for r in sorted(self._runs.values(), key=lambda x: x["id"], reverse=True)
+            ]
+
+
+RUNS = RunRegistry()
+
+
+# --------------------------------------------------------------------------- #
+# The EDGAR scrubber run
+# --------------------------------------------------------------------------- #
+
+def edgar_urls(cik, accession, document=None):
+    """sec.gov URLs for a filing. The tool should never be a dead end: whatever
+    it extracted, the filing it came from is one click away, on EDGAR itself."""
+    if not cik or not accession:
+        return {}
+    nodash = accession.replace("-", "")
+    base = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{nodash}"
+    out = {"filing_url": f"{base}/{accession}-index.htm", "folder_url": f"{base}/"}
+    if document:
+        out["document_url"] = f"{base}/{document}"
+    return out
+
+
+def edgar_search_url(q, forms, ciks, startdt, enddt):
+    """The same query in EDGAR's own full-text search UI, so a search here can
+    be carried over to sec.gov rather than re-typed."""
+    frag = []
+    if q:
+        frag.append("q=" + quote(q, safe=""))
+    if forms:
+        frag.append("forms=" + quote(",".join(forms), safe=""))
+    if ciks:
+        frag.append("ciks=" + quote(",".join(c.zfill(10) for c in ciks), safe=""))
+    if startdt and enddt:
+        frag.append("dateRange=custom")
+        frag.append(f"startdt={startdt}")
+        frag.append(f"enddt={enddt}")
+    return "https://www.sec.gov/edgar/search/#/" + "&".join(frag)
+
+
+def edgar_search(params):
+    """One page of EDGAR full-text search, flattened for the UI.
+
+    Cheap and synchronous on purpose: this is the "what is out there" step the
+    user drives, not extraction. No model, no document fetch -- just the efts
+    hit list, so a query can be adjusted a few times before spending minutes of
+    local model time on it.
+    """
+    from edgar_client import EdgarClient, parse_hit, search_total
+
+    # Params first, environment second: an empty form is the user's error and
+    # should say so, not report a missing env var they did not ask about.
+    q = (params.get("q") or "").strip()
+    forms = params.get("forms") or []
+    if isinstance(forms, str):
+        forms = [f.strip() for f in forms.split(",") if f.strip()]
+    ciks = params.get("ciks") or []
+    if isinstance(ciks, str):
+        ciks = [c.strip() for c in ciks.split(",") if c.strip()]
+    exclude = set(params.get("excludeCiks") or [])
+    if not q and not forms and not ciks:
+        raise ValueError("give at least a search phrase, a form type, or a CIK")
+
+    max_results = max(1, min(int(params.get("max_results", 25)), 100))
+
+    ua = os.environ.get("EDGAR_USER_AGENT", "").strip()
+    if not ua:
+        raise RuntimeError(
+            "EDGAR_USER_AGENT is not set. The SEC fair-access policy requires a "
+            "contactable '<name> <email>' on every request; see SETUP.md."
+        )
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    client = EdgarClient(user_agent=ua, cache_dir=str(home / "cache"))
+
+    extra = {}
+    if ciks:
+        # efts filters server-side on `ciks`; zero-padding is what the API wants.
+        extra["ciks"] = ",".join(c.zfill(10) for c in ciks)
+
+    page = client.full_text_search(q=q or None, forms=forms or None,
+                                    startdt=params.get("startdt") or None,
+                                    enddt=params.get("enddt") or None, **extra)
+    total, saturated = search_total(page)
+
+    hits, seen = [], set()
+    for h in ((page.get("hits", {}) or {}).get("hits", []) or []):
+        info = parse_hit(h)
+        if not info.get("accession") or info["accession"] in seen:
+            continue
+        if exclude & set(info.get("ciks") or []):
+            continue
+        seen.add(info["accession"])
+        row = {k: info.get(k) for k in
+               ("accession", "document", "issuer", "cik", "form",
+                "file_date", "tickers")}
+        row.update(edgar_urls(row.get("cik"), row.get("accession"), row.get("document")))
+        hits.append(row)
+        if len(hits) >= max_results:
+            break
+
+    return {"total": total, "saturated": saturated, "returned": len(hits),
+            "hits": hits,
+            "search_url": edgar_search_url(q, forms, ciks,
+                                            params.get("startdt"), params.get("enddt")),
+            "query": {"q": q, "forms": forms, "ciks": ciks,
+                      "startdt": params.get("startdt"), "enddt": params.get("enddt")}}
+
+
+def edgar_search_daily(params):
+    """Sample `per_day` filings on each of the last `days` days that HAVE any.
+
+    A flat search returns whatever the relevance ranking hands back, which
+    clusters: ten filings from one busy week tells you about that week, not
+    about time. Sampling a fixed number per day gives every day equal weight, so
+    an average over the series is an average over TIME rather than over filing
+    volume.
+
+    "Available" days only: weekends and holidays have no 424B2s, and a market
+    calendar is not something to hard-code here -- a day with zero hits is
+    skipped and the walk continues backwards, so `days=90` means 90 days with
+    filings, not 90 calendar days of which a third are empty. `max_lookback`
+    bounds the walk so a quiet query cannot page backwards forever.
+    """
+    from datetime import date, timedelta
+
+    per_day = max(1, min(int(params.get("per_day", 5)), 100))
+    days = max(1, min(int(params.get("days", 90)), 365))
+    max_lookback = max(days, min(int(params.get("max_lookback", days * 2 + 30)), 1000))
+
+    end = params.get("enddt")
+    cursor = date.fromisoformat(end) if end else date.today()
+    floor_ = date.fromisoformat(params["startdt"]) if params.get("startdt") else None
+
+    hits, by_day, empty_days, scanned = [], [], 0, 0
+    while len(by_day) < days and scanned < max_lookback:
+        day = cursor.isoformat()
+        if floor_ and cursor < floor_:
+            break
+        scanned += 1
+        cursor -= timedelta(days=1)
+
+        # Weekends never carry filings; skipping them costs nothing and keeps
+        # the request count (and the SEC's rate budget) proportional to signal.
+        if (cursor + timedelta(days=1)).weekday() >= 5:
+            continue
+
+        page = edgar_search({**params, "startdt": day, "enddt": day,
+                             "max_results": per_day})
+        if not page["hits"]:
+            empty_days += 1
+            continue
+        for h in page["hits"]:
+            h["sample_day"] = day
+        hits.extend(page["hits"])
+        by_day.append({"day": day, "sampled": len(page["hits"]),
+                       "available": page["total"], "saturated": page["saturated"]})
+
+    by_day.reverse()
+    hits.reverse()
+    q = (params.get("q") or "").strip()
+    forms = params.get("forms") or []
+    if isinstance(forms, str):
+        forms = [f.strip() for f in forms.split(",") if f.strip()]
+    ciks = params.get("ciks") or []
+    if isinstance(ciks, str):
+        ciks = [c.strip() for c in ciks.split(",") if c.strip()]
+    return {
+        "mode": "daily", "hits": hits, "returned": len(hits),
+        "total": sum(d["available"] for d in by_day),
+        "saturated": any(d["saturated"] for d in by_day),
+        "days": by_day, "days_covered": len(by_day),
+        "days_scanned": scanned, "days_empty": empty_days,
+        "per_day": per_day,
+        "search_url": edgar_search_url(q, forms, ciks,
+                                        by_day[0]["day"] if by_day else None,
+                                        by_day[-1]["day"] if by_day else None),
+        "query": {"q": q, "forms": forms, "ciks": ciks, "per_day": per_day,
+                   "days": days},
+    }
+
+
+def scrubber_run(run_id, targets, fields, home):
+    """expand -> reduce -> extraction ladder -> local store, over a caller-chosen
+    list of filings.
+
+    `targets` is what the user picked in the search UI -- `[{accession, cik,
+    issuer, file_date}, ...]`. Discovery (which filings) is a separate,
+    cheap step from extraction (what is in them), so a query can be tried
+    several times before any model time is spent.
+
+    Local rungs only: Claude escalation stays off here (it costs money per
+    document and this is a button in a dashboard). A field the confidence gate
+    wanted to escalate comes back flagged `gated_no_claude` rather than
+    silently resolved -- same contract as `extraction_ladder`'s local-only mode.
+    """
+    import field_spec
+    from edgar_client import EdgarClient
+    from document_expand import expand_accession
+    from reduce import split_sections
+    from extraction_ladder import ExtractionLadder
+    from ollama_client import OllamaClient, OllamaConfig
+    from output_store import OutputStore, DocumentExtraction, FieldValue
+    from validation import RenderDocument, LadderExtractor
+
+    t_start = time.time()
+    ua = os.environ.get("EDGAR_USER_AGENT", "").strip()
+    if not ua:
+        raise RuntimeError(
+            "EDGAR_USER_AGENT is not set. The SEC fair-access policy requires a "
+            "contactable '<name> <email>' on every request; see SETUP.md."
+        )
+
+    cache_dir = home / "cache"
+    RUNS.update(run_id, status="running")
+    client = EdgarClient(user_agent=ua, cache_dir=str(cache_dir))
+    RUNS.log(run_id, f"{len(targets)} filing(s) selected")
+
+    spec = field_spec.load_spec(SCRUBBER / "field_specs" / "424b2_structured_note.json")
+    if fields == "all":
+        field_names = [f.name for f in spec.fields]
+    else:
+        field_names = [f for f in fields if spec.field(f) is not None]
+
+    ladder = ExtractionLadder(
+        spec, local_client=OllamaClient(OllamaConfig.from_env({})),
+        claude_client=None, claude_enabled=False)
+
+    store = OutputStore(home / "store" / "extractions.sqlite")
+    store_run_id = store.start_run(spec.spec_id, getattr(spec, "version", "1"),
+                                   utcnow(), note=f"dashboard run {run_id}")
+    RUNS.update(run_id, store_run_id=store_run_id)
+
+    stopped = False
+    try:
+        for meta in targets:
+            if RUNS.stop_requested(run_id):
+                stopped = True
+                RUNS.log(run_id, "stop requested -- no further filings will be started")
+                break
+            accession = meta["accession"]
+            cik = meta.get("cik")
+            if not cik:
+                RUNS.log(run_id, f"{accession}: no CIK on the selection -- skipped")
+                RUNS.add_document(run_id, {
+                    "accession": accession, "document": None, "issuer": meta.get("issuer"),
+                    "filed": meta.get("file_date"), "skipped": True, "fields": [],
+                })
+                continue
+            RUNS.log(run_id, f"expanding {accession}")
+            bundle = expand_accession(client, cik, accession)
+            primary = bundle.primary()
+            if primary is None or primary.normalized is None:
+                RUNS.log(run_id, f"{accession}: no readable primary document -- skipped")
+                RUNS.add_document(run_id, {
+                    "accession": accession, "document": None, "issuer": meta.get("issuer"),
+                    "filed": meta.get("file_date"), "skipped": True, "fields": [],
+                })
+                continue
+
+            nd = primary.normalized
+            sections = split_sections(nd)
+            ex107 = bundle.ex107.as_dict() if bundle.ex107 else None
+            RUNS.log(run_id, f"{accession}: {primary.name} "
+                             f"({len(nd.text):,} chars, {len(sections)} sections)")
+
+            out, field_values, underlyings, product_type = [], [], [], None
+            extractor = LadderExtractor(spec, ladder, sections=sections)
+            render_doc = RenderDocument.from_normalized(nd)
+            for name in field_names:
+                if RUNS.stop_requested(run_id):
+                    stopped = True
+                    RUNS.log(run_id, f"stop requested -- {accession} written with "
+                                     f"{len(out)} of {len(field_names)} fields")
+                    break
+                try:
+                    # One field at a time through LadderExtractor so the stored
+                    # span is in ORIGINAL document coordinates (it resolves the
+                    # model's context-relative offsets back through the #101
+                    # reduction map). A span nothing can point at is not evidence.
+                    p = extractor.propose(render_doc, issuer=meta.get("issuer"),
+                                          ex107=ex107, accession=accession,
+                                          document=primary.name, fields=[name])[0]
+                except Exception as exc:  # one bad field must not kill the document
+                    out.append({"field": name, "error": f"{type(exc).__name__}: {exc}"})
+                    RUNS.tick_field(run_id, accession, name, time.time() - t_start)
+                    continue
+                # Same span repair the preview shows: what gets STORED as this
+                # value's evidence has to be text that actually states it,
+                # otherwise the store fills up with spans that point nowhere and
+                # the #105 review loop has nothing to review.
+                span, span_method = locate_value(nd.text, p.value, p.source_span)
+                p_flags = list(p.flags or [])
+                if span is None and p.value not in (None, "", []):
+                    p_flags.append({
+                        "field": p.field, "code": "span_unlocatable", "severity": "warn",
+                        "message": "the value is not stated verbatim anywhere in the "
+                                   "document text; no span could be verified",
+                    })
+                flags = [f.get("code") for f in p_flags]
+                gated = "gated_no_claude" in flags
+                field_values.append(FieldValue(
+                    field=p.field, value=p.value, unit=p.unit,
+                    span=tuple(span) if span else None,
+                    provenance=(f"{p.provenance}+span:{span_method}"
+                                if span_method else p.provenance),
+                    confidence=p.confidence, flags=p_flags))
+                if name == "underlyings" and isinstance(p.value, list):
+                    underlyings = [{"name": str(u), "kind": None} for u in p.value]
+                if name == "product_type" and p.value:
+                    product_type = str(p.value)
+                # Per-field, not per-document: a 9-field document is minutes of
+                # local model time, and a progress view that only ticks when the
+                # whole document lands looks hung.
+                RUNS.log(run_id, f"  {name} = {str(p.value)[:60]} "
+                                 f"[{p.rung}{', gated' if gated else ''}]")
+                RUNS.tick_field(run_id, accession, name, time.time() - t_start)
+                out.append({
+                    "field": name, "value": p.value, "unit": p.unit,
+                    "rung": p.rung, "confidence": p.confidence, "gated": gated,
+                    "span": list(span) if span else None,
+                    "span_source": span_method,
+                    "span_text": nd.text[span[0]:span[1]] if span else None,
+                    "flags": flags,
+                })
+
+            # One document write, carrying the queryable dimensions -- notably
+            # the FILING date, which is what a daily sample gets averaged over.
+            # Without it the extractions are undated and no series can be built.
+            store.write_document(store_run_id, DocumentExtraction(
+                accession=accession, document=primary.name,
+                issuer=meta.get("issuer"), product_type=product_type,
+                filing_date=meta.get("file_date") or meta.get("sample_day"),
+                underlyings=underlyings, fields=field_values))
+
+            RUNS.add_document(run_id, {
+                "accession": accession, "document": primary.name,
+                "issuer": meta.get("issuer"), "filed": meta.get("file_date"),
+                "skipped": False, "fields": out,
+            })
+
+            if stopped:
+                break
+
+        RUNS.update(run_id, status="stopped" if stopped else "done",
+                    finished_at=utcnow(), summary=ladder.log.summary())
+        RUNS.log(run_id, "run stopped by request -- everything extracted so far is saved"
+                 if stopped else "run complete")
+    finally:
+        store.close()
+
+
+def resolve_targets(params):
+    """What to extract, from any of the three ways a caller can say it:
+
+      * `accessions`: an explicit selection out of a search result (what the UI
+        sends -- the user ticked these rows);
+      * `search`: a query to run first, then extract its first `limit` hits;
+      * `query`: the id of a saved query in `queries/` (the pre-built presets).
+
+    An explicit selection is never re-searched -- the rows the user saw are the
+    rows that get extracted.
+
+    The ceiling is deliberately high (a 90-day x 5/day sample is 450 filings)
+    and deliberately not infinite: at roughly 40s per filing that is already a
+    multi-hour run, which the caller is told about before starting.
+    """
+    limit = max(1, min(int(params.get("limit", 3)), 1000))
+
+    picked = params.get("accessions")
+    if picked:
+        out = []
+        for item in picked[:limit]:
+            if isinstance(item, str):
+                raise ValueError(f"accession {item!r} needs its CIK -- send "
+                                 "{'accession': ..., 'cik': ...} objects")
+            if not item.get("accession") or not item.get("cik"):
+                raise ValueError("each selection needs both 'accession' and 'cik'")
+            out.append(item)
+        return out, {"source": "selection", "limit": limit}
+
+    search_params = params.get("search")
+    if search_params:
+        search_params = dict(search_params)
+        search_params.setdefault("max_results", limit)
+        result = (edgar_search_daily(search_params)
+                  if search_params.get("mode") == "daily" else edgar_search(search_params))
+        return result["hits"][:limit], {"source": "search", "limit": limit,
+                                        "query": result["query"],
+                                        "total": result["total"]}
+
+    from crawl import load_query
+    query_name = params.get("query", "424b2-jpm-2025-pilot")
+    query_path = SCRUBBER / "queries" / f"{Path(query_name).name}.json"
+    if not query_path.exists():
+        raise FileNotFoundError(f"no saved query named {query_name!r}")
+    saved = load_query(query_path)
+    result = edgar_search({"q": saved.q, "forms": list(saved.forms or []),
+                            "ciks": list(saved.ciks or []),
+                            "excludeCiks": list(saved.excludeCiks or []),
+                            "startdt": saved.startdt, "enddt": saved.enddt,
+                            "max_results": limit})
+    return result["hits"][:limit], {"source": "saved-query", "query": query_name,
+                                     "limit": limit, "total": result["total"]}
+
+
+def start_scrubber_run(params):
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    fields = params.get("fields") or DEFAULT_FIELDS
+    targets, provenance = resolve_targets(params)
+    if not targets:
+        raise ValueError("nothing to extract -- the query returned no filings")
+
+    run_id = RUNS.create("edgar-scrubber", {**provenance, "fields": fields,
+                                             "limit": len(targets)})
+
+    def worker():
+        try:
+            scrubber_run(run_id, targets, fields, home)
+        except Exception as exc:
+            RUNS.update(run_id, status="error", finished_at=utcnow(),
+                        error=f"{type(exc).__name__}: {exc}")
+            RUNS.log(run_id, traceback.format_exc().strip().splitlines()[-1])
+
+    threading.Thread(target=worker, daemon=True, name=f"run-{run_id}").start()
+    return run_id
+
+
+# --------------------------------------------------------------------------- #
+# Reading one filing + hand-marked spans (the #105 loop, in the browser)
+# --------------------------------------------------------------------------- #
+
+def load_document(cik, accession, document=None):
+    """The normalized text of one filing, plus its section index.
+
+    Text, not HTML: this is the SAME string the extraction ladder sees, so an
+    offset a human marks here is an offset the ladder can be taught with. Handing
+    the browser the raw filing HTML instead would mean marking spans in a
+    coordinate system nothing downstream uses.
+    """
+    from edgar_client import EdgarClient
+    from document_expand import expand_accession
+    from reduce import split_sections
+
+    ua = os.environ.get("EDGAR_USER_AGENT", "").strip()
+    if not ua:
+        raise RuntimeError("EDGAR_USER_AGENT is not set; see SETUP.md.")
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    client = EdgarClient(user_agent=ua, cache_dir=str(home / "cache"))
+
+    bundle = expand_accession(client, cik, accession)
+    doc = bundle.by_name(document) if document else None
+    if doc is None or doc.normalized is None:
+        doc = bundle.primary()
+    if doc is None or doc.normalized is None:
+        raise ValueError(f"{accession}: no readable document to open")
+
+    nd = doc.normalized
+    sections = [{"name": name, "start": s.text_start, "end": s.text_end}
+                for name, spans in split_sections(nd).items() for s in spans]
+    sections.sort(key=lambda s: s["start"])
+    return {
+        "accession": accession, "cik": cik, "document": doc.name,
+        "chars": len(nd.text), "text": nd.text, "sections": sections,
+        "manifest": bundle.manifest(),
+        "ex107": bundle.ex107.as_dict() if bundle.ex107 else None,
+        **edgar_urls(cik, accession, doc.name),
+    }
+
+
+def locate_value(text, value, hint_span=None):
+    """Find where `value` is actually stated in `text`.
+
+    The model's own span is not trustworthy -- measured against real filings it
+    routinely returns an empty range or one thousands of characters wide, which
+    is exactly what the #144 span gate exists to catch. A highlight drawn from
+    that span would show the user confident-looking evidence for a value the
+    model did not read there.
+
+    So the span shown is EARNED: the value's own text is located in the
+    document, preferring an occurrence near where the model claimed to look. A
+    number is tried in the forms filings actually print it in (70, 70.0,
+    70.00%, 1,000). Nothing found -> no highlight and the caller says so,
+    rather than pointing at a sentence that does not contain the answer.
+
+    Returns `(span, method)`; method is "model" | "value-match" | None.
+    """
+    if value is None or isinstance(value, (list, dict, bool)):
+        return None, None
+
+    # A model span is only believed when the text under it really says the value.
+    raw = str(value).strip()
+    if hint_span and 0 <= hint_span[0] < hint_span[1] <= len(text):
+        under = text[hint_span[0]:hint_span[1]]
+        if raw and raw.lower() in under.lower() and len(under) <= max(120, len(raw) * 6):
+            return tuple(hint_span), "model"
+
+    candidates = []
+    if isinstance(value, (int, float)):
+        n = float(value)
+        whole = int(n) if n == int(n) else None
+        for form in ({f"{whole:,}", str(whole), f"{whole}.00", f"{whole}.0",
+                      f"{whole:,}.00"} if whole is not None else set()):
+            candidates.append(form)
+        candidates.extend({str(n), f"{n:.2f}", f"{n:,.2f}"})
+    else:
+        candidates.append(raw)
+        # Values often carry the label the filing does not ("70.00% of initial").
+        if len(raw) > 12:
+            candidates.append(raw[:60])
+    candidates = [c for c in dict.fromkeys(candidates) if c and len(c) >= 2]
+
+    low = text.lower()
+    best = None
+    for cand in candidates:
+        start = 0
+        while True:
+            at = low.find(cand.lower(), start)
+            if at < 0:
+                break
+            span = (at, at + len(cand))
+            distance = abs(at - hint_span[0]) if hint_span else at
+            # Nearest wins; on a tie the LONGER match wins, so a highlight lands
+            # on the whole printed number ("70.00", "$979.00") rather than the
+            # bare digits inside it.
+            rank = (distance, -(span[1] - span[0]))
+            if best is None or rank < best[0]:
+                best = (rank, span)
+            start = at + len(cand)
+    return (best[1], "value-match") if best else (None, None)
+
+
+def preview_document(params):
+    """Dry run on ONE filing: what would this extract, and from WHERE?
+
+    Same ladder as a real run, but nothing is written to the output store --
+    the result is a list of proposals with spans in ORIGINAL document
+    coordinates (`LadderExtractor` resolves them back through the reduction
+    map), so the viewer can highlight the exact text each value came from.
+
+    This is the check that belongs before a 450-filing sample: a field pulling
+    from the wrong sentence is obvious when you can see the sentence, and
+    invisible in a table of values.
+    """
+    import field_spec
+    from extraction_ladder import ExtractionLadder
+    from ollama_client import OllamaClient, OllamaConfig
+    from reduce import split_sections
+    from validation import RenderDocument, LadderExtractor
+
+    doc = load_document(params.get("cik"), params.get("accession"),
+                        params.get("document"))
+    from edgar_client import EdgarClient
+    from document_expand import expand_accession
+    ua = os.environ.get("EDGAR_USER_AGENT", "").strip()
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    client = EdgarClient(user_agent=ua, cache_dir=str(home / "cache"))
+    bundle = expand_accession(client, params.get("cik"), params.get("accession"))
+    primary = bundle.by_name(doc["document"]) or bundle.primary()
+    nd = primary.normalized
+
+    spec = field_spec.load_spec(SCRUBBER / "field_specs" / "424b2_structured_note.json")
+    fields = params.get("fields") or DEFAULT_FIELDS
+    fields = [f for f in fields if spec.field(f) is not None]
+
+    ladder = ExtractionLadder(
+        spec, local_client=OllamaClient(OllamaConfig.from_env({})),
+        claude_client=None, claude_enabled=False)
+    extractor = LadderExtractor(spec, ladder, sections=split_sections(nd))
+    proposals = extractor.propose(
+        RenderDocument.from_normalized(nd), issuer=params.get("issuer"),
+        ex107=bundle.ex107.as_dict() if bundle.ex107 else None,
+        accession=params.get("accession"), document=doc["document"], fields=fields)
+
+    text = nd.text
+    out = []
+    for p in proposals:
+        span, method = locate_value(text, p.value, p.source_span)
+        out.append({
+            "field": p.field, "value": p.value, "unit": p.unit,
+            "rung": p.rung, "confidence": p.confidence,
+            "provenance": p.provenance,
+            "span": list(span) if span else None,
+            "span_source": method,
+            "model_span": list(p.source_span) if p.source_span else None,
+            "span_text": text[span[0]:span[1]] if span else None,
+            # Context around the hit is what makes a highlight checkable: the
+            # value alone reads as right far more often than it is.
+            "context": (text[max(0, span[0] - 160):span[1] + 160] if span else None),
+            "flags": [f.get("code") for f in (p.flags or [])],
+        })
+    return {"accession": params.get("accession"), "document": doc["document"],
+            "issuer": params.get("issuer"), "proposals": out,
+            "located": sum(1 for p in out if p["span"]), "total": len(out)}
+
+
+def validation_store(readonly=False):
+    from validation import ValidationStore
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    return ValidationStore(home / "store" / "validation.sqlite", readonly=readonly)
+
+
+def save_annotation(params):
+    """One hand-marked span: the human says "THIS text is this field".
+
+    It lands as a CORRECT verdict plus a `corrected` exemplar, which is what the
+    ladder already reads on rung 3 (`extraction_ladder._lookup_exemplars`) --
+    so marking spans by hand is not a side note, it is how the local model gets
+    taught the boundaries it keeps missing (#105/#106). Same (session,
+    accession, document, field) marked again replaces the earlier span rather
+    than accumulating contradictory ground truth.
+    """
+    from validation import FieldVerdict
+
+    for required in ("accession", "document", "field", "span"):
+        if not params.get(required):
+            raise ValueError(f"'{required}' is required")
+    span = params["span"]
+    if (not isinstance(span, (list, tuple)) or len(span) != 2
+            or not all(isinstance(x, int) for x in span) or span[0] >= span[1]):
+        raise ValueError("'span' must be [start, end] character offsets with start < end")
+
+    session = params.get("session") or "dashboard"
+    field = params["field"]
+    value = params.get("value")
+    if value is None:
+        value = params.get("span_text")
+
+    # Accepting the model's own proposal and marking a span by hand are
+    # different training signals: a `corrected` exemplar teaches a boundary the
+    # model got WRONG and outranks plain positives in the rung-3 prompt
+    # (`exemplars_for`), so an accept must not be filed as a correction.
+    accepted = bool(params.get("accepted"))
+    verdict = (FieldVerdict.accept(type("P", (), {"field": field, "value": value,
+                                                   "source_span": tuple(span)})())
+               if accepted else
+               FieldVerdict.correct(field, value, source_span=tuple(span),
+                                    note=params.get("note")))
+
+    store = validation_store()
+    try:
+        store.ensure_session(session, spec_id="424b2.structured_note", now=utcnow())
+        store.write_verdict(session, params["accession"], params["document"],
+                            verdict, now=utcnow())
+        store.write_exemplar(params.get("issuer"), field,
+                             "positive" if accepted else "corrected",
+                             params.get("span_text") or "", value=value,
+                             anchor=params.get("anchor"),
+                             span_text=params.get("span_text"),
+                             accession=params["accession"], document=params["document"],
+                             form="424b2.structured_note", now=utcnow())
+    finally:
+        store.close()
+    return {"saved": True, "field": field, "value": value, "span": list(span),
+            "session": session, "verdict": verdict.verdict,
+            "exemplar": bool(params.get("issuer"))}
+
+
+def delete_annotation(params):
+    for required in ("accession", "document", "field"):
+        if not params.get(required):
+            raise ValueError(f"'{required}' is required")
+    store = validation_store()
+    try:
+        removed = store.clear_verdict(params.get("session") or "dashboard",
+                                       params["accession"], params["document"],
+                                       params["field"])
+    finally:
+        store.close()
+    return {"removed": removed, "field": params["field"]}
+
+
+def list_annotations(accession, document, session="dashboard"):
+    store = validation_store()
+    try:
+        verdicts = store.verdicts_for(session, accession, document)
+    finally:
+        store.close()
+    return [{"field": v.field, "verdict": v.verdict, "value": v.value,
+             "span": list(v.source_span) if v.source_span else None,
+             "anchor": v.anchor, "note": v.note}
+            for v in verdicts]
+
+
+# --------------------------------------------------------------------------- #
+# Store browsing (past runs, no model needed)
+# --------------------------------------------------------------------------- #
+
+def store_path():
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    return home / "store" / "extractions.sqlite"
+
+
+def open_store_readonly():
+    from output_store import OutputStore
+    p = store_path()
+    if not p.exists():
+        return None
+    return OutputStore(p, readonly=True)
+
+
+def store_runs():
+    store = open_store_readonly()
+    if store is None:
+        return {"store": str(store_path()), "exists": False, "runs": []}
+    try:
+        rows = [dict(r) if not isinstance(r, dict) else r for r in store.runs()]
+        return {"store": str(store_path()), "exists": True, "runs": rows}
+    finally:
+        store.close()
+
+
+def store_daily(field=None, run_id=None):
+    """Per-filing-day mean/min/max of the numeric fields in the store.
+
+    This is what a daily sample is FOR: `documents.filing_date` joined to the
+    numeric extractions, one row per day, so a series can be read off rather
+    than eyeballed out of a document list. Days are the filing's own date, not
+    the run's -- re-extracting last quarter tomorrow must not move the series.
+
+    Only rows with a `value_num` count: a field the model returned as text (or
+    could not read) is excluded from the mean rather than silently coerced,
+    and `n` reports how many actually backed each day's number.
+    """
+    import sqlite3
+    p = store_path()
+    if not p.exists():
+        return {"store": str(p), "exists": False, "series": []}
+    conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        where, args = ["d.filing_date IS NOT NULL", "e.value_num IS NOT NULL"], []
+        if field:
+            where.append("e.field = ?")
+            args.append(field)
+        if run_id:
+            where.append("e.run_id = ?")
+            args.append(run_id)
+        rows = [dict(r) for r in conn.execute(
+            "SELECT d.filing_date AS day, e.field AS field, COUNT(*) AS n, "
+            "       AVG(e.value_num) AS mean, MIN(e.value_num) AS min, "
+            "       MAX(e.value_num) AS max, COUNT(DISTINCT e.accession) AS filings "
+            "FROM extractions e JOIN documents d "
+            "  ON d.run_id = e.run_id AND d.accession = e.accession "
+            " AND d.document = e.document "
+            f"WHERE {' AND '.join(where)} "
+            "GROUP BY d.filing_date, e.field ORDER BY d.filing_date, e.field", args)]
+        fields = [r["field"] for r in conn.execute(
+            "SELECT DISTINCT field FROM extractions WHERE value_num IS NOT NULL "
+            "ORDER BY field")]
+    except sqlite3.Error as exc:
+        return {"store": str(p), "exists": True, "series": [], "error": str(exc)}
+    finally:
+        conn.close()
+    for r in rows:
+        r["mean"] = round(r["mean"], 4) if r["mean"] is not None else None
+    return {"store": str(p), "exists": True, "series": rows,
+            "numeric_fields": fields, "field": field}
+
+
+def store_extractions(run_id=None):
+    """Every document/field row, newest run first. Read straight out of sqlite
+    rather than through `query()` so a browser can page the raw grid."""
+    import sqlite3
+    p = store_path()
+    if not p.exists():
+        return {"store": str(p), "exists": False, "documents": []}
+    conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        where, args = "", []
+        if run_id:
+            where, args = " WHERE e.run_id = ?", [run_id]
+        rows = [dict(r) for r in conn.execute(
+            "SELECT e.*, r.started_at, r.note FROM extractions e "
+            "LEFT JOIN runs r ON r.run_id = e.run_id"
+            f"{where} ORDER BY r.started_at DESC, e.rowid DESC LIMIT 4000", args)]
+    except sqlite3.Error as exc:
+        return {"store": str(p), "exists": True, "documents": [], "error": str(exc)}
+    finally:
+        conn.close()
+
+    docs = {}
+    for r in rows:
+        key = (r.get("run_id"), r.get("accession"), r.get("document"))
+        d = docs.setdefault(key, {
+            "run_id": r.get("run_id"), "accession": r.get("accession"),
+            "document": r.get("document"), "started_at": r.get("started_at"),
+            "note": r.get("note"), "fields": [],
+        })
+        try:
+            value = json.loads(r["value_json"]) if r.get("value_json") is not None else r.get("value_num")
+        except (ValueError, TypeError):
+            value = r.get("value_json")
+        try:
+            flags = json.loads(r["flags_json"]) if r.get("flags_json") else []
+        except (ValueError, TypeError):
+            flags = []
+        d["fields"].append({
+            "field": r.get("field"), "value": value, "unit": r.get("unit"),
+            "confidence": r.get("confidence"), "provenance": r.get("provenance"),
+            "span": [r.get("span_start"), r.get("span_end")],
+            "flags": [f.get("code") if isinstance(f, dict) else str(f) for f in (flags or [])],
+        })
+    return {"store": str(p), "exists": True, "documents": list(docs.values())}
+
+
+# --------------------------------------------------------------------------- #
+# Health
+# --------------------------------------------------------------------------- #
+
+def loaded_runtime(base_url, model):
+    """What the ollama server ACTUALLY loaded, from /api/ps.
+
+    The probe reports the profile it *selected*; this reports what is resident.
+    They diverge silently and expensively: a context the server sized itself
+    (the model's trained 32k rather than the 8k this tool budgets for) times
+    the parallel slots overruns 12GB of VRAM, and ollama quietly runs the
+    remainder on the CPU -- roughly a 10x slowdown that reads as "the local
+    model is just slow" rather than as a misconfiguration. `size` vs
+    `size_vram` is the only place that shows up.
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/ps", timeout=3) as resp:
+            ps = json.load(resp)
+    except Exception:
+        return None
+    for m in ps.get("models", []):
+        if m.get("name") != model:
+            continue
+        total, vram = m.get("size") or 0, m.get("size_vram") or 0
+        offload = max(0, total - vram)
+        return {
+            "loaded": True,
+            "context_length": m.get("context_length"),
+            "size_gb": round(total / 1e9, 2),
+            "vram_gb": round(vram / 1e9, 2),
+            "cpu_offload_gb": round(offload / 1e9, 2),
+            "cpu_offload_pct": round(100 * offload / total) if total else 0,
+        }
+    return {"loaded": False}
+
+
+def health():
+    ok_ollama, model, detail, runtime = False, None, None, None
+    try:
+        from ollama_client import OllamaConfig
+        import urllib.request
+        cfg = OllamaConfig.from_env({})
+        model = cfg.model
+        base = cfg.base_url.rsplit("/v1", 1)[0]
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=3) as resp:
+            tags = json.load(resp)
+        names = [m["name"] for m in tags.get("models", [])]
+        ok_ollama = model in names
+        detail = None if ok_ollama else f"{model} not pulled (have: {', '.join(names[:4])})"
+        runtime = loaded_runtime(base, model)
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "ok": True,
+        "runner": "edgar-scrubber",
+        "ollama": {"ok": ok_ollama, "model": model, "detail": detail,
+                   "runtime": runtime},
+        "edgar_user_agent": bool(os.environ.get("EDGAR_USER_AGENT", "").strip()),
+        "store": {"path": str(store_path()), "exists": store_path().exists()},
+        "queries": sorted(p.stem for p in (SCRUBBER / "queries").glob("*.json")),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Markdown -> HTML (enough to read a README in a browser tab)
+# --------------------------------------------------------------------------- #
+
+_MD_STYLE = """
+body{background:#0d1117;color:#e6edf3;font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;
+     max-width:900px;margin:0 auto;padding:32px 20px}
+a{color:#2f81f7} code{background:#161b22;padding:1px 5px;border-radius:4px;font-size:13px}
+pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;overflow-x:auto}
+pre code{background:none;padding:0} h1,h2,h3{border-bottom:1px solid #30363d;padding-bottom:6px}
+table{border-collapse:collapse;width:100%} td,th{border:1px solid #30363d;padding:6px 10px;text-align:left}
+blockquote{border-left:3px solid #30363d;margin:0;padding-left:12px;color:#8b949e}
+.back{display:inline-block;margin-bottom:18px;color:#8b949e;text-decoration:none}
+"""
+
+
+def markdown_to_html(md, title):
+    """Deliberately small: headings, fences, inline code, links, lists, tables,
+    rules. A card links here so the doc opens in the app instead of sending the
+    reader to GitHub -- it does not need to be a full CommonMark renderer."""
+    def esc(s):
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def inline(s):
+        s = esc(s)
+        s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+        s = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"", s)
+        s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', s)
+        s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+        return s
+
+    out, in_code, in_list, in_table = [], False, False, False
+    for line in md.splitlines():
+        if line.startswith("```"):
+            out.append("</code></pre>" if in_code else "<pre><code>")
+            in_code = not in_code
+            continue
+        if in_code:
+            out.append(esc(line))
+            continue
+        if in_list and not line.lstrip().startswith(("- ", "* ")):
+            out.append("</ul>")
+            in_list = False
+        if in_table and not line.strip().startswith("|"):
+            out.append("</table>")
+            in_table = False
+
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            if all(set(c) <= set("-: ") for c in cells):
+                continue
+            if not in_table:
+                out.append("<table>")
+                in_table = True
+            out.append("<tr>" + "".join(f"<td>{inline(c)}</td>" for c in cells) + "</tr>")
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)", stripped)
+        if m:
+            lvl = len(m.group(1))
+            out.append(f"<h{lvl}>{inline(m.group(2))}</h{lvl}>")
+            continue
+        if stripped.startswith(("- ", "* ")):
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append(f"<li>{inline(stripped[2:])}</li>")
+            continue
+        if stripped.startswith(">"):
+            out.append(f"<blockquote>{inline(stripped.lstrip('> '))}</blockquote>")
+            continue
+        if set(stripped) <= set("-*_") and len(stripped) >= 3:
+            out.append("<hr>")
+            continue
+        out.append(f"<p>{inline(stripped)}</p>")
+    for tag, flag in (("</code></pre>", in_code), ("</ul>", in_list), ("</table>", in_table)):
+        if flag:
+            out.append(tag)
+
+    return (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(title)}</title>"
+            f"<style>{_MD_STYLE}</style></head><body>"
+            f"<a class='back' href='javascript:history.back()'>← back to the dashboard</a>"
+            + "\n".join(out) + "</body></html>")
+
+
+def serve_doc(rel_path):
+    if not any(rel_path.startswith(root) for root in DOC_ROOTS) or ".." in rel_path:
+        return None
+    target = (REPO_ROOT / rel_path).resolve()
+    if REPO_ROOT not in target.parents or not target.is_file():
+        return None
+    text = target.read_text(encoding="utf-8", errors="replace")
+    if target.suffix.lower() in (".md", ".markdown"):
+        return markdown_to_html(text, target.name)
+    return f"<!doctype html><html><head><meta charset='utf-8'><title>{target.name}</title>" \
+           f"<style>{_MD_STYLE}</style></head><body><pre>{text}</pre></body></html>"
+
+
+# --------------------------------------------------------------------------- #
+# HTTP
+# --------------------------------------------------------------------------- #
+
+class Handler(SimpleHTTPRequestHandler):
+    server_version = "TraderScreenerTools/1.0"
+
+    def end_headers(self):
+        # Dev server: the dashboard is edited while it is open, and a browser
+        # holding a cached index.html silently runs code that no longer matches
+        # this process's API. Never cache anything here.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        SimpleHTTPRequestHandler.end_headers(self)
+
+    def _send(self, status, body, ctype="application/json"):
+        raw = body if isinstance(body, bytes) else str(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _json(self, obj, status=200):
+        self._send(status, json.dumps(obj, default=str), "application/json")
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path, qs = parsed.path, parse_qs(parsed.query)
+
+        if path == "/api/health":
+            return self._json(health())
+        if path == "/api/tools":
+            manifest = json.loads((REPO_ROOT / "web-dashboard" / "tools-manifest.json")
+                                  .read_text(encoding="utf-8"))
+            for t in manifest:
+                t["runnable"] = t.get("id") == "edgar-scrubber"
+            return self._json(manifest)
+        if path == "/api/tools/edgar-scrubber/fields":
+            import field_spec
+            spec = field_spec.load_spec(SCRUBBER / "field_specs" / "424b2_structured_note.json")
+            return self._json({
+                "spec_id": spec.spec_id,
+                "default": DEFAULT_FIELDS,
+                "fields": [{"name": f.name, "type": getattr(f, "type", None),
+                            "unit": getattr(f, "unit", None),
+                            "sections": list(getattr(f, "sections", []) or []),
+                            "description": getattr(f, "description", None)}
+                           for f in spec.fields],
+            })
+        if path == "/api/tools/edgar-scrubber/queries":
+            out = []
+            from crawl import load_query
+            for p in sorted((SCRUBBER / "queries").glob("*.json")):
+                try:
+                    sq = load_query(p)
+                except Exception:
+                    continue
+                out.append({"id": sq.id, "q": sq.q, "forms": list(sq.forms or []),
+                            "ciks": list(sq.ciks or []), "startdt": sq.startdt,
+                            "enddt": sq.enddt})
+            return self._json(out)
+        if path == "/api/runs":
+            return self._json(RUNS.list())
+        m = re.fullmatch(r"/api/runs/([\w.-]+)", path)
+        if m:
+            run = RUNS.get(m.group(1))
+            return self._json(run) if run else self._json({"error": "no such run"}, 404)
+        if path == "/api/tools/edgar-scrubber/document":
+            try:
+                return self._json(load_document((qs.get("cik") or [None])[0],
+                                                 (qs.get("accession") or [None])[0],
+                                                 (qs.get("document") or [None])[0]))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/tools/edgar-scrubber/annotations":
+            try:
+                return self._json(list_annotations((qs.get("accession") or [None])[0],
+                                                    (qs.get("document") or [None])[0],
+                                                    (qs.get("session") or ["dashboard"])[0]))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/store/runs":
+            return self._json(store_runs())
+        if path == "/api/store/daily":
+            return self._json(store_daily((qs.get("field") or [None])[0],
+                                           (qs.get("run_id") or [None])[0]))
+        if path == "/api/store/extractions":
+            return self._json(store_extractions((qs.get("run_id") or [None])[0]))
+        if path == "/api/docs":
+            rel = (qs.get("path") or [""])[0]
+            html = serve_doc(rel)
+            if html is None:
+                return self._send(404, "<h1>404 — no such doc</h1>", "text/html")
+            return self._send(200, html, "text/html; charset=utf-8")
+        if path.startswith("/api/"):
+            return self._json({"error": "unknown endpoint"}, 404)
+
+        if path == "/":
+            self.send_response(302)
+            self.send_header("Location", "/web-dashboard/index.html")
+            self.end_headers()
+            return
+        return SimpleHTTPRequestHandler.do_GET(self)
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+
+        # A POST here spends real resources: SEC requests under this machine's
+        # user-agent and writes to the local store. The server is loopback-only,
+        # but any page in the browser can POST to localhost -- so a request
+        # carrying a foreign Origin is refused rather than served.
+        origin = self.headers.get("Origin")
+        if origin:
+            allowed = {f"http://{self.headers.get('Host', '')}",
+                       f"https://{self.headers.get('Host', '')}"}
+            if origin not in allowed:
+                return self._json({"error": f"cross-origin POST refused (Origin: {origin})"}, 403)
+
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            params = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            return self._json({"error": "body must be JSON"}, 400)
+
+        if path == "/api/tools/edgar-scrubber/search":
+            try:
+                return self._json(edgar_search_daily(params)
+                                  if params.get("mode") == "daily"
+                                  else edgar_search(params))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        m = re.fullmatch(r"/api/runs/([\w.-]+)/stop", path)
+        if m:
+            ok = RUNS.request_stop(m.group(1))
+            return self._json({"stopping": ok, "run_id": m.group(1)},
+                              200 if ok else 409)
+        if path == "/api/tools/edgar-scrubber/preview":
+            try:
+                return self._json(preview_document(params))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/tools/edgar-scrubber/annotate":
+            try:
+                return self._json(save_annotation(params))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/tools/edgar-scrubber/annotate/delete":
+            try:
+                return self._json(delete_annotation(params))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/tools/edgar-scrubber/run":
+            try:
+                run_id = start_scrubber_run(params)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+            return self._json({"run_id": run_id}, 202)
+        return self._json({"error": "unknown endpoint"}, 404)
+
+    def log_message(self, fmt, *args):
+        line = fmt % args
+        if "/api/runs/" in line:
+            return  # progress polling is every second; don't drown the console
+        sys.stderr.write(f"{self.address_string()} - {line}\n")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    ap.add_argument("--port", type=int, default=8137)
+    ap.add_argument("--host", default="127.0.0.1")
+    args = ap.parse_args()
+
+    # The Windows console is cp1252 by default; a non-ASCII byte in a startup
+    # banner should never be what stops a server from running.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+    mimetypes.add_type("application/javascript", ".js")
+    handler = partial(Handler, directory=str(REPO_ROOT))
+    httpd = ThreadingHTTPServer((args.host, args.port), handler)
+
+    h = health()
+    print(f"Trader Screener tools  ->  http://{args.host}:{args.port}/")
+    print(f"  ollama            : {'ok' if h['ollama']['ok'] else 'NOT READY'} "
+          f"({h['ollama']['model']}){'' if h['ollama']['ok'] else ' -- ' + str(h['ollama']['detail'])}")
+    print(f"  EDGAR_USER_AGENT  : {'set' if h['edgar_user_agent'] else 'MISSING (live runs will fail)'}")
+    print(f"  local store       : {h['store']['path']} "
+          f"({'exists' if h['store']['exists'] else 'not created yet'})")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped")
+
+
+if __name__ == "__main__":
+    main()

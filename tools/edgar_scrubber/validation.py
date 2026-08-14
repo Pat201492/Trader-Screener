@@ -568,6 +568,20 @@ class ValidationStore:
         )
         self._conn.commit()
 
+    def clear_verdict(self, session_id, accession, document, field):
+        """Drop one field's verdict. Verdicts are already REPLACE-on-write (a
+        human re-ruling the same field supersedes their earlier call), so
+        removing a ruling made by mistake is the same kind of operation, not a
+        rewrite of history: the exemplars it wrote stay, since what was taught
+        was taught. Returns how many rows went."""
+        cur = self._conn.execute(
+            "DELETE FROM verdicts WHERE session_id = ? AND accession = ? "
+            "AND document = ? AND field = ?",
+            (session_id, accession, document, field),
+        )
+        self._conn.commit()
+        return cur.rowcount
+
     def verdicts_for(self, session_id, accession, document):
         rows = self._conn.execute(
             "SELECT field, verdict, value_json, span_start, span_end, anchor, note "
