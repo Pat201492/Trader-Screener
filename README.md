@@ -55,6 +55,12 @@ workspace picks it up automatically:
   from the model or from a value match. A value stated nowhere in the text gets no
   span and a `span_unlocatable` flag rather than a highlight pointing at the wrong
   sentence.
+- **Coverage** is the "what can this be trusted for" view: an **issuer × field**
+  matrix of how often a value came back *and* could be located in the filing's own
+  text. Issuer-scoped on purpose — 424B2 templates are issuer-specific and exemplars
+  are keyed by issuer, so an average across issuers hides the signal. A ✓ marks a
+  field at ≥90% for every issuer with 3+ filings; a superscript counts the spans you
+  have confirmed for that issuer+field.
 - **Results** reads the scrubber's local sqlite store, so past runs outlive the tab,
   and charts **average over time**: per-filing-day mean/min/max of any numeric field
   (grouped on the filing's own date, so re-extracting old filings never moves the series).

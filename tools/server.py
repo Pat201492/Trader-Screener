@@ -993,6 +993,85 @@ def store_daily(field=None, run_id=None):
             "numeric_fields": fields, "field": field}
 
 
+def store_coverage(min_documents=1):
+    """Per (issuer, field): how often we actually get this, and how often we can
+    point at where it came from.
+
+    Reliability is not "did the model return something" -- it returns something
+    almost always. The number that matters is how often the value is BOTH
+    non-null and locatable in the filing's own text, because an unlocatable
+    value is one nobody has checked and nothing can check. So each cell reports
+    attempts, values, located, and the flags that explain the gap.
+
+    Issuer-scoped because that is how the extraction behaves: 424B2 templates
+    are issuer-specific, exemplars are keyed by issuer, and a field that is
+    reliable for one bank routinely is not for another. An aggregate over all
+    issuers would hide exactly the thing worth knowing.
+    """
+    import sqlite3
+    p = store_path()
+    if not p.exists():
+        return {"store": str(p), "exists": False, "rows": []}
+
+    conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT d.issuer AS issuer, e.field AS field, "
+            "       COUNT(*) AS attempts, "
+            "       SUM(CASE WHEN e.value_json NOT IN ('null','\"\"','[]') "
+            "                 AND e.value_json IS NOT NULL THEN 1 ELSE 0 END) AS values_got, "
+            "       SUM(CASE WHEN e.span_start IS NOT NULL THEN 1 ELSE 0 END) AS located, "
+            "       SUM(CASE WHEN e.flags_json LIKE '%span_unlocatable%' THEN 1 ELSE 0 END) AS unlocatable, "
+            "       SUM(CASE WHEN e.flags_json LIKE '%gated_no_claude%' THEN 1 ELSE 0 END) AS gated, "
+            "       COUNT(DISTINCT e.accession) AS documents "
+            "FROM extractions e JOIN documents d "
+            "  ON d.run_id = e.run_id AND d.accession = e.accession "
+            " AND d.document = e.document "
+            "WHERE d.issuer IS NOT NULL "
+            "GROUP BY d.issuer, e.field")]
+    except sqlite3.Error as exc:
+        return {"store": str(p), "exists": True, "rows": [], "error": str(exc)}
+    finally:
+        conn.close()
+
+    # What a human has confirmed for this (issuer, field) lives in the OTHER
+    # store; it is the difference between "the model is consistent" and "we
+    # know it is right", so the matrix carries both rather than implying one
+    # from the other.
+    taught = {}
+    vpath = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser() \
+        / "store" / "validation.sqlite"
+    if vpath.exists():
+        vconn = sqlite3.connect(f"file:{vpath}?mode=ro", uri=True)
+        try:
+            for issuer, field, n in vconn.execute(
+                    "SELECT issuer, field, COUNT(*) FROM exemplars "
+                    "WHERE kind IN ('positive','corrected') GROUP BY issuer, field"):
+                taught[(issuer, field)] = n
+        except sqlite3.Error:
+            pass
+        finally:
+            vconn.close()
+
+    out = []
+    for r in rows:
+        if r["documents"] < min_documents:
+            continue
+        attempts = r["attempts"] or 0
+        r["taught"] = taught.get((r["issuer"], r["field"]), 0)
+        r["value_rate"] = round((r["values_got"] or 0) / attempts, 3) if attempts else 0
+        r["located_rate"] = round((r["located"] or 0) / attempts, 3) if attempts else 0
+        out.append(r)
+    out.sort(key=lambda r: (r["issuer"] or "", -r["located_rate"], r["field"]))
+
+    issuers = sorted({r["issuer"] for r in out})
+    fields = sorted({r["field"] for r in out})
+    return {"store": str(p), "exists": True, "rows": out,
+            "issuers": issuers, "fields": fields,
+            "min_documents": min_documents}
+
+
 def store_extractions(run_id=None):
     """Every document/field row, newest run first. Read straight out of sqlite
     rather than through `query()` so a browser can page the raw grid."""
@@ -1288,6 +1367,12 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
         if path == "/api/store/runs":
             return self._json(store_runs())
+        if path == "/api/store/coverage":
+            try:
+                return self._json(store_coverage(
+                    int((qs.get("min_documents") or ["1"])[0])))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
         if path == "/api/store/daily":
             return self._json(store_daily((qs.get("field") or [None])[0],
                                            (qs.get("run_id") or [None])[0]))

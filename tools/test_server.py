@@ -276,6 +276,61 @@ check("filtering by an unknown run_id returns nothing",
 check("store_runs lists the run", any(r["run_id"] == run_id for r in server.store_runs()["runs"]))
 
 # --------------------------------------------------------------------------- #
+section("coverage -- what can we grab consistently, per issuer")
+# --------------------------------------------------------------------------- #
+
+from output_store import DocumentExtraction
+
+cov = OutputStore(tmp_home / "store" / "extractions.sqlite")
+cov_run = cov.start_run("424b2.structured_note", "1", "2026-08-14T00:00:00Z")
+
+
+def doc(issuer, accession, barrier_span, cusip_value):
+    """One filing where barrier_pct may or may not be locatable and cusip may
+    or may not have been read at all."""
+    return DocumentExtraction(
+        accession=accession, document="d.htm", issuer=issuer,
+        filing_date="2026-08-01",
+        fields=[
+            FieldValue(field="barrier_pct", value=70.0, unit="percent_of_initial",
+                       span=barrier_span, provenance="local",
+                       flags=([] if barrier_span else
+                              [{"code": "span_unlocatable", "severity": "warn"}])),
+            FieldValue(field="cusip", value=cusip_value, span=(5, 14) if cusip_value else None,
+                       provenance="local",
+                       flags=[{"code": "gated_no_claude", "severity": "warn"}]),
+        ])
+
+
+cov.write_document(cov_run, doc("ISSUER A", "0001-26-1", (1, 5), "48136CYQ6"))
+cov.write_document(cov_run, doc("ISSUER A", "0001-26-2", (2, 6), "48136CYQ7"))
+cov.write_document(cov_run, doc("ISSUER B", "0002-26-1", None, None))
+cov.close()
+
+cover = server.store_coverage()
+by = {(r["issuer"], r["field"]): r for r in cover["rows"]}
+
+check("issuers and fields are both enumerated",
+      cover["issuers"] == ["ISSUER A", "ISSUER B"] and "barrier_pct" in cover["fields"])
+check("a field located in every filing reads 100%",
+      by[("ISSUER A", "barrier_pct")]["located_rate"] == 1.0)
+check("the same field for another issuer reads 0% -- issuer scope is the point",
+      by[("ISSUER B", "barrier_pct")]["located_rate"] == 0.0)
+check("an unlocatable value is counted as such, not as a miss of the value",
+      by[("ISSUER B", "barrier_pct")]["values_got"] == 1
+      and by[("ISSUER B", "barrier_pct")]["unlocatable"] == 1)
+check("a null value is not counted as a value",
+      by[("ISSUER B", "cusip")]["values_got"] == 0)
+check("gated fields are surfaced separately from located ones",
+      by[("ISSUER A", "cusip")]["gated"] == 2)
+check("documents are counted distinctly from extractions",
+      by[("ISSUER A", "barrier_pct")]["documents"] == 2)
+check("min_documents filters out issuers with too little evidence",
+      all(r["documents"] >= 2 for r in server.store_coverage(2)["rows"]))
+check("human-confirmed examples are counted per issuer+field",
+      by[("ISSUER A", "cusip")]["taught"] == 0)
+
+# --------------------------------------------------------------------------- #
 section("health")
 # --------------------------------------------------------------------------- #
 
