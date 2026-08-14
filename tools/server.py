@@ -328,6 +328,12 @@ def edgar_search_daily(params):
     }
 
 
+def meta_issuer(targets):
+    """The issuer of the first target -- exemplars are keyed by issuer, so this
+    is only used to report how much this run has been taught before it starts."""
+    return (targets[0].get("issuer") if targets else None)
+
+
 def scrubber_run(run_id, targets, fields, home):
     """expand -> reduce -> extraction ladder -> local store, over a caller-chosen
     list of filings.
@@ -370,9 +376,18 @@ def scrubber_run(run_id, targets, fields, home):
     else:
         field_names = [f for f in fields if spec.field(f) is not None]
 
+    # Same exemplar provider as the check (see preview_document): every span a
+    # human confirmed for this (issuer, field) rides along in the rung-3 prompt,
+    # so a run gets better as the store is taught rather than repeating the
+    # same misreads on every filing.
+    vstore = validation_store()
+    taught = sum(1 for f in field_names if vstore(meta_issuer(targets), f))
+    if taught:
+        RUNS.log(run_id, f"{taught} field(s) carry human-confirmed examples from "
+                         f"earlier filings")
     ladder = ExtractionLadder(
         spec, local_client=OllamaClient(OllamaConfig.from_env({})),
-        claude_client=None, claude_enabled=False)
+        claude_client=None, claude_enabled=False, exemplars=vstore)
 
     store = OutputStore(home / "store" / "extractions.sqlite")
     store_run_id = store.start_run(spec.spec_id, getattr(spec, "version", "1"),
@@ -496,6 +511,7 @@ def scrubber_run(run_id, targets, fields, home):
                  if stopped else "run complete")
     finally:
         store.close()
+        vstore.close()
 
 
 def resolve_targets(params):
@@ -678,7 +694,7 @@ def locate_value(text, value, hint_span=None):
     return (best[1], "value-match") if best else (None, None)
 
 
-def preview_document(params):
+def preview_document(params, run_id=None):
     """Dry run on ONE filing: what would this extract, and from WHERE?
 
     Same ladder as a real run, but nothing is written to the output store --
@@ -711,18 +727,32 @@ def preview_document(params):
     fields = params.get("fields") or DEFAULT_FIELDS
     fields = [f for f in fields if spec.field(f) is not None]
 
+    # Hand the ladder the validation store as its exemplar provider: spans a
+    # human marked in earlier filings are read back on rung 3 for this
+    # (issuer, field), so a check reflects what the tool has been TAUGHT, not
+    # just what the base model guesses. Without this the marking UI would be a
+    # write-only diary.
+    vstore = validation_store()
     ladder = ExtractionLadder(
         spec, local_client=OllamaClient(OllamaConfig.from_env({})),
-        claude_client=None, claude_enabled=False)
+        claude_client=None, claude_enabled=False, exemplars=vstore)
     extractor = LadderExtractor(spec, ladder, sections=split_sections(nd))
-    proposals = extractor.propose(
-        RenderDocument.from_normalized(nd), issuer=params.get("issuer"),
-        ex107=bundle.ex107.as_dict() if bundle.ex107 else None,
-        accession=params.get("accession"), document=doc["document"], fields=fields)
+    render_doc = RenderDocument.from_normalized(nd)
+    ex107 = bundle.ex107.as_dict() if bundle.ex107 else None
 
     text = nd.text
     out = []
-    for p in proposals:
+    t0 = time.time()
+    # One field at a time even though propose() takes a list: a 9-field check is
+    # half a minute of model time, and the caller gets each highlight as it
+    # lands instead of a blank wait and then everything at once.
+    for name in fields:
+        if run_id and RUNS.stop_requested(run_id):
+            RUNS.log(run_id, "check stopped -- fields already done are kept")
+            break
+        p = extractor.propose(render_doc, issuer=params.get("issuer"), ex107=ex107,
+                              accession=params.get("accession"),
+                              document=doc["document"], fields=[name])[0]
         span, method = locate_value(text, p.value, p.source_span)
         out.append({
             "field": p.field, "value": p.value, "unit": p.unit,
@@ -737,9 +767,49 @@ def preview_document(params):
             "context": (text[max(0, span[0] - 160):span[1] + 160] if span else None),
             "flags": [f.get("code") for f in (p.flags or [])],
         })
+        if run_id:
+            RUNS.update(run_id, proposals=list(out),
+                        located=sum(1 for x in out if x["span"]))
+            RUNS.log(run_id, f"  {name} = {str(p.value)[:60]} "
+                             f"[{p.rung}{', span ' + method if method else ', no span'}]")
+            RUNS.tick_field(run_id, params.get("accession"), name, time.time() - t0)
+
     return {"accession": params.get("accession"), "document": doc["document"],
             "issuer": params.get("issuer"), "proposals": out,
             "located": sum(1 for p in out if p["span"]), "total": len(out)}
+
+
+def start_preview(params):
+    """Run a check in the background so the browser can watch it.
+
+    Registered in the same registry as an extraction run, so it gets the same
+    progress reporting and the same cooperative stop for free -- a check is a
+    smaller run, not a different kind of thing.
+    """
+    fields = params.get("fields") or DEFAULT_FIELDS
+    run_id = RUNS.create("preview", {"limit": 1, "fields": fields,
+                                      "accession": params.get("accession"),
+                                      "document": params.get("document")})
+    RUNS.update(run_id, proposals=[], located=0)
+
+    def worker():
+        try:
+            RUNS.update(run_id, status="running")
+            RUNS.log(run_id, f"checking {params.get('accession')}")
+            result = preview_document(params, run_id=run_id)
+            RUNS.update(run_id,
+                        status="stopped" if RUNS.stop_requested(run_id) else "done",
+                        finished_at=utcnow(), proposals=result["proposals"],
+                        located=result["located"])
+            RUNS.log(run_id, f"{result['located']} of {len(result['proposals'])} "
+                             f"value(s) located in the text")
+        except Exception as exc:
+            RUNS.update(run_id, status="error", finished_at=utcnow(),
+                        error=f"{type(exc).__name__}: {exc}")
+            RUNS.log(run_id, traceback.format_exc().strip().splitlines()[-1])
+
+    threading.Thread(target=worker, daemon=True, name=f"preview-{run_id}").start()
+    return run_id
 
 
 def validation_store(readonly=False):
@@ -758,7 +828,7 @@ def save_annotation(params):
     accession, document, field) marked again replaces the earlier span rather
     than accumulating contradictory ground truth.
     """
-    from validation import FieldVerdict
+    from validation import FieldVerdict, render_exemplar
 
     for required in ("accession", "document", "field", "span"):
         if not params.get(required):
@@ -785,23 +855,40 @@ def save_annotation(params):
                FieldVerdict.correct(field, value, source_span=tuple(span),
                                     note=params.get("note")))
 
+    kind = "positive" if accepted else "corrected"
+    span_text = params.get("span_text")
+    # The prompt line has to be the shape the ladder renders elsewhere
+    # (`render_exemplar`), not raw span text -- it carries the value verbatim
+    # next to the snippet so the model can copy the confirmed boundary.
+    rendered = render_exemplar(kind, field=field, value=value,
+                               anchor=params.get("anchor"), span_text=span_text)
+
     store = validation_store()
     try:
         store.ensure_session(session, spec_id="424b2.structured_note", now=utcnow())
         store.write_verdict(session, params["accession"], params["document"],
                             verdict, now=utcnow())
-        store.write_exemplar(params.get("issuer"), field,
-                             "positive" if accepted else "corrected",
-                             params.get("span_text") or "", value=value,
-                             anchor=params.get("anchor"),
-                             span_text=params.get("span_text"),
-                             accession=params["accession"], document=params["document"],
-                             form="424b2.structured_note", now=utcnow())
+        # A document reserved for the eval set must never teach (#108) --
+        # exemplars from it would leak the answers into the prompt that is
+        # later scored against them.
+        held_out = store.is_held_out(session, params["accession"], params["document"])
+        taught = bool(params.get("issuer")) and not held_out
+        if taught:
+            store.write_exemplar(params.get("issuer"), field, kind, rendered,
+                                 value=value, anchor=params.get("anchor"),
+                                 span_text=span_text,
+                                 accession=params["accession"],
+                                 document=params["document"],
+                                 form="424b2.structured_note", now=utcnow())
+            examples = len(store.exemplars_for(params.get("issuer"), field))
+        else:
+            examples = 0
     finally:
         store.close()
     return {"saved": True, "field": field, "value": value, "span": list(span),
             "session": session, "verdict": verdict.verdict,
-            "exemplar": bool(params.get("issuer"))}
+            "exemplar": taught, "held_out": held_out, "rendered": rendered,
+            "examples_for_field": examples}
 
 
 def delete_annotation(params):
@@ -1256,7 +1343,12 @@ class Handler(SimpleHTTPRequestHandler):
                               200 if ok else 409)
         if path == "/api/tools/edgar-scrubber/preview":
             try:
-                return self._json(preview_document(params))
+                # `sync` blocks and returns the proposals directly (handy from a
+                # shell); the dashboard takes the tracked job so it can show
+                # progress and stop it.
+                if params.get("sync"):
+                    return self._json(preview_document(params))
+                return self._json({"run_id": start_preview(params)}, 202)
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
         if path == "/api/tools/edgar-scrubber/annotate":

@@ -2633,21 +2633,53 @@ async function previewFirst(){
   const first=Array.from(SEARCH.selected).sort((a,b)=>a-b)[0];
   await openDocument(first===undefined?0:first, true);
 }
+let PREVIEW_POLL=null;
+function stopPreviewPolling(){ if(PREVIEW_POLL){ clearInterval(PREVIEW_POLL); PREVIEW_POLL=null; } }
 async function runPreview(){
   if(!DOC) return;
   const fields=chosenFields();
-  DOC.previewing=true; renderDocPanel(true);
+  if(!fields.length){ DOC.previewError='Pick at least one field to check.'; renderDocPanel(true); return; }
+  DOC.previewing=true; DOC.previewError=null; DOC.proposals=[]; DOC.located=0;
+  DOC.previewProgress={fields_done:0,fields_total:fields.length,current:null,seconds_remaining:null};
+  renderDocPanel(true);
+  let started;
   try{
     const r=await fetch('/api/tools/edgar-scrubber/preview',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({cik:DOC.cik,accession:DOC.accession,document:DOC.document,
                            issuer:DOC.issuer,fields})});
-    const res=await r.json();
-    if(!r.ok) throw new Error(res.error||`HTTP ${r.status}`);
-    DOC.proposals=res.proposals; DOC.located=res.located;
-  }catch(e){ DOC.previewError=e.message; }
-  DOC.previewing=false;
-  renderDocPanel(true);
+    started=await r.json();
+    if(!r.ok) throw new Error(started.error||`HTTP ${r.status}`);
+  }catch(e){
+    DOC.previewing=false; DOC.previewError=e.message; renderDocPanel(true); return;
+  }
+  DOC.previewRunId=started.run_id;
+  pollPreview(started.run_id);
+}
+// Same registry as an extraction run, so a check reports the same way: a bar
+// that moves per field, what is in flight, and a stop that keeps what is done.
+async function pollPreview(runId){
+  stopPreviewPolling();
+  const tick=async()=>{
+    let run;
+    try{ run=await (await fetch(`/api/runs/${runId}`)).json(); }catch(e){ return; }
+    DOC.previewProgress=run.progress;
+    if(run.proposals){ DOC.proposals=run.proposals; DOC.located=run.located||0; }
+    if(['done','error','stopped'].includes(run.status)){
+      stopPreviewPolling();
+      DOC.previewing=false;
+      DOC.previewError=run.error||null;
+      DOC.previewStopped=run.status==='stopped';
+    }
+    renderDocPanel(true);
+  };
+  await tick();
+  PREVIEW_POLL=setInterval(tick,1000);
+}
+async function stopPreview(){
+  if(!DOC||!DOC.previewRunId) return;
+  await fetch(`/api/runs/${DOC.previewRunId}/stop`,{method:'POST',
+    headers:{'Content-Type':'application/json'},body:'{}'});
 }
 async function acceptProposal(idx){
   const p=DOC.proposals[idx];
@@ -2685,6 +2717,9 @@ async function loadAnnotations(){
   renderDocPanel();
 }
 function closeDoc(){
+  // A check in flight keeps polling a document that is gone otherwise, and its
+  // next tick renders into a panel that no longer exists.
+  stopPreviewPolling();
   DOC=null;
   const p=document.getElementById('docPanel');
   if(p){ p.style.display='none'; p.innerHTML=''; }
@@ -2737,6 +2772,7 @@ function docHTML(){
 }
 function renderDocPanel(keepScroll){
   const panel=document.getElementById('docPanel');
+  if(!panel||!DOC){ stopPreviewPolling(); return; }
   const pane=document.getElementById('docText');
   const scroll=keepScroll&&pane?pane.scrollTop:0;
   const fields=(SEARCH.fields||[]).map(f=>f.name);
@@ -2761,7 +2797,26 @@ function renderDocPanel(keepScroll){
         <span class="muted" style="font-size:11.5px;margin-left:auto">select any text below, then label it</span>
       </div>
       ${DOC.previewError?`<div class="err">${esc(DOC.previewError)}</div>`:''}
-      ${DOC.proposals?`<div class="muted" style="font-size:11.5px;margin-bottom:8px">
+      ${(()=>{
+        const p=DOC.previewProgress;
+        if(!p||!p.fields_total) return '';
+        const pct=Math.round(100*(p.fields_done||0)/p.fields_total);
+        const live=DOC.previewing;
+        return `<div style="margin-bottom:10px">
+          <div style="height:8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:${live?'#e3b341':'var(--green)'};transition:width .3s"></div>
+          </div>
+          <div class="muted" style="font-size:11.5px;display:flex;gap:12px;flex-wrap:wrap;margin-top:4px;align-items:center">
+            <span><strong>${pct}%</strong></span>
+            <span>${p.fields_done||0}/${p.fields_total} fields</span>
+            ${p.current&&live?`<span>now: ${esc(p.current.field)}</span>`:''}
+            ${p.seconds_elapsed?`<span>elapsed ${fmtDuration(p.seconds_elapsed)}</span>`:''}
+            ${live&&p.seconds_remaining!=null?`<span>~${fmtDuration(p.seconds_remaining)} left</span>`:''}
+            ${DOC.previewStopped?'<span style="color:#e3b341">stopped — fields already checked are kept</span>':''}
+            ${live?`<button onclick="stopPreview()" style="margin-left:auto;background:transparent;border:1px solid var(--red);color:var(--red);border-radius:5px;padding:2px 10px;font-size:11.5px;cursor:pointer">stop</button>`:''}
+          </div></div>`;
+      })()}
+      ${DOC.proposals&&DOC.proposals.length?`<div class="muted" style="font-size:11.5px;margin-bottom:8px">
         <span style="color:var(--green)">■</span> proposed by the extractor (${DOC.located}/${DOC.proposals.length} located in the text) ·
         <span style="color:var(--accent)">■</span> confirmed by you (${DOC.annotations.length})</div>`:''}
       <div style="display:grid;grid-template-columns:1fr 280px;gap:12px">
@@ -2781,7 +2836,7 @@ function renderDocPanel(keepScroll){
               <input id="markValue" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:4px;font-size:12px;margin:3px 0 8px"></label>
             <button onclick="saveMark()" style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:5px;padding:5px 10px;font-size:12px;cursor:pointer;width:100%">Save highlight</button>
           </div>
-          ${DOC.proposals?`<div style="font-weight:600;font-size:12.5px;margin-bottom:6px">What it would pull</div>
+          ${DOC.proposals&&DOC.proposals.length?`<div style="font-weight:600;font-size:12.5px;margin-bottom:6px">What it would pull${DOC.previewing?' (so far)':''}</div>
             <div style="max-height:230px;overflow:auto;margin-bottom:12px">
             ${DOC.proposals.map((p,idx)=>{
               const confirmed=DOC.annotations.some(a=>a.field===p.field);
