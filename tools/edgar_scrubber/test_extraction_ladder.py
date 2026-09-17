@@ -222,6 +222,60 @@ def test_local_confident_no_escalation():
 
 
 # --------------------------------------------------------------------------- #
+def test_confidence_must_be_a_probability():
+    section("Confidence is validated, not trusted: garbage escalates, never scores")
+
+    # The wire contract is what makes this structural.
+    schema = el.build_wire_schema([EV_FIELD])["json_schema"]["schema"]
+    props = schema["properties"][next(iter(schema["properties"]))]
+    check("`c` is bounded to [0,1] in the constrained-decode schema",
+          props["properties"]["c"].get("minimum") == 0.0
+          and props["properties"]["c"].get("maximum") == 1.0)
+    check("`c` is required, so a silent omission cannot pass the gate vacuously",
+          "c" in props["required"])
+
+    # Values observed in the live store before this was fixed.
+    for bad in (1.6495800000000002e+30, 1000.0, 1.57, 100.0, -0.1,
+                float("nan"), "0.9", True):
+        check(f"{bad!r} is rejected as a confidence",
+              el.coerce_confidence(bad) == el.INVALID_CONFIDENCE)
+    for good, want in ((None, None), (0.0, 0.0), (0.35, 0.35), (1.0, 1.0)):
+        check(f"{good!r} survives coercion unchanged",
+              el.coerce_confidence(good) == want or
+              (good is None and el.coerce_confidence(good) is None))
+
+    # An unreadable confidence is NOT the same as a low one, and not the same
+    # as an absent one: it must fail the signal, where absent passes vacuously.
+    g_bad = el.evaluate_gate(EV_FIELD, 972.4, span_of("972.4"),
+                              model_confidence=el.INVALID_CONFIDENCE, source_text=DOC)
+    g_absent = el.evaluate_gate(EV_FIELD, 972.4, span_of("972.4"),
+                                 model_confidence=None, source_text=DOC)
+    check("an uninterpretable confidence escalates",
+          g_bad.escalate and g_bad.reason == "model_confidence")
+    check("an absent confidence still passes vacuously", not g_absent.escalate)
+
+    # End to end: a model that echoes its own value into `c` gets escalated,
+    # instead of self-certifying. 1000.0 in `c` is the exact shape seen in the
+    # store for estimated_value_per_1000.
+    local = FakeChatClient([(wire_body(EV_FIELD, 1000.0, span=span_of("972.4"), conf=1000.0), USAGE)])
+    claude = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.97), USAGE)])
+    ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
+                                  claude_client=claude, claude_model="claude-sonnet-4-6")
+    r = ladder.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
+    check("a value echoed into `c` does not self-certify -- it escalates",
+          r.escalated is True and r.rung == "claude")
+
+    # Local-only: the bad confidence must not reach the store as a number.
+    local2 = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=1e30), USAGE)])
+    ladder2 = el.ExtractionLadder(NOTE_SPEC, local_client=local2, local_model="qwen2.5:7b")
+    r2 = ladder2.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
+    check("an uninterpretable confidence is never persisted as a number",
+          r2.confidence is None)
+    check("and it is flagged rather than silently dropped",
+          any(f.code == "confidence_uninterpretable" for f in r2.flags))
+
+
+# --------------------------------------------------------------------------- #
 def test_out_of_bounds_escalates_to_claude():
     section("Bounds gate signal: out-of-bounds local value escalates to Claude")
     local = FakeChatClient([(wire_body(EV_FIELD, 1240.0, span=span_of("1240.0"), conf=0.9), USAGE)])
@@ -668,6 +722,7 @@ def main():
     test_span_support_catches_fabrication_in_range()
     test_span_support_tolerates_issuer_formatting()
     test_span_support_passes_vacuously_without_source_text()
+    test_confidence_must_be_a_probability()
 
     if failures:
         print(f"\n{len(failures)} check(s) FAILED:")

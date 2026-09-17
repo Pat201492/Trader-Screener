@@ -175,9 +175,16 @@ def build_wire_schema(fields):
                 "v": v_schema,
                 "s": {"type": ["array", "null"], "items": {"type": "integer"},
                       "minItems": 2, "maxItems": 2},
-                "c": {"type": "number"},
+                # A probability, and constrained decode is what makes it one.
+                # Unbounded, this slot came back holding the VALUE the model had
+                # just emitted (a barrier of 0.95 self-certifying at "0.95"), or
+                # plain garbage -- 1.6e+30 and 1000000.0 were both observed in
+                # the store. Both make `evaluate_gate`'s floor meaningless, and
+                # a copied value inverts it: a wrong big number passes, a right
+                # small one escalates.
+                "c": {"type": "number", "minimum": 0.0, "maximum": 1.0},
             },
-            "required": ["v", "s"],
+            "required": ["v", "s", "c"],
         }
     return {
         "type": "json_schema",
@@ -250,6 +257,29 @@ def build_messages(field_def, text, *, table_context=None, exemplars=None):
     ]
 
 
+#: A `c` that was present but is not a probability. Distinct from None ("the
+#: model did not report one", which `evaluate_gate` passes vacuously): garbage
+#: here is positive evidence the output is unreliable, so it must FAIL the
+#: gate rather than be waved through. `-inf` is out of band and fails closed
+#: against any floor even if some future path forgets to check it explicitly.
+INVALID_CONFIDENCE = float("-inf")
+
+
+def coerce_confidence(raw):
+    """Wire `c` -> a probability in [0,1], None if absent, INVALID_CONFIDENCE
+    if present but not one. Constrained decode should already guarantee the
+    range (`build_wire_schema`); this is the backstop for an unconstrained
+    client, a schema-ignoring model, or a replayed old payload."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return INVALID_CONFIDENCE
+    value = float(raw)
+    if value != value or value < 0.0 or value > 1.0:   # NaN or out of range
+        return INVALID_CONFIDENCE
+    return value
+
+
 def parse_ladder_response(fields, payload):
     """wire-keyed `{v, s, c}` payload -> {canonical_name: (value, span, conf)}."""
     by_key = {_wire_key(f): f for f in fields}
@@ -265,7 +295,7 @@ def parse_ladder_response(fields, payload):
         else:
             value, s, conf = entry, None, None
         span = tuple(s) if isinstance(s, (list, tuple)) and len(s) == 2 else None
-        out[f.name] = (value, span, conf)
+        out[f.name] = (value, span, coerce_confidence(conf))
     return out
 
 
@@ -532,7 +562,12 @@ def evaluate_gate(field_def, value, span, *, ex107=None, spec=None, samples=None
     else:
         signals.append(GateSignal("self_consistency", True, "single sample, not checked"))
 
-    if model_confidence is not None:
+    if model_confidence is INVALID_CONFIDENCE or model_confidence == INVALID_CONFIDENCE:
+        # Not "low confidence" -- a model that reports 1.6e+30 has told you
+        # nothing about this value except that its output cannot be read.
+        signals.append(GateSignal("model_confidence", False,
+                                   "self-reported confidence is not a probability in [0,1]"))
+    elif model_confidence is not None:
         conf_ok = model_confidence >= confidence_floor
         signals.append(GateSignal("model_confidence", conf_ok,
                                    "" if conf_ok else
@@ -934,7 +969,18 @@ class ExtractionLadder:
 
         shadow: ShadowComparison when rule in shadow mode (comparing rule vs model).
         """
+        # The gate has already had its say on an unreadable confidence; what
+        # lands in the store must be a probability or nothing, so `Results`
+        # and `Coverage` can never average a 1.6e+30 into a score.
+        if confidence == INVALID_CONFIDENCE:
+            confidence = None
+            flags_extra = [Flag(f.name, "confidence_uninterpretable", "warn",
+                                "the model reported a confidence outside [0,1]; it is "
+                                "discarded and this value is treated as unverified")]
+        else:
+            flags_extra = []
         flags = self.spec.check_value(f.name, value, ex107=ex107) if value is not None else []
+        flags = list(flags) + flags_extra
         if gated:
             flags = list(flags) + [Flag(
                 f.name, "gated_no_claude", "warn",
