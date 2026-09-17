@@ -688,13 +688,19 @@ if __name__ == "__main__":
         constant that happens to work for one document layout."""
 
         def chat_completion(self, messages, model=None, response_format=None, **kw):
+            try:  # package import: tools.edgar_scrubber.eval_harness
+                from . import extraction_ladder as el
+            except ImportError:  # standalone: python tools/edgar_scrubber/eval_harness.py
+                import extraction_ladder as el
             props = response_format["json_schema"]["schema"]["properties"]
             key = next(iter(props))
             content = messages[-1]["content"]
             src = content.split("SOURCE TEXT:\n", 1)[-1]
             i = src.find("70.00%")
             s = [i, i + 6] if i >= 0 else None
-            body = json.dumps({key: {"v": 70.0, "s": s, "c": 0.9}})
+            body = json.dumps({key: {el.WIRE_VALUE_KEY: 70.0,
+                                     el.WIRE_SPAN_KEY: s,
+                                     el.WIRE_CONF_KEY: 0.9}})
             return {"choices": [{"message": {"content": body}}],
                     "usage": {"prompt_tokens": 5, "completion_tokens": 5}}
 

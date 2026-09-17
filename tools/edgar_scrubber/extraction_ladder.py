@@ -150,8 +150,36 @@ _WIRE_TYPE_MAP = {
 }
 
 
+#: The three slots of one field's wire entry. Self-describing on purpose.
+#: They were `v`/`s`/`c` to save tokens (#104), and measured against real
+#: filings that trade was a bad one: a 7B filled the unlabelled value slot with
+#: a CONFIDENCE-shaped number. Across 25 Citigroup 424B2s, `estimated_value_per_1000`
+#: came back 0.0 twenty-one times out of twenty-five, and `contingent_coupon_rate`
+#: read 0.95/0.9/0.8/1.0 -- the vocabulary of a probability, not of a coupon
+#: (11.40) or a barrier (60.00). String fields like `issuer` and `cusip` were
+#: unaffected, because a string slot cannot be confused with a probability.
+#: The saving was ~4 tokens per field per call; the cost was the field itself.
+#: Referenced by `SYSTEM_PROMPT` and `build_wire_schema` alike so the prompt
+#: and the schema can never describe different key names.
+WIRE_VALUE_KEY = "value"
+WIRE_SPAN_KEY = "span"
+WIRE_CONF_KEY = "confidence"
+
+#: Superseded short keys, still accepted on the way IN so a cached response or
+#: a replayed transcript from before the rename still parses.
+_LEGACY_WIRE_KEYS = {WIRE_VALUE_KEY: "v", WIRE_SPAN_KEY: "s", WIRE_CONF_KEY: "c"}
+
+
 def _wire_key(f):
     return f.wire_key or f.name
+
+
+def _entry_get(entry, key):
+    """Read one slot, preferring the current name and falling back to the
+    short one it replaced."""
+    if key in entry:
+        return entry[key]
+    return entry.get(_LEGACY_WIRE_KEYS[key])
 
 
 def build_wire_schema(fields):
@@ -172,9 +200,9 @@ def build_wire_schema(fields):
         props[_wire_key(f)] = {
             "type": "object",
             "properties": {
-                "v": v_schema,
-                "s": {"type": ["array", "null"], "items": {"type": "integer"},
-                      "minItems": 2, "maxItems": 2},
+                WIRE_VALUE_KEY: v_schema,
+                WIRE_SPAN_KEY: {"type": ["array", "null"], "items": {"type": "integer"},
+                                "minItems": 2, "maxItems": 2},
                 # A probability, and constrained decode is what makes it one.
                 # Unbounded, this slot came back holding the VALUE the model had
                 # just emitted (a barrier of 0.95 self-certifying at "0.95"), or
@@ -182,9 +210,9 @@ def build_wire_schema(fields):
                 # the store. Both make `evaluate_gate`'s floor meaningless, and
                 # a copied value inverts it: a wrong big number passes, a right
                 # small one escalates.
-                "c": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                WIRE_CONF_KEY: {"type": "number", "minimum": 0.0, "maximum": 1.0},
             },
-            "required": ["v", "s", "c"],
+            "required": [WIRE_VALUE_KEY, WIRE_SPAN_KEY, WIRE_CONF_KEY],
         }
     return {
         "type": "json_schema",
@@ -201,12 +229,26 @@ def build_wire_schema(fields):
 # constant, not inlined in `build_messages`, so `static_prefix` builds the
 # EXACT same text a real call sends -- one source of truth, not two copies
 # that can drift apart (#106).
+# Every slot is described, and the value slot FIRST. The previous wording
+# explained the span and the confidence and never once mentioned the value
+# key -- so the only numeric instruction in the whole prompt was "0 to 1",
+# and that is exactly the range the value slot came back in. Saying what the
+# value is, and saying explicitly that it is not the confidence, is the other
+# half of the `v` -> `value` rename above.
 SYSTEM_PROMPT = (
     "You are an SEC EDGAR extraction engine. Extract exactly the requested "
-    "field from SOURCE TEXT. `s` must be the [start, end] character offset "
-    "pair into SOURCE TEXT for the span that supports the value, or null if "
-    "you cannot locate one -- never guess a span. `c` is your confidence in "
-    "the value, 0 to 1."
+    "field from SOURCE TEXT. "
+    f"`{WIRE_VALUE_KEY}` is the extracted field itself: the number or text "
+    "the document states, in the document's own units. A percentage is the "
+    "percent figure as written, not a fraction of one. A per-note dollar "
+    "amount is the dollar figure as written. Use null when the document "
+    "does not state the field. "
+    f"`{WIRE_SPAN_KEY}` is the [start, end] character offset pair into "
+    "SOURCE TEXT for the text that supports the value, or null if you "
+    "cannot locate one -- never guess a span. "
+    f"`{WIRE_CONF_KEY}` is how sure you are, 0 to 1. It describes the "
+    f"value; it is never itself the answer. Never copy `{WIRE_CONF_KEY}` "
+    f"into `{WIRE_VALUE_KEY}`."
 )
 
 
@@ -291,7 +333,9 @@ def parse_ladder_response(fields, payload):
         if f is None:
             continue
         if isinstance(entry, dict):
-            value, s, conf = entry.get("v"), entry.get("s"), entry.get("c")
+            value = _entry_get(entry, WIRE_VALUE_KEY)
+            s = _entry_get(entry, WIRE_SPAN_KEY)
+            conf = _entry_get(entry, WIRE_CONF_KEY)
         else:
             value, s, conf = entry, None, None
         span = tuple(s) if isinstance(s, (list, tuple)) and len(s) == 2 else None
@@ -1025,8 +1069,9 @@ if __name__ == "__main__":
             self.value, self.span, self.conf = value, span, conf
         def chat_completion(self, messages, model=None, temperature=None,
                              max_tokens=None, top_p=None, response_format=None):
-            body = json.dumps({"ev1000": {"v": self.value, "s": list(self.span) if self.span else None,
-                                           "c": self.conf}})
+            body = json.dumps({"ev1000": {WIRE_VALUE_KEY: self.value,
+                                           WIRE_SPAN_KEY: list(self.span) if self.span else None,
+                                           WIRE_CONF_KEY: self.conf}})
             return {"choices": [{"message": {"content": body}}],
                     "usage": {"prompt_tokens": 120, "completion_tokens": 12}}
 

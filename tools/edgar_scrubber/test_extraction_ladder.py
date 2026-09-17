@@ -68,9 +68,10 @@ def span_of(needle, doc=DOC):
 
 def wire_body(field_def, value, span=None, conf=None):
     key = field_def.wire_key or field_def.name
-    entry = {"v": value, "s": list(span) if span else None}
+    entry = {el.WIRE_VALUE_KEY: value,
+             el.WIRE_SPAN_KEY: list(span) if span else None}
     if conf is not None:
-        entry["c"] = conf
+        entry[el.WIRE_CONF_KEY] = conf
     return json.dumps({key: entry})
 
 
@@ -228,11 +229,11 @@ def test_confidence_must_be_a_probability():
     # The wire contract is what makes this structural.
     schema = el.build_wire_schema([EV_FIELD])["json_schema"]["schema"]
     props = schema["properties"][next(iter(schema["properties"]))]
-    check("`c` is bounded to [0,1] in the constrained-decode schema",
-          props["properties"]["c"].get("minimum") == 0.0
-          and props["properties"]["c"].get("maximum") == 1.0)
-    check("`c` is required, so a silent omission cannot pass the gate vacuously",
-          "c" in props["required"])
+    check("the confidence slot is bounded to [0,1] in the constrained-decode schema",
+          props["properties"][el.WIRE_CONF_KEY].get("minimum") == 0.0
+          and props["properties"][el.WIRE_CONF_KEY].get("maximum") == 1.0)
+    check("it is required, so a silent omission cannot pass the gate vacuously",
+          el.WIRE_CONF_KEY in props["required"])
 
     # Values observed in the live store before this was fixed.
     for bad in (1.6495800000000002e+30, 1000.0, 1.57, 100.0, -0.1,
@@ -273,6 +274,53 @@ def test_confidence_must_be_a_probability():
           r2.confidence is None)
     check("and it is flagged rather than silently dropped",
           any(f.code == "confidence_uninterpretable" for f in r2.flags))
+
+
+# --------------------------------------------------------------------------- #
+def test_wire_slots_are_self_describing():
+    section("Wire slots are named, and the prompt explains all three")
+
+    schema = el.build_wire_schema([EV_FIELD])["json_schema"]["schema"]
+    entry = schema["properties"][next(iter(schema["properties"]))]
+    check("the value slot is named, not `v`",
+          el.WIRE_VALUE_KEY in entry["properties"] and "v" not in entry["properties"])
+    check("the span slot is named, not `s`",
+          el.WIRE_SPAN_KEY in entry["properties"] and "s" not in entry["properties"])
+    check("the confidence slot is named, not `c`",
+          el.WIRE_CONF_KEY in entry["properties"] and "c" not in entry["properties"])
+
+    # The old prompt described `s` and `c` and never mentioned the value slot,
+    # which left "0 to 1" as the only numeric instruction in it -- and that is
+    # the range the value came back in on real filings.
+    for slot in (el.WIRE_VALUE_KEY, el.WIRE_SPAN_KEY, el.WIRE_CONF_KEY):
+        check(f"the system prompt explains `{slot}`", slot in el.SYSTEM_PROMPT)
+    check("the prompt says outright not to copy confidence into value",
+          f"Never copy `{el.WIRE_CONF_KEY}` into `{el.WIRE_VALUE_KEY}`" in el.SYSTEM_PROMPT)
+    check("the prompt states the unit convention (percent, not a fraction of one)",
+          "not a fraction of one" in el.SYSTEM_PROMPT)
+
+    # A worked example in the prompt IS an answer key. Concrete figures here
+    # (`970.20`, `60.00`, `11.40`) were measured being copied straight into the
+    # output: 5 of 8 filings returned 970.20 for estimated_value_per_1000 while
+    # their own text said 983.00, 985.00, 989.10, 991.80, 994.30. That is worse
+    # than the bug it replaced -- a plausible in-bounds wrong answer passes the
+    # bounds gate, where the 0.0 it used to return was caught. Same rule
+    # `test_server.py` already enforces for the draft-spec path: the answer key
+    # is never handed to the model.
+    import re as _re
+    numbers = _re.findall(r"\d+\.\d+", el.SYSTEM_PROMPT)
+    check(f"the prompt contains no copyable field values (found {numbers})",
+          not numbers)
+
+    # A cached response or replayed transcript from before the rename.
+    key = EV_FIELD.wire_key or EV_FIELD.name
+    legacy = el.parse_ladder_response([EV_FIELD], {key: {"v": 972.4, "s": [10, 15], "c": 0.9}})
+    check("a legacy short-key payload still parses",
+          legacy[EV_FIELD.name] == (972.4, (10, 15), 0.9))
+    current = el.parse_ladder_response([EV_FIELD], {key: {
+        el.WIRE_VALUE_KEY: 972.4, el.WIRE_SPAN_KEY: [10, 15], el.WIRE_CONF_KEY: 0.9}})
+    check("and the named-key payload parses identically",
+          current[EV_FIELD.name] == legacy[EV_FIELD.name])
 
 
 # --------------------------------------------------------------------------- #
@@ -723,6 +771,7 @@ def main():
     test_span_support_tolerates_issuer_formatting()
     test_span_support_passes_vacuously_without_source_text()
     test_confidence_must_be_a_probability()
+    test_wire_slots_are_self_describing()
 
     if failures:
         print(f"\n{len(failures)} check(s) FAILED:")
