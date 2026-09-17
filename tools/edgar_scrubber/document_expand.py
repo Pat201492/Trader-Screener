@@ -252,17 +252,54 @@ _TAG_STRIP_RE = re.compile(r"<[^>]+>")
 # enum -- every fact is ALSO kept verbatim in `Ex107Facts.raw`, so a tag this
 # map doesn't recognize is never silently dropped, just not promoted to a
 # canonical field.
-_FFD_FIELD_MAP = {
-    "aggregateofferingamount": "aggregate_principal",
-    "totalofferingamount": "aggregate_principal",
-    "proposedmaxaggregateofferingprice": "aggregate_principal",
-    "maximumaggregateofferingprice": "aggregate_principal",
-    "amountregistered": "amount_registered",
-    "totalfeeamount": "total_fee_amount",
-    "feeamount": "total_fee_amount",
-    "totalofferingamountnet": "net_offering_amount",
-    "feerate": "fee_rate",
+# The SEC's filing-fee taxonomy tags ABBREVIATED element names
+# (`ffd:TtlOfferingAmt`, `ffd:AmtSctiesRegd`), not the spelled-out ones. Only
+# `FeeRate` happens to be spelled in full, which is why it was the single
+# canonical field that ever populated from a real exhibit -- everything else
+# silently stayed None and `external_equals` skipped the cross-check as
+# "exhibit absent" (`field_spec._check_cross`). Spelled-out names are kept as
+# trailing aliases so a hand-written or pre-taxonomy exhibit still resolves.
+#
+# Ordered by preference, most specific first.
+_FFD_ALIASES = {
+    "aggregate_principal": (
+        "ttlofferingamt", "nrrtvmaxaggtofferingpric", "maxaggtofferingpric",
+        "aggregateofferingamount", "totalofferingamount",
+        "proposedmaxaggregateofferingprice", "maximumaggregateofferingprice",
+    ),
+    "amount_registered": ("amtsctiesregd", "amountregistered"),
+    "total_fee_amount": ("ttlfeeamt", "feeamt", "totalfeeamount", "feeamount"),
+    # `ffd:NetFeeAmt` is a net FEE, not a net offering amount -- mapping it here
+    # would put a ~$228 figure where a ~$1.65M one belongs, so it is left out
+    # and this field stays None until an exhibit tags the amount itself.
+    "net_offering_amount": ("ttlofferingamtnet", "totalofferingamountnet"),
+    "fee_rate": ("feerate",),
 }
+
+
+def _resolve_canonical(facts):
+    """Fill the canonical attributes from `raw`, preferring the first alias
+    that carries a NONZERO number.
+
+    Order matters and zero is not a value here. A 424B2 shelf takedown filed
+    under Rule 457(r)/457(n) tags `MaxAggtOfferingPric` as 0.0 on the guarantee
+    row -- no separate fee is payable -- while the offering's real size sits in
+    `TtlOfferingAmt`. Taking the first alias present would therefore report an
+    aggregate principal of $0 on exactly the filings this cross-check exists
+    to verify. A zero is still used when it is genuinely all the exhibit
+    tagged, so "tagged zero" stays distinguishable from "not tagged".
+    """
+    for canon, names in _FFD_ALIASES.items():
+        if getattr(facts, canon, None) is not None:
+            continue
+        nums = [facts.raw[n] for n in names
+                if isinstance(facts.raw.get(n), (int, float))
+                and not isinstance(facts.raw.get(n), bool)]
+        value = next((n for n in nums if n), None)
+        if value is None:
+            value = nums[0] if nums else None
+        if value is not None:
+            setattr(facts, canon, float(value))
 
 
 @dataclass
@@ -327,6 +364,30 @@ def _numeric_value(raw_text, attrs):
     return value
 
 
+def _iter_ix_facts(text):
+    """Yield `(kind, attr_text, inner)` for every inline-XBRL fact, including
+    facts NESTED inside another one.
+
+    A narrative fact routinely wraps the tagged number it describes: Goldman
+    Sachs files the offering size as an `ffd:NrrtvMaxAggtOfferingPric`
+    nonFraction sitting inside the `ffd:NrrtvDsclsr` sentence. Treating an
+    outer fact's content as opaque text therefore dropped the only number the
+    exhibit carried -- the exhibit parsed "successfully" with ten facts and no
+    amount at all.
+
+    Same-kind nesting (a nonFraction inside a nonFraction) is not untangled
+    here: the non-greedy close in `_IX_FACT_RE` binds the first `</ix:...>`.
+    No exhibit observed does that, and it is preferable to a nesting-aware
+    parser's cost for a stdlib-only module.
+    """
+    for m in _IX_FACT_RE.finditer(text):
+        inner = m.group(3)
+        yield m.group(1).lower(), m.group(2), inner
+        if "<ix:" in inner.lower():
+            for nested in _iter_ix_facts(inner):
+                yield nested
+
+
 def parse_ex107_xbrl(html_text, document_name=None):
     """Scan an EX-107 document's inline-XBRL facts for the `ffd:` namespace
     and return an `Ex107Facts`. Returns an `Ex107Facts` with an empty `raw`
@@ -336,8 +397,7 @@ def parse_ex107_xbrl(html_text, document_name=None):
     from "parsed, nothing there."
     """
     facts = Ex107Facts(document=document_name)
-    for m in _IX_FACT_RE.finditer(html_text):
-        kind, attr_text, inner = m.group(1).lower(), m.group(2), m.group(3)
+    for kind, attr_text, inner in _iter_ix_facts(html_text):
         attrs = _parse_attrs(attr_text)
         local = _local_name(attrs.get("name"))
         if not local:
@@ -353,25 +413,33 @@ def parse_ex107_xbrl(html_text, document_name=None):
             continue
         facts.raw[local] = value
 
-        canon = _FFD_FIELD_MAP.get(local)
-        if canon and getattr(facts, canon, None) is None:
-            setattr(facts, canon, value)
-
+    _resolve_canonical(facts)
     return facts
 
 
 if __name__ == "__main__":
+    # Element names here are the ones the SEC ACTUALLY tags, copied from a live
+    # exhibit (Citigroup 0000950103-26-013335). An invented spelled-out
+    # vocabulary in this self-check is what let the name-map bug pass green
+    # while every real filing resolved to None -- so this sample also keeps the
+    # 457(n) shape that broke it: `MaxAggtOfferingPric` tagged 0.0 alongside
+    # the real size in `TtlOfferingAmt`.
     sample_ex107 = """
     <html><body>
     <table>
     <tr><td>Security Type</td><td>Fee Rate</td><td>Amount Registered</td>
-        <td>Aggregate Offering Amount</td><td>Fee Amount</td></tr>
+        <td>Maximum Aggregate Offering Price</td><td>Fee Amount</td></tr>
     <tr>
-      <td>Notes</td>
-      <td><ix:nonFraction name="ffd:FeeRate" contextRef="c1" unitRef="pure" decimals="7">0.0001102</ix:nonFraction></td>
-      <td><ix:nonFraction name="ffd:AmountRegistered" contextRef="c1" unitRef="usd" decimals="0">2500000</ix:nonFraction></td>
-      <td><ix:nonFraction name="ffd:AggregateOfferingAmount" contextRef="c1" unitRef="usd" decimals="0" scale="0">2500000</ix:nonFraction></td>
-      <td><ix:nonFraction name="ffd:TotalFeeAmount" contextRef="c1" unitRef="usd" decimals="2">275.50</ix:nonFraction></td>
+      <td>Other</td>
+      <td><ix:nonFraction name="ffd:FeeRate" contextRef="c1" unitRef="pure" decimals="7">0.0001381</ix:nonFraction></td>
+      <td><ix:nonFraction name="ffd:AmtSctiesRegd" contextRef="c1" unitRef="usd" decimals="0">0</ix:nonFraction></td>
+      <td><ix:nonFraction name="ffd:MaxAggtOfferingPric" contextRef="c1" unitRef="usd" decimals="0" scale="0">0</ix:nonFraction></td>
+      <td><ix:nonFraction name="ffd:FeeAmt" contextRef="c1" unitRef="usd" decimals="2">0</ix:nonFraction></td>
+    </tr>
+    <tr>
+      <td><ix:nonFraction name="ffd:TtlOfferingAmt" contextRef="c1" unitRef="usd" decimals="0">1650000</ix:nonFraction></td>
+      <td><ix:nonFraction name="ffd:TtlFeeAmt" contextRef="c1" unitRef="usd" decimals="2">227.87</ix:nonFraction></td>
+      <td><ix:nonFraction name="ffd:NetFeeAmt" contextRef="c1" unitRef="usd" decimals="2">227.87</ix:nonFraction></td>
     </tr>
     </table>
     <ix:nonNumeric name="ffd:OfferingNote" contextRef="c1">Structured notes offering</ix:nonNumeric>
@@ -379,10 +447,21 @@ if __name__ == "__main__":
     """
     facts = parse_ex107_xbrl(sample_ex107, document_name="ex107.htm")
     print("EX-107 facts:", facts.as_dict())
-    assert facts.aggregate_principal == 2500000.0
-    assert facts.total_fee_amount == 275.50
-    assert facts.fee_rate == 0.0001102
+    # The offering size comes from TtlOfferingAmt, NOT the 0.0 on the 457(n) row.
+    assert facts.aggregate_principal == 1650000.0, facts.aggregate_principal
+    assert facts.total_fee_amount == 227.87, facts.total_fee_amount
+    assert facts.fee_rate == 0.0001381, facts.fee_rate
+    # Genuinely tagged zero stays zero -- distinguishable from "not tagged".
+    assert facts.amount_registered == 0.0, facts.amount_registered
+    # NetFeeAmt is a fee, so it must never land in net_offering_amount.
+    assert facts.net_offering_amount is None, facts.net_offering_amount
     assert facts.raw["offeringnote"] == "Structured notes offering"
+
+    # Spelled-out aliases still resolve, for a hand-built or pre-taxonomy exhibit.
+    legacy = parse_ex107_xbrl(
+        '<ix:nonFraction name="ffd:AggregateOfferingAmount" contextRef="c1" '
+        'unitRef="usd" decimals="0">2500000</ix:nonFraction>')
+    assert legacy.aggregate_principal == 2500000.0, legacy.aggregate_principal
 
     print("category(424b2.htm, '424B2') ->", classify_document("424b2.htm", "424B2"))
     print("category(ex107.htm, 'EX-FILING FEES') ->", classify_document("ex107.htm", "EX-FILING FEES"))

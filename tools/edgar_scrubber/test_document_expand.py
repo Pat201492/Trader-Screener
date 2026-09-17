@@ -250,6 +250,69 @@ typed_primary_doc = de.expand_accession(typed_client, CIK, ACCESSION).primary()
 check("a typed manifest still resolves its declared primary",
       typed_primary_doc is not None and typed_primary_doc.name == "primary424b2.htm")
 
+section("EX-107 uses the SEC's REAL element names, not a spelled-out invention")
+
+# Every fixture below is copied from a live exhibit. The bug this section
+# guards against passed a green self-check for months because that check
+# invented element names (`ffd:AggregateOfferingAmount`) the SEC does not tag,
+# so `aggregate_principal` was None on 100% of real filings and
+# `field_spec._check_cross` skipped the cross-check as "exhibit absent".
+
+# Citigroup 0000950103-26-013335: a Rule 457(n) guarantee row tags the max
+# aggregate offering price as ZERO, with the real size in TtlOfferingAmt.
+CITI_EX107 = """
+<ix:nonFraction name="ffd:FeeRate" contextRef="c1" unitRef="pure" decimals="7">0.0001381</ix:nonFraction>
+<ix:nonFraction name="ffd:MaxAggtOfferingPric" contextRef="c1" unitRef="usd" decimals="0">0</ix:nonFraction>
+<ix:nonFraction name="ffd:FeeAmt" contextRef="c1" unitRef="usd" decimals="2">0</ix:nonFraction>
+<ix:nonFraction name="ffd:TtlOfferingAmt" contextRef="c1" unitRef="usd" decimals="0">1,650,000</ix:nonFraction>
+<ix:nonFraction name="ffd:TtlFeeAmt" contextRef="c1" unitRef="usd" decimals="2">227.87</ix:nonFraction>
+"""
+citi = de.parse_ex107_xbrl(CITI_EX107, "citi.htm")
+check("abbreviated ffd: names resolve at all (TtlFeeAmt -> total_fee_amount)",
+      citi.total_fee_amount == 227.87)
+check("a 457(n) zero never wins over the row carrying the real offering size",
+      citi.aggregate_principal == 1650000.0)
+
+# Wells Fargo 0001839882-26-042967 tags ONLY the narrative price.
+WFC_EX107 = """
+<ix:nonFraction name="ffd:NrrtvMaxAggtOfferingPric" contextRef="c1" unitRef="usd" decimals="-3">1,000,000</ix:nonFraction>
+"""
+check("the narrative max aggregate price is enough on its own",
+      de.parse_ex107_xbrl(WFC_EX107, "wfc.htm").aggregate_principal == 1000000.0)
+
+# Goldman 0001193125-26-378405 nests the number INSIDE the narrative fact.
+GS_EX107 = """
+<ix:nonNumeric name="ffd:NrrtvDsclsr" contextRef="c1">The maximum aggregate offering price is
+  $<ix:nonFraction name="ffd:NrrtvMaxAggtOfferingPric" contextRef="c1" unitRef="U_USD"
+    scale="0" decimals="-3" format="ixt:num-dot-decimal">5,758,000</ix:nonFraction>.
+</ix:nonNumeric>
+"""
+gs = de.parse_ex107_xbrl(GS_EX107, "gs.htm")
+check("a fact nested inside a narrative fact is not swallowed as text",
+      gs.aggregate_principal == 5758000.0)
+check("the enclosing narrative fact is still captured too",
+      "nrrtvdsclsr" in gs.raw)
+
+# Semantics that must NOT be papered over to make a field populate.
+NETFEE_EX107 = """
+<ix:nonFraction name="ffd:NetFeeAmt" contextRef="c1" unitRef="usd" decimals="2">227.87</ix:nonFraction>
+"""
+check("a net FEE is never reported as a net OFFERING amount",
+      de.parse_ex107_xbrl(NETFEE_EX107, "x.htm").net_offering_amount is None)
+
+ZERO_ONLY = """
+<ix:nonFraction name="ffd:AmtSctiesRegd" contextRef="c1" unitRef="usd" decimals="0">0</ix:nonFraction>
+"""
+check("a genuinely-tagged zero is reported as 0.0, not dropped to None",
+      de.parse_ex107_xbrl(ZERO_ONLY, "x.htm").amount_registered == 0.0)
+
+LEGACY = """
+<ix:nonFraction name="ffd:AggregateOfferingAmount" contextRef="c1" unitRef="usd" decimals="0">2500000</ix:nonFraction>
+"""
+check("spelled-out legacy aliases still resolve",
+      de.parse_ex107_xbrl(LEGACY, "x.htm").aggregate_principal == 2500000.0)
+
+
 # --------------------------------------------------------------------------- #
 if failures:
     print(f"\n{len(failures)} FAILURE(S):")
