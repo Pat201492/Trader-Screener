@@ -1,0 +1,29 @@
+{
+  "id": "filing_brief",
+  "title": "Filing brief",
+  "description": "What a filings pull contains: one paragraph, a table of the filings, and the shape of them over time.",
+  "slots": [
+    {
+      "name": "summary",
+      "kind": "prose",
+      "columns": ["form", "filing_date", "company"],
+      "max_words": 80,
+      "prompt": "In at most 80 words, say what this set of filings is: which forms, over what dates, filed by whom. Use only the values given. Do not estimate or total anything that is not in them."
+    },
+    {
+      "name": "filings",
+      "kind": "table",
+      "columns": ["filing_date", "company", "form", "accession", "doc_url"],
+      "prompt": "Choose the columns worth showing for these filings, from the declared list, in the order a reader scans them."
+    },
+    {
+      "name": "by_month",
+      "kind": "chart",
+      "columns": ["filing_month", "filing_count"],
+      "mark": "bar",
+      "x": "filing_month",
+      "y": "filing_count",
+      "prompt": "Name the columns that show how the filings fall over time. Name columns only; the values are read from the rows."
+    }
+  ]
+}
