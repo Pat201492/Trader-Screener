@@ -26,6 +26,12 @@
   table{width:100%;border-collapse:collapse;font-size:13px}
   th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)}
   th{color:var(--muted);font-weight:600;cursor:pointer;user-select:none;position:sticky;top:53px;background:var(--bg)}
+  /* A table inside its OWN scroll box: `top:53px` is the page header's height,
+     which means nothing here -- sticky resolves against the nearest scrolling
+     ancestor, so the header row parks 53px down the box and paints over the
+     third data row. Any wrapper that scrolls its table carries `.scroll`. */
+  .scroll{overflow:auto}
+  .scroll th{top:0;z-index:3}
   tr:hover td{background:#161b2233}
   td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
   .pos{color:var(--green)} .neg{color:var(--red)}
@@ -99,6 +105,7 @@
 <header>
   <h1 id="brand" style="cursor:pointer" title="Home">📈 Trader Screener</h1>
   <nav id="nav"></nav>
+  <div id="runsChip" style="position:relative;margin-left:auto"></div>
   <div class="api">
     <span class="dot" id="dot"></span> API
     <input id="apiBase" value="http://127.0.0.1:8000" />
@@ -2439,7 +2446,7 @@ async function openToolPanel(toolId){
     panel.innerHTML=`<div class="err">Could not load the tool: ${esc(e.message)}</div>`;
     return;
   }
-  SEARCH={hits:[],selected:new Set(),fields:fieldInfo.fields,defaults:fieldInfo.default,query:null};
+  SEARCH={hits:[],selected:new Set(),fields:fieldInfo.fields,defaults:fieldInfo.default,query:null,issuerFilter:null};
   const inp='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:6px 9px;font-size:13px';
   panel.innerHTML=`
     <div class="card" style="margin-top:16px">
@@ -2569,7 +2576,7 @@ async function runSearch(){
     out.innerHTML=`<div class="err">${esc(e.message)}</div>`;
     return;
   }
-  SEARCH.hits=data.hits; SEARCH.selected=new Set(data.hits.map((h,i)=>i));
+  SEARCH.hits=data.hits; SEARCH.selected=new Set(data.hits.map((h,i)=>i)); SEARCH.issuerFilter=null;
   SEARCH.query=data.query; SEARCH.days=data.days||null; SEARCH.url=data.search_url;
   // The efts total saturates at 10000 (#100) — say "at least" rather than
   // print a count that is not one.
@@ -2585,9 +2592,32 @@ function renderHits(){
     out.innerHTML='<div class="muted" style="margin-top:12px;font-size:12.5px">No filings matched. Widen the dates, drop the CIK filter, or loosen the phrase.</div>';
     return;
   }
+  const facets=issuerFacets();
+  const vis=visibleHitIndexes();
+  const chip=on=>`background:${on?'var(--accent)':'transparent'};border:1px solid ${on?'var(--accent)':'var(--border)'};`
+    +`color:${on?'#fff':'var(--txt)'};border-radius:20px;padding:3px 10px;font-size:11.5px;cursor:pointer`;
+  const shortName=s=>s.length>26?s.slice(0,25)+'…':s;
+  const facetBar=facets.length>1?`
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:10px 0 0">
+      <span class="muted" style="font-size:11.5px">Issuer</span>
+      <button onclick="filterIssuerAt(null)" style="${chip(!SEARCH.issuerFilter)}">all (${SEARCH.hits.length})</button>
+      ${facets.map((f,n)=>`<button onclick="filterIssuerAt(${n})" style="${chip(SEARCH.issuerFilter===f.name)}"
+          title="${esc(f.name)}${f.ciks.size?` · CIK ${esc([...f.ciks].join(', '))}`:' · no CIK on these hits'}">
+          ${esc(shortName(f.name))} <span style="opacity:.7">${f.count}</span></button>`).join('')}
+      ${SEARCH.issuerFilter&&(facets.find(f=>f.name===SEARCH.issuerFilter)||{ciks:new Set()}).ciks.size?
+        `<button onclick="searchOnlyIssuerAt(${facets.findIndex(f=>f.name===SEARCH.issuerFilter)})"
+           title="Re-run the search with this issuer's CIK as a server-side filter, so every hit comes back from this issuer."
+           style="background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:3px 10px;font-size:11.5px;cursor:pointer">
+           search EDGAR for this issuer only ↻</button>`:''}
+    </div>`:'';
+  // Selection is by index into SEARCH.hits, so a filter never silently drops
+  // what is already queued -- say so, rather than let the button count and the
+  // visible rows disagree with no explanation.
+  const hiddenSel=Array.from(SEARCH.selected).filter(i=>!vis.includes(i)).length;
+  const hiddenNote=hiddenSel?` <span style="color:#e3b341">${hiddenSel} selected filing(s) are hidden by the issuer filter and will still be extracted.</span>`:'';
   const dayRows=SEARCH.days
     ? `<details style="margin:8px 0"><summary class="muted" style="cursor:pointer;font-size:12px">per-day coverage (${SEARCH.days.length} days)</summary>
-       <div style="max-height:150px;overflow:auto;margin-top:6px"><table>
+       <div class="scroll" style="max-height:150px;margin-top:6px"><table>
        <tr><th>Day</th><th class="num">Sampled</th><th class="num">Available that day</th></tr>
        ${SEARCH.days.map(d=>`<tr><td>${esc(d.day)}</td><td class="num">${d.sampled}</td>
          <td class="num">${d.saturated?'10000+':d.available}</td></tr>`).join('')}
@@ -2603,13 +2633,17 @@ function renderHits(){
       <button onclick="scanAvailability()" title="No model: checks which fields each selected filing actually carries, so you know what is pullable before spending extraction time."
               style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:4px 11px;font-size:12px;cursor:pointer">
         what can I pull from these?</button>
+      <button onclick="checkWithClaude()" title="Reads the FIRST selected filing with Claude and comes back with every term it can see — including ones the spec has no name for — each tied to the sentence it came from. One filing, one call."
+              style="background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:4px 11px;font-size:12px;cursor:pointer">
+        check with Claude</button>
       <button id="extractBtn" onclick="extractSelected()" style="margin-left:auto;background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">
         Extract ${SEARCH.selected.size} selected</button>
     </div>
     ${dayRows}
-    <div style="max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:6px">
+    ${facetBar}
+    <div class="scroll" style="max-height:320px;border:1px solid var(--border);border-radius:6px">
     <table><tr><th></th><th>Filed</th><th>Form</th><th>Issuer</th><th>Accession</th><th>Read</th></tr>
-    ${SEARCH.hits.map((h,i)=>`<tr>
+    ${vis.map(i=>SEARCH.hits[i]).map((h,n)=>{const i=vis[n];return `<tr>
       <td><input type="checkbox" ${SEARCH.selected.has(i)?'checked':''} onchange="toggleHit(${i},this.checked)"></td>
       <td class="muted">${esc(h.file_date||h.sample_day||'')}</td>
       <td class="muted">${esc(h.form||'')}</td>
@@ -2618,9 +2652,45 @@ function renderHits(){
       <td style="white-space:nowrap">
         <button onclick="openDocument(${i})" style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:2px 8px;font-size:11.5px;cursor:pointer">open + highlight</button>
         ${h.document_url?`<a href="${h.document_url}" target="_blank" rel="noopener" style="margin-left:6px;font-size:11.5px;color:var(--accent)">EDGAR ↗</a>`:''}
-      </td></tr>`).join('')}
+      </td></tr>`}).join('')}
     </table></div>
-    <div class="muted" style="font-size:11.5px;margin-top:6px">Extraction runs locally, ~40s per filing for 9 fields.</div>`;
+    <div class="muted" style="font-size:11.5px;margin-top:6px">Extraction runs locally, ~40s per filing for 9 fields.${hiddenNote}</div>`;
+}
+
+// ── issuer facets ───────────────────────────────────────────
+// EDGAR full-text search has no issuer-NAME filter -- only `ciks` -- so a name
+// has to become a CIK before it can narrow the query. Every hit already carries
+// both, so the chips are built from the results themselves rather than from a
+// hardcoded issuer->CIK map that would rot the first time a shelf moves.
+function issuerFacets(){
+  const by=new Map();
+  SEARCH.hits.forEach(h=>{
+    const name=h.issuer||'(unnamed)';
+    const f=by.get(name)||{name:name,count:0,ciks:new Set()};
+    f.count++; if(h.cik) f.ciks.add(String(h.cik));
+    by.set(name,f);
+  });
+  // Sorted, so a facet's index is stable between render and click -- which is
+  // what lets the buttons pass an index instead of a name (issuer names carry
+  // apostrophes and commas that an inline onclick string would not survive).
+  return [...by.values()].sort((a,b)=>b.count-a.count||a.name.localeCompare(b.name));
+}
+function visibleHitIndexes(){
+  const f=SEARCH.issuerFilter;
+  return SEARCH.hits.map((h,i)=>i).filter(i=>!f||(SEARCH.hits[i].issuer||'(unnamed)')===f);
+}
+function filterIssuerAt(n){
+  SEARCH.issuerFilter = n===null ? null : (issuerFacets()[n]||{}).name || null;
+  renderHits();
+}
+// Narrow the SEARCH itself, not just the view: with `ciks` set, the whole hit
+// budget is spent on this issuer instead of on whoever filed most that week.
+function searchOnlyIssuerAt(n){
+  const f=issuerFacets()[n];
+  if(!f||!f.ciks.size) return;
+  document.getElementById('sq_ciks').value=[...f.ciks].join(',');
+  SEARCH.issuerFilter=null;
+  runSearch();
 }
 
 // ── document reader + hand-marked spans ─────────────────────
@@ -2658,7 +2728,7 @@ async function scanAvailability(){
     res=await r.json();
     if(!r.ok) throw new Error(res.error||`HTTP ${r.status}`);
   }catch(e){ panel.innerHTML=`<div class="err">${esc(e.message)}</div>`; return; }
-  pollScan(res.run_id);
+  openFeed(res.run_id); pollScan(res.run_id);
 }
 async function pollScan(runId){
   stopScanPolling();
@@ -2670,6 +2740,98 @@ async function pollScan(runId){
   };
   await tick();
   SCAN_POLL=setInterval(tick,1000);
+}
+// ── the Claude template: what is in here that we have no name for ──
+// The availability scan can only ever answer for fields the spec already names.
+// This asks the open question instead, and every answer arrives with the
+// sentence it came from -- an entry whose quote is not in the filing is dropped
+// server-side rather than shown, same rule the coverage matrix applies locally.
+async function checkWithClaude(){
+  const first=Array.from(SEARCH.selected).sort((a,b)=>a-b)[0];
+  const hit=SEARCH.hits[first===undefined?0:first];
+  const panel=document.getElementById('runPanel');
+  panel.style.display='block';
+  if(!hit){ panel.innerHTML='<div class="err">Nothing selected.</div>'; return; }
+  panel.innerHTML='<div class="loading">asking Claude to read this filing…</div>';
+  let res;
+  try{
+    const r=await fetch('/api/tools/edgar-scrubber/claude-template',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({accession:hit.accession,cik:hit.cik,issuer:hit.issuer})});
+    res=await r.json();
+    if(!r.ok) throw new Error(res.error||`HTTP ${r.status}`);
+  }catch(e){ panel.innerHTML=`<div class="err">${esc(e.message)}</div>`; return; }
+  openFeed(res.run_id); pollTemplate(res.run_id);
+}
+async function pollTemplate(runId){
+  stopScanPolling();
+  const tick=async()=>{
+    let run;
+    try{ run=await (await fetch(`/api/runs/${runId}`)).json(); }catch(e){ return; }
+    renderTemplatePanel(run);
+    if(['done','error','stopped'].includes(run.status)) stopScanPolling();
+  };
+  await tick();
+  SCAN_POLL=setInterval(tick,1500);
+}
+function renderTemplatePanel(run){
+  const panel=document.getElementById('runPanel');
+  if(!panel){ stopScanPolling(); return; }
+  const t=run.template;
+  const live=run.status==='running'||run.status==='queued';
+  const head=`
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div class="name">What Claude can see in this filing</div>
+      ${t?`<span class="muted" style="font-size:12px">${esc(t.accession||'')} · ${esc(t.model||'')}</span>`:''}
+      ${live?`<button onclick="stopRun('${esc(run.id)}')" style="background:transparent;border:1px solid var(--red);color:var(--red);border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer">stop</button>`:''}
+      <button style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer"
+              onclick="stopScanPolling();document.getElementById('runPanel').style.display='none'">close</button>
+    </div>`;
+  if(!t){
+    panel.innerHTML=`<div class="card" style="margin-top:16px">${head}
+      ${run.error?`<div class="err" style="margin-top:10px">${esc(run.error)}</div>`
+        :'<div class="loading">reading the filing — one call, usually under a minute…</div>'}</div>`;
+    return;
+  }
+  panel.innerHTML=`
+    <div class="card" style="margin-top:16px">${head}
+      <div class="muted" style="font-size:12px;margin:8px 0 10px">
+        ${esc(t.product_type||'product type not stated')} ·
+        <strong>${t.fields.length}</strong> term(s) located ·
+        <strong style="color:var(--accent)">${t.new_fields}</strong> the spec has no name for
+        ${t.unlocatable.length?` · <span style="color:#e3b341">${t.unlocatable.length} dropped — quote not found in the filing</span>`:''}
+        ${t.usage?` · ${t.usage.input_tokens.toLocaleString()} in / ${t.usage.output_tokens.toLocaleString()} out`:''}
+      </div>
+      ${t.notes?`<div class="muted" style="font-size:12px;margin-bottom:10px">${esc(t.notes)}</div>`:''}
+      <div class="scroll" style="max-height:420px;border:1px solid var(--border);border-radius:6px">
+      <table style="font-size:12px"><tr>
+        <th>Field</th><th>Label in the filing</th><th>Value</th><th>Unit</th><th>Section</th><th>In spec</th></tr>
+      ${t.fields.map((f,i)=>`<tr>
+        <td style="white-space:nowrap">${esc(f.name)}</td>
+        <td class="muted">${esc(f.label||'')}</td>
+        <td><span title="${esc(f.quote||'')}" style="cursor:help">${esc(f.value||'')}</span></td>
+        <td class="muted">${esc(f.unit||'')}</td>
+        <td class="muted">${esc(f.section||'')}</td>
+        <td>${f.known?`<span class="muted">${esc(f.spec_field)}</span>`
+             :'<span style="color:var(--accent)">new</span>'}</td>
+      </tr>`).join('')}
+      </table></div>
+      ${t.unlocatable.length?`
+        <details style="margin-top:10px"><summary class="muted" style="cursor:pointer;font-size:12px">
+          dropped: ${t.unlocatable.length} value(s) whose quote is not in the filing</summary>
+          <div class="scroll" style="max-height:150px;margin-top:6px"><table style="font-size:11.5px">
+          <tr><th>Field</th><th>Value it claimed</th><th>Quote it claimed</th></tr>
+          ${t.unlocatable.map(f=>`<tr><td>${esc(f.name)}</td><td>${esc(f.value||'')}</td>
+            <td class="muted">${esc((f.quote||'').slice(0,140))}</td></tr>`).join('')}
+          </table></div></details>`:''}
+      <details style="margin-top:10px"><summary class="muted" style="cursor:pointer;font-size:12px">
+        draft field spec from this filing (one issuer — a starting point, not a spec)</summary>
+        <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:11px;max-height:260px;overflow:auto;margin:6px 0 0">${esc(JSON.stringify(t.draft_spec,null,2))}</pre>
+      </details>
+      <div class="muted" style="font-size:11.5px;margin-top:8px">
+        Hover a value to see the sentence it came from. Every row here was found in the filing's own
+        text — a value Claude produced but could not point at was dropped, not shown.</div>
+    </div>`;
 }
 function availCell(state){
   if(state==='present') return '<td class="num" style="background:#3fb95022;color:var(--green)">✓</td>';
@@ -2701,7 +2863,7 @@ function renderScanPanel(run){
       ${(run.summary_fields||[]).length?`
         <div style="font-weight:600;font-size:12.5px;margin:10px 0 4px">Across these ${run.scanned||rows.length} filing(s)</div>
         <div class="muted" style="font-size:11px;margin-bottom:6px">Measured in this sample — evidence about these filings, not a statement of what any rule requires.</div>
-        <div style="max-height:190px;overflow:auto"><table>
+        <div class="scroll" style="max-height:190px"><table>
           <tr><th>Field</th><th class="num">Carried by</th><th>How universal here</th></tr>
           ${run.summary_fields.map(s=>`<tr>
             <td>${esc(s.field)}</td>
@@ -2713,7 +2875,7 @@ function renderScanPanel(run){
         </table></div>`:''}
       ${rows.length?`
         <div style="font-weight:600;font-size:12.5px;margin:12px 0 4px">Per filing</div>
-        <div style="overflow:auto;max-height:300px;border:1px solid var(--border);border-radius:6px"><table style="font-size:11.5px">
+        <div class="scroll" style="max-height:300px;border:1px solid var(--border);border-radius:6px"><table style="font-size:11.5px">
           <tr><th style="position:sticky;left:0;background:var(--bg)">Filing</th>
             ${cols.map(f=>`<th class="num" title="${esc(f)}">${esc(f.length>14?f.slice(0,13)+'…':f)}</th>`).join('')}</tr>
           ${rows.map(r=>`<tr>
@@ -3114,9 +3276,12 @@ function toggleHit(i,on){
   const b=document.getElementById('extractBtn');
   if(b) b.textContent=`Extract ${SEARCH.selected.size} selected`;
 }
+// Acts on what you can SEE. With an issuer chip active that is how you queue
+// one issuer's filings and nobody else's, in two clicks.
 function toggleAllHits(){
-  const all=SEARCH.selected.size===SEARCH.hits.length;
-  SEARCH.selected=all?new Set():new Set(SEARCH.hits.map((h,i)=>i));
+  const vis=visibleHitIndexes();
+  const all=vis.length&&vis.every(i=>SEARCH.selected.has(i));
+  vis.forEach(i=>{ if(all) SEARCH.selected.delete(i); else SEARCH.selected.add(i); });
   renderHits();
 }
 
@@ -3148,7 +3313,7 @@ async function extractSelected(){
     panel.innerHTML=`<div class="err">Could not start the run: ${esc(e.message)}</div>`;
     return;
   }
-  pollRun(res.run_id);
+  openFeed(res.run_id); pollRun(res.run_id);
 }
 function stopPolling(){ if(RUN_POLL){ clearInterval(RUN_POLL); RUN_POLL=null; } }
 async function pollRun(runId){
@@ -3168,6 +3333,174 @@ function fmtDuration(s){
   if(s<90) return `${Math.round(s)}s`;
   const m=Math.round(s/60);
   return m<90?`${m} min`:`${(m/60).toFixed(1)} h`;
+}
+// ── runs board: what is running right now, from anywhere ───
+// A run's panel only exists on the tab that started it, so switching tabs or
+// reloading used to lose sight of a job that was still going -- with no way
+// back to it and no way to stop it. This lives in the header instead: it polls
+// the registry, so it is visible from every view and survives a reload.
+let RUNS_WATCH=null, RUNS_OPEN=false, RUNS_LIST=[];
+const RUN_KIND={'edgar-scrubber':'extraction','availability':'availability scan',
+                'preview':'document check','claude-template':'Claude template'};
+function runIsLive(r){ return r.status==='running'||r.status==='queued'; }
+function startRunsWatch(){
+  if(RUNS_WATCH||DEMO_ON||!RUNNER) return;
+  const tick=async()=>{
+    try{ RUNS_LIST=await (await fetch('/api/runs')).json(); }
+    catch(e){ RUNS_LIST=[]; }
+    renderRunsChip();
+  };
+  tick();
+  // 2s while something is live, lazier when idle: this polls forever, so an
+  // idle dashboard should not be issuing a request a second all day.
+  RUNS_WATCH=setInterval(()=>{
+    if(RUNS_OPEN||RUNS_LIST.some(runIsLive)||Math.random()<0.15) tick();
+  },2000);
+}
+function toggleRunsMenu(){ RUNS_OPEN=!RUNS_OPEN; renderRunsChip(); }
+function runPct(r){
+  const p=r.progress||{};
+  return p.fields_total?Math.round(100*(p.fields_done||0)/p.fields_total):0;
+}
+function runTarget(r){
+  const q=r.params||{};
+  return q.accession || (q.limit?`${q.limit} filing(s)`:'') || '';
+}
+function renderRunsChip(){
+  const el=document.getElementById('runsChip');
+  if(!el) return;
+  const live=RUNS_LIST.filter(runIsLive);
+  if(!RUNS_LIST.length){ el.innerHTML=''; RUNS_OPEN=false; return; }
+  const label=live.length?`${live.length} running`:`${RUNS_LIST.length} run(s)`;
+  el.innerHTML=`
+    <button onclick="toggleRunsMenu()" title="Jobs this server is running"
+      style="display:flex;align-items:center;gap:6px;background:${live.length?'#e3b34122':'transparent'};
+             border:1px solid ${live.length?'#e3b341':'var(--border)'};
+             color:${live.length?'#e3b341':'var(--muted)'};border-radius:20px;
+             padding:3px 11px;font-size:12px;cursor:pointer">
+      ${live.length?'<span class="dot" style="background:#e3b341"></span>':''}${label}</button>
+    ${RUNS_OPEN?`
+    <div class="colmenu" style="right:0;min-width:340px;max-height:60vh;overflow:auto;padding:8px">
+      ${RUNS_LIST.slice(0,12).map(r=>{
+        const pct=runPct(r), l=runIsLive(r);
+        return `<div style="padding:7px 6px;border-bottom:1px solid var(--border);cursor:pointer"
+             onclick="openFeed('${esc(r.id)}')" title="Watch what this run is doing, field by field">
+          <div style="display:flex;align-items:baseline;gap:8px">
+            <span style="font-size:12px;font-weight:600">${esc(RUN_KIND[r.kind]||r.kind)}</span>
+            <span class="muted" style="font-size:11px">${esc(runTarget(r))}</span>
+            <span style="margin-left:auto;font-size:11px;color:${
+              r.status==='error'?'var(--red)':l?'#e3b341':'var(--muted)'}">${esc(r.status)}</span>
+          </div>
+          ${l?`<div style="height:5px;background:var(--bg);border:1px solid var(--border);border-radius:3px;margin:5px 0 3px;overflow:hidden">
+                 <div style="height:100%;width:${pct}%;background:#e3b341;transition:width .3s"></div></div>`:''}
+          <div class="muted" style="font-size:11px">
+            ${esc(r.last_log||r.error||'')}
+            ${l&&(r.progress||{}).seconds_remaining!=null?` · ~${r.progress.seconds_remaining}s left`:''}
+          </div>
+          ${l?`<button onclick="event.stopPropagation();stopRun('${esc(r.id)}')"
+                 style="margin-top:4px;background:transparent;border:1px solid var(--red);color:var(--red);
+                        border-radius:5px;padding:2px 9px;font-size:11px;cursor:pointer">stop</button>`:''}
+          <span class="muted" style="font-size:10.5px;margin-left:6px">click to watch</span>
+        </div>`;
+      }).join('')}
+      <div class="muted" style="font-size:10.5px;padding:6px 6px 2px">
+        In-memory: this lists jobs THIS server process started. Extractions themselves
+        are durable — they are in the store whether or not they appear here.</div>
+    </div>`:''}`;
+}
+// ── activity feed: what a run is doing, field by field ─────
+// The progress bar says how far along; this says what it is ON, and -- the part
+// nothing else shows -- what it produced and then threw away. A finished
+// document lists survivors only, so a value the run dropped for being
+// unlocatable is invisible everywhere except here, as it happens.
+let FEED={runId:null,after:-1,events:[],poll:null,status:null,gap:false};
+function openFeed(runId){
+  closeFeed();
+  FEED={runId:runId,after:-1,events:[],poll:null,status:null,gap:false};
+  RUNS_OPEN=false;
+  const tick=async()=>{
+    let d;
+    try{ d=await (await fetch(`/api/runs/${runId}/events?after=${FEED.after}`)).json(); }
+    catch(e){ return; }
+    if(d.error) return closeFeed();
+    // The buffer is bounded server-side. If it rolled past what we last saw,
+    // say so rather than letting the feed read as continuous.
+    if(d.dropped_before>FEED.after+1&&FEED.after>=0) FEED.gap=true;
+    if(d.events.length){
+      FEED.events=FEED.events.concat(d.events).slice(-400);
+      FEED.after=d.events[d.events.length-1].n;
+    }
+    FEED.status=d.status; FEED.progress=d.progress; FEED.error=d.error;
+    renderFeed();
+    if(['done','error','stopped'].includes(d.status)){
+      clearInterval(FEED.poll); FEED.poll=null;
+    }
+  };
+  tick();
+  FEED.poll=setInterval(tick,1000);
+}
+function closeFeed(){
+  if(FEED.poll) clearInterval(FEED.poll);
+  FEED={runId:null,after:-1,events:[],poll:null,status:null,gap:false};
+  const el=document.getElementById('feedPanel');
+  if(el) el.remove();
+}
+function feedLine(e){
+  const at=(e.t||'').slice(11,19);
+  if(e.kind==='doc_start') return `<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">
+    <span class="muted">${at}</span> <strong>${esc(e.accession||'')}</strong>
+    <span class="muted">${esc(e.issuer||'')}${e.detail?' · '+esc(e.detail):''}</span></div>`;
+  if(e.kind==='doc_done') return `<div><span class="muted">${at}</span>
+    <span style="color:var(--green)">wrote ${esc(e.accession||'')}</span>
+    <span class="muted">${e.kept}/${e.fields} field(s) with a span${
+      e.verdict?' · '+esc(e.verdict):''}</span></div>`;
+  if(e.kind==='field_start') return `<div><span class="muted">${at}</span>
+    <span style="color:#e3b341">reading</span> ${esc(e.field||'')}…</div>`;
+  if(e.kind==='field_error') return `<div><span class="muted">${at}</span>
+    <span style="color:var(--red)">${esc(e.field||'')} failed</span>
+    <span class="muted">${esc(e.detail||'')}</span></div>`;
+  // field_done — the interesting one. Kept, dropped, or nothing found.
+  const kept=e.kept, drop=e.verdict==='dropped';
+  const colour=kept?'var(--green)':drop?'var(--red)':'var(--muted)';
+  return `<div><span class="muted">${at}</span>
+    <span style="color:${colour}">${kept?'kept':drop?'removed':'—'}</span>
+    ${esc(e.field||'')} <span style="color:var(--txt)">${esc(e.value==null?'(no value)':e.value)}</span>
+    <span class="muted">${e.rung?'['+esc(e.rung)+']':''}${
+      e.seconds!=null?' '+e.seconds+'s':''}${e.reason?' — '+esc(e.reason):''}</span></div>`;
+}
+function renderFeed(){
+  let el=document.getElementById('feedPanel');
+  if(!el){
+    el=document.createElement('div');
+    el.id='feedPanel';
+    el.style.cssText='position:fixed;right:14px;bottom:14px;width:min(560px,92vw);'
+      +'background:var(--panel);border:1px solid var(--border);border-radius:10px;'
+      +'box-shadow:0 8px 28px #000a;z-index:40';
+    document.body.appendChild(el);
+  }
+  const live=FEED.status==='running'||FEED.status==='queued';
+  const p=FEED.progress||{};
+  const pct=p.fields_total?Math.round(100*(p.fields_done||0)/p.fields_total):0;
+  el.innerHTML=`
+    <div style="display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--border)">
+      <span style="font-weight:600;font-size:12.5px">Activity</span>
+      <span class="muted" style="font-size:11px">${esc(FEED.runId||'')} · ${esc(FEED.status||'')}
+        ${p.fields_total?` · ${p.fields_done||0}/${p.fields_total}`:''}</span>
+      ${live?`<button onclick="stopRun('${esc(FEED.runId)}')"
+        style="background:transparent;border:1px solid var(--red);color:var(--red);border-radius:5px;padding:2px 9px;font-size:11px;cursor:pointer">stop</button>`:''}
+      <button onclick="closeFeed()" style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:2px 9px;font-size:11px;cursor:pointer">close</button>
+    </div>
+    ${live?`<div style="height:4px;background:var(--bg)"><div style="height:100%;width:${pct}%;background:#e3b341;transition:width .3s"></div></div>`:''}
+    ${FEED.error?`<div class="err" style="margin:8px 12px">${esc(FEED.error)}</div>`:''}
+    ${FEED.gap?`<div class="muted" style="padding:6px 12px;font-size:11px;color:#e3b341">
+      Earlier activity scrolled out of the server's buffer — this feed starts mid-run.</div>`:''}
+    <div id="feedBody" style="font-family:ui-monospace,Consolas,monospace;font-size:11.5px;
+         line-height:1.6;padding:8px 12px 12px;max-height:44vh;overflow:auto">
+      ${FEED.events.length?FEED.events.map(feedLine).join('')
+        :'<div class="muted">waiting for the first field…</div>'}
+    </div>`;
+  const body=document.getElementById('feedBody');
+  if(body) body.scrollTop=body.scrollHeight;
 }
 async function stopRun(runId){
   const r=await fetch(`/api/runs/${runId}/stop`,{method:'POST',
@@ -3357,25 +3690,61 @@ async function renderToolsResults(){
       return;
     }
     const runs=await (await fetch('/api/store/runs')).json();
-    let html=`<div class="muted" style="font-size:12px;margin-bottom:12px">
+    RESULTS=data;
+    v.innerHTML=`<div class="muted" style="font-size:12px;margin-bottom:12px">
         ${data.documents.length} document(s) across ${runs.runs.length} run(s) ·
         store <code>${esc(data.store)}</code> · local only, never a pipeline write (#109)</div>
+      <div id="resultsBody"></div>
       <div id="dailyView"></div>`;
-    data.documents.forEach(d=>{
-      html+=`<div class="card" style="margin-bottom:12px">
-        <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
-          <div class="name">${esc(d.accession)}</div>
-          <span class="muted" style="font-size:11px">${esc(d.document||'')}</span>
-          <span class="muted" style="font-size:11px;margin-left:auto">run ${esc(d.run_id)}${d.started_at?` · ${esc(d.started_at)}`:''}</span>
-        </div>
-        ${fieldsTable(d.fields)}
-      </div>`;
-    });
-    v.innerHTML=html;
+    renderStoredDocs();
     renderDaily();
   }catch(e){
     v.innerHTML=`<div class="err">Failed to read the store: ${esc(e.message)}</div>`;
   }
+}
+
+// What came down, grouped by WHO filed it. 424B2 templates are issuer-specific,
+// so a flat accession list answers "did anything extract" but not "is Citi's
+// barrier coming through while JPM's is not" -- which is the question that
+// decides where the next exemplar goes.
+let RESULTS=null, RESULTS_ISSUER=null;
+function filterStoredIssuer(name){ RESULTS_ISSUER=name||null; renderStoredDocs(); }
+function renderStoredDocs(){
+  const body=document.getElementById('resultsBody');
+  if(!body||!RESULTS) return;
+  const docs=RESULTS.documents;
+  const groups=new Map();
+  docs.forEach(d=>{
+    const k=d.issuer||'(issuer not recorded)';
+    (groups.get(k)||groups.set(k,[]).get(k)).push(d);
+  });
+  const names=[...groups.keys()].sort((a,b)=>groups.get(b).length-groups.get(a).length||a.localeCompare(b));
+  const chip=on=>`background:${on?'var(--accent)':'transparent'};border:1px solid ${on?'var(--accent)':'var(--border)'};`
+    +`color:${on?'#fff':'var(--txt)'};border-radius:20px;padding:3px 10px;font-size:11.5px;cursor:pointer`;
+  const bar=names.length>1?`
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+      <span class="muted" style="font-size:11.5px">Issuer</span>
+      <button onclick="filterStoredIssuer(null)" style="${chip(!RESULTS_ISSUER)}">all (${docs.length})</button>
+      ${names.map(n=>`<button onclick="filterStoredIssuer(this.dataset.n)" data-n="${esc(n)}" title="${esc(n)}"
+        style="${chip(RESULTS_ISSUER===n)}">${esc(n.length>26?n.slice(0,25)+'…':n)}
+        <span style="opacity:.7">${groups.get(n).length}</span></button>`).join('')}
+    </div>`:'';
+  const shown=names.filter(n=>!RESULTS_ISSUER||n===RESULTS_ISSUER);
+  body.innerHTML=bar+shown.map(n=>`
+    <div class="group-title" style="display:flex;gap:8px;align-items:baseline">
+      <span>${esc(n)}</span>
+      <span class="muted" style="text-transform:none;letter-spacing:0">${groups.get(n).length} filing(s)</span>
+    </div>
+    ${groups.get(n).map(d=>`<div class="card" style="margin-bottom:12px">
+      <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
+        <div class="name">${esc(d.accession)}</div>
+        <span class="muted" style="font-size:11px">${esc(d.document||'')}</span>
+        ${d.filing_date?`<span class="muted" style="font-size:11px">filed ${esc(d.filing_date)}</span>`:''}
+        ${d.product_type?`<span class="muted" style="font-size:11px">${esc(d.product_type)}</span>`:''}
+        <span class="muted" style="font-size:11px;margin-left:auto">run ${esc(d.run_id)}${d.started_at?` · ${esc(d.started_at)}`:''}</span>
+      </div>
+      ${fieldsTable(d.fields)}
+    </div>`).join('')}`).join('');
 }
 
 // ── coverage: what can we grab consistently, per issuer ─────
@@ -3439,7 +3808,7 @@ async function renderToolsCoverage(minDocs){
         <span style="color:#e3b341;margin-left:6px">■</span> 60–90%
         <span style="color:var(--red);margin-left:6px">■</span> &lt;60%</span>
     </div>
-    <div style="overflow:auto;border:1px solid var(--border);border-radius:6px;max-height:520px">
+    <div class="scroll" style="border:1px solid var(--border);border-radius:6px;max-height:520px">
       <table style="font-size:12px">
         <tr><th style="position:sticky;left:0;background:var(--bg);z-index:2">Issuer</th>
           ${fields.map(f=>`<th class="num" title="${esc(f)}" style="white-space:nowrap">${esc(f.length>18?f.slice(0,17)+'…':f)}${reliable(f)?' <span style="color:var(--green)">✓</span>':''}</th>`).join('')}</tr>
@@ -3505,7 +3874,7 @@ async function renderDaily(field){
       <div class="muted" style="font-size:10.5px;display:flex;justify-content:space-between">
         <span>${esc(rows[0].day)}</span><span>${esc(rows[rows.length-1].day)}</span></div>
       <details style="margin-top:8px"><summary class="muted" style="cursor:pointer;font-size:12px">table</summary>
-        <div style="max-height:220px;overflow:auto;margin-top:6px"><table>
+        <div class="scroll" style="max-height:220px;margin-top:6px"><table>
         <tr><th>Filing day</th><th class="num">Mean</th><th class="num">Min</th><th class="num">Max</th><th class="num">n</th><th class="num">Filings</th></tr>
         ${rows.map(r=>`<tr><td>${esc(r.day)}</td><td class="num">${r.mean}</td><td class="num">${r.min}</td>
           <td class="num">${r.max}</td><td class="num">${r.n}</td><td class="num">${r.filings}</td></tr>`).join('')}
@@ -3735,7 +4104,7 @@ loadTradeLog(); // discipline layer (issue #47) — so a cool-down flag can show
 // Probe the tool runner before the first render, so the Tools cards know
 // whether a Run button is real. A failed probe is the normal static case, not
 // an error — the page still works, it just has nothing to run.
-probeRunner().then(()=>{ if(SECTION==='tools'&&TAB) goTab(TAB); });
+probeRunner().then(()=>{ if(SECTION==='tools'&&TAB) goTab(TAB); startRunsWatch(); });
 ping(); goHome();
 setInterval(ping, 30000);
 </script>
