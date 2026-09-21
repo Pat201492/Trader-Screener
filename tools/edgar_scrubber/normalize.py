@@ -28,6 +28,7 @@ stdlib only (`html.parser`, `re`). Run the self-check:
 """
 import re
 from bisect import bisect_left, bisect_right
+from datetime import date as _date
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from html import unescape
@@ -231,6 +232,85 @@ class _RawTable:
     def __init__(self, start, end):
         self.start = start
         self.end = end
+
+
+# ── Date normalization (#166) ────────────────────────────────────────────────
+#
+# 424B2s state dates the way people write them -- "August 31, 2028" -- and the
+# spec declares these fields `type: date`, which means ISO. Nothing converted
+# between the two, so every maturity_date on the 25-filing sample tripped
+# `type_mismatch` and was unusable: it could not be compared, sorted, or fed to
+# the date_after cross-check against pricing_date, which consequently never ran
+# either. Every one of those values had a valid span, so this was never an
+# extraction failure -- purely a missing parser.
+
+_MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+    "december": 12,
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7, "aug": 8,
+    "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+# "August 31, 2028", "Aug. 31 2028", "August 31,2028"
+_MDY_RE = re.compile(
+    r"\b(?P<month>[A-Za-z]{3,9})\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?\s*,?\s*(?P<year>\d{4})\b")
+# "31 August 2028"
+_DMY_RE = re.compile(
+    r"\b(?P<day>\d{1,2})(?:st|nd|rd|th)?\s+(?P<month>[A-Za-z]{3,9})\.?\s*,?\s*(?P<year>\d{4})\b")
+# "2028-08-31"
+_ISO_RE = re.compile(r"\b(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})\b")
+# "8/31/2028" -- US order, which is what these filings use
+_SLASH_RE = re.compile(r"\b(?P<month>\d{1,2})/(?P<day>\d{1,2})/(?P<year>\d{4})\b")
+
+
+def _iso(year, month, day):
+    try:
+        return _date(int(year), int(month), int(day)).isoformat()
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_date_prose(value):
+    """A date as a 424B2 prints it -> `YYYY-MM-DD`, or None.
+
+    Handles the forms these filings actually use, including the qualifying
+    language they wrap dates in -- `on or about April 9, 2026`, and
+    `Unless earlier automatically redeemed, August 31, 2028`, whose prefix is
+    why reading the nearest date to an anchor goes wrong. The prefix is ignored
+    here; picking the date under the RIGHT label is the extractor's problem,
+    not this parser's.
+
+    Returns None rather than guessing when there is no date, so a caller can
+    tell "not a date" from "a date I converted".
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, _date):
+        return value.isoformat()
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+
+    m = _ISO_RE.search(text)
+    if m:
+        return _iso(m.group("year"), m.group("month"), m.group("day"))
+
+    for rx in (_MDY_RE, _DMY_RE):
+        m = rx.search(text)
+        if m:
+            month = _MONTHS.get(m.group("month").lower().rstrip("."))
+            if month:
+                got = _iso(m.group("year"), month, m.group("day"))
+                if got:
+                    return got
+
+    m = _SLASH_RE.search(text)
+    if m:
+        return _iso(m.group("year"), m.group("month"), m.group("day"))
+    return None
 
 
 def _find_top_level_tables(html):

@@ -160,6 +160,50 @@ check("range crossing a tag boundary still resolves to a source range containing
       "9.15" in recovered and "flat" in recovered)
 
 # --------------------------------------------------------------------------- #
+print("\ndate normalization (#166) -- a date field declared ISO, stated in prose")
+# --------------------------------------------------------------------------- #
+
+check("the form 424B2s actually print",
+      nz.parse_date_prose("August 31, 2028") == "2028-08-31")
+check("the qualifier these filings wrap dates in is ignored",
+      nz.parse_date_prose("on or about April 9, 2026") == "2026-04-09")
+check("the maturity line's own prefix is ignored",
+      nz.parse_date_prose("Unless earlier automatically redeemed, August 31, 2028")
+      == "2028-08-31")
+check("abbreviated months, with or without the point",
+      nz.parse_date_prose("Aug. 31, 2028") == "2028-08-31"
+      and nz.parse_date_prose("Sept 9, 2027") == "2027-09-09")
+check("a missing space after the comma still parses",
+      nz.parse_date_prose("August 31,2028") == "2028-08-31")
+check("day-first prose", nz.parse_date_prose("31 August 2028") == "2028-08-31")
+check("US slash order", nz.parse_date_prose("8/31/2028") == "2028-08-31")
+check("an ISO date passes through unchanged",
+      nz.parse_date_prose("2028-08-31") == "2028-08-31")
+
+# The None cases matter as much: a caller has to be able to tell "not a date"
+# from "a date I converted", or type_mismatch stops meaning anything.
+check("text carrying no date is None", nz.parse_date_prose("no date here") is None)
+check("empty and None are None",
+      nz.parse_date_prose("") is None and nz.parse_date_prose(None) is None)
+check("a date that does not exist is None, not rolled over into October",
+      nz.parse_date_prose("September 31, 2028") is None)
+check("a bare year is not a date", nz.parse_date_prose("2028") is None)
+check("a bool is not a date", nz.parse_date_prose(True) is None)
+
+# The four dates a 424B2 states within a few lines of each other. The parser's
+# job is to convert whichever one it is handed -- picking the right one is the
+# extractor's problem (#166 part 2), and these must not collapse together.
+_FOUR = {"strike": "August 27, 2026", "pricing": "August 28, 2026",
+         "issue": "September 2, 2026", "maturity": "August 31, 2028"}
+_iso = {k: nz.parse_date_prose(v) for k, v in _FOUR.items()}
+check("all four dates convert",
+      all(v is not None for v in _iso.values()))
+check("and stay distinct from one another",
+      len(set(_iso.values())) == 4)
+check("maturity is the latest of the four",
+      _iso["maturity"] == max(_iso.values()))
+
+# --------------------------------------------------------------------------- #
 if failures:
     print(f"\n{len(failures)} FAILURE(S):")
     for f in failures:
