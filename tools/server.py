@@ -478,6 +478,14 @@ def scrubber_run(run_id, targets, fields, home):
                              f"({len(nd.text):,} chars, {len(sections)} sections)")
 
             out, field_values, underlyings, product_type = [], [], [], None
+            # The model's own reading of the issuer, kept as a fallback for the
+            # store's issuer column. A run started from an explicit selection
+            # carries no EDGAR display name (resolve_targets passes the
+            # {accession, cik} objects straight through), so meta has no issuer
+            # and the column went NULL -- on 75 of 201 documents in the local
+            # store, all of them runs #0016-#0018. The model had read it
+            # correctly on every one of those filings.
+            model_issuer = None
             extractor = LadderExtractor(spec, ladder, sections=sections)
             render_doc = RenderDocument.from_normalized(nd)
             for name in field_names:
@@ -593,6 +601,11 @@ def scrubber_run(run_id, targets, fields, home):
                                    for u in stored_value]
                 if name == "product_type" and p.value:
                     product_type = str(p.value)
+                # Only a value the filing actually supports: `stored_value` is
+                # post-gate, so an issuer nothing could locate never becomes the
+                # key that exemplars are filed under.
+                if name == "issuer" and stored_value:
+                    model_issuer = str(stored_value)
                 # Per-field, not per-document: a 9-field document is minutes of
                 # local model time, and a progress view that only ticks when the
                 # whole document lands looks hung.
@@ -642,19 +655,24 @@ def scrubber_run(run_id, targets, fields, home):
             # One document write, carrying the queryable dimensions -- notably
             # the FILING date, which is what a daily sample gets averaged over.
             # Without it the extractions are undated and no series can be built.
+            # EDGAR's display name when the run came from a search; otherwise the
+            # model's own reading. Exemplars, rules and coverage are all keyed by
+            # issuer, so a NULL here does not merely look untidy -- it silently
+            # detaches everything the run produced from the issuer it belongs to.
+            doc_issuer = meta.get("issuer") or model_issuer
             store.write_document(store_run_id, DocumentExtraction(
                 accession=accession, document=primary.name,
-                issuer=meta.get("issuer"), product_type=product_type,
+                issuer=doc_issuer, product_type=product_type,
                 filing_date=meta.get("file_date") or meta.get("sample_day"),
                 underlyings=underlyings, fields=field_values))
 
             RUNS.add_document(run_id, {
                 "accession": accession, "document": primary.name,
-                "issuer": meta.get("issuer"), "filed": meta.get("file_date"),
+                "issuer": doc_issuer, "filed": meta.get("file_date"),
                 "skipped": False, "fields": out,
             })
             RUNS.event(run_id, "doc_done", accession=accession,
-                       document=primary.name, issuer=meta.get("issuer"),
+                       document=primary.name, issuer=doc_issuer,
                        fields=len(out),
                        kept=sum(1 for f in out if f.get("span")),
                        written=True)
