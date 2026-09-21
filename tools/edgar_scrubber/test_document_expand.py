@@ -178,17 +178,40 @@ section("EX-107 cross-check wires into field_spec (issue #101 <-> #102)")
 # --------------------------------------------------------------------------- #
 
 try:
+    import json as _json
+
     import field_spec as fs
     specs = fs.load_specs()
     note_spec = specs["structured_note"]
     record = {"aggregate_principal": 2500000.0}
-    flags = note_spec.validate_record(record, ex107={"aggregate_principal": 2500000.0})
+
+    # The wiring being checked is `validate_record(..., ex107=...)` reaching the
+    # external_equals branch of _check_cross at all. The shipped 424B2 spec no
+    # longer carries that rule: #164 established that rung 2 hands back the
+    # exhibit's own value before the model is asked, so enforcing equality there
+    # compared the value to itself and passed on 25 of 25 filings. The wiring is
+    # still real, so it is exercised on a spec that enforces it.
+    enforced_raw = _json.loads(_json.dumps(note_spec.raw))
+    enforced_raw["spec_id"] = "structured_note_ex107_wiring_fixture"
+    enforced_raw["cross_checks"] = [{
+        "rule": "external_equals", "field": "aggregate_principal",
+        "source": "ex107", "source_field": "aggregate_principal",
+        "tolerance_pct": 0.5, "severity": "error",
+        "message": "aggregate_principal must match the EX-107 fee exhibit",
+    }]
+    enforced = fs.FieldSpec.from_dict(enforced_raw)
+
+    flags = enforced.validate_record(record, ex107={"aggregate_principal": 2500000.0})
     check("aggregate_principal matches EX-107 -> no cross_check_failed flag",
           not any(f.code == "cross_check_failed" for f in flags))
 
-    bad_flags = note_spec.validate_record(record, ex107={"aggregate_principal": 9999999.0})
+    bad_flags = enforced.validate_record(record, ex107={"aggregate_principal": 9999999.0})
     check("aggregate_principal mismatching EX-107 -> flagged",
           any(f.code == "cross_check_failed" for f in bad_flags))
+
+    shipped = note_spec.validate_record(record, ex107={"aggregate_principal": 9999999.0})
+    check("the shipped spec does not claim to verify what it sourced (#164)",
+          not any(f.code == "cross_check_failed" for f in shipped))
 except ImportError:
     print("  [skip] field_spec not importable standalone here")
 

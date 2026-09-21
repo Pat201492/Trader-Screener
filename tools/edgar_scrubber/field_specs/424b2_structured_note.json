@@ -41,7 +41,7 @@
     { "rule": "date_after", "field": "maturity_date", "reference": "pricing_date", "severity": "error", "message": "maturity_date must be after pricing_date" },
     { "rule": "date_after_or_equal", "field": "issue_date", "reference": "pricing_date", "severity": "warn", "message": "issue_date should be on or after pricing_date" },
     { "rule": "date_after_or_equal", "field": "maturity_date", "reference": "final_valuation_date", "severity": "warn", "message": "maturity_date should be on or after final_valuation_date" },
-    { "rule": "external_equals", "field": "aggregate_principal", "source": "ex107", "source_field": "aggregate_principal", "tolerance_pct": 0.5, "severity": "error", "message": "aggregate_principal must match the EX-107 fee exhibit (#101)" }
+    { "rule": "external_shadow", "field": "aggregate_principal", "source": "ex107", "source_field": "aggregate_principal", "tolerance_pct": 0.5, "severity": "info", "message": "aggregate_principal is taken FROM the EX-107 exhibit, not verified against it: rung 2 returns the exhibit's value before the model is asked, so the old external_equals rule compared that value to itself and passed on 25 of 25 filings (#164). Run ExtractionLadder(shadow_external=True) to ask the model anyway and record whether it agreed; the stored value is the exhibit's either way." }
   ],
 
   "fields": [
