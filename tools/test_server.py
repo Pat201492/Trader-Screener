@@ -781,6 +781,59 @@ check("free research wrote only under its own store root",
       bool(_written) and all(_fr_home in w for w in _written))
 
 # --------------------------------------------------------------------------- #
+section("accuracy switches -- off by default, one command to turn on")
+# --------------------------------------------------------------------------- #
+# Both cost model time, so both default off. self-consistency has been inert on
+# every run so far: the gate records "single sample, not checked" at N=1, which
+# is the default the ladder ships.
+
+for _var in ("SCRUBBER_SELF_CONSISTENCY", "SCRUBBER_SHADOW_EXTERNAL"):
+    os.environ.pop(_var, None)
+
+check("both switches are off with no params and no env",
+      server.accuracy_switches({}) == (1, False))
+check("self-consistency comes from params",
+      server.accuracy_switches({"self_consistency": 2}) == (2, False))
+check("shadow comes from params",
+      server.accuracy_switches({"shadow_external": True}) == (1, True))
+
+os.environ["SCRUBBER_SELF_CONSISTENCY"] = "3"
+os.environ["SCRUBBER_SHADOW_EXTERNAL"] = "1"
+check("the environment supplies defaults, so --self-consistency reaches a run",
+      server.accuracy_switches({}) == (3, True))
+check("an explicit param still overrides the environment",
+      server.accuracy_switches({"self_consistency": 1}) == (1, True))
+check("...in both directions",
+      server.accuracy_switches({"shadow_external": False}) == (3, False))
+os.environ["SCRUBBER_SELF_CONSISTENCY"] = "not a number"
+check("a junk env value falls back to off rather than raising",
+      server.accuracy_switches({}) == (1, True))
+os.environ["SCRUBBER_SELF_CONSISTENCY"] = "99"
+check("sampling is capped -- 99 passes per field is not a setting anyone wants",
+      server.accuracy_switches({})[0] == 5)
+os.environ["SCRUBBER_SELF_CONSISTENCY"] = "0"
+check("and floored at 1, since zero samples is no extraction at all",
+      server.accuracy_switches({})[0] == 1)
+for _var in ("SCRUBBER_SELF_CONSISTENCY", "SCRUBBER_SHADOW_EXTERNAL"):
+    os.environ.pop(_var, None)
+
+# The switches have to actually reach the ladder, not just be parsed.
+import inspect as _inspect
+_sig = _inspect.signature(server.scrubber_run)
+check("scrubber_run accepts both switches",
+      {"self_consistency", "shadow_external"} <= set(_sig.parameters))
+check("and defaults them off",
+      _sig.parameters["self_consistency"].default == 1
+      and _sig.parameters["shadow_external"].default is False)
+_src = _inspect.getsource(server.scrubber_run)
+check("it passes self-consistency to the ladder",
+      "self_consistency_samples=samples" in _src)
+check("it passes the shadow flag to the ladder",
+      "shadow_external=bool(shadow_external)" in _src)
+check("and records which setting a run used, so a comparison is attributable",
+      "self-consistency:" in _src)
+
+# --------------------------------------------------------------------------- #
 section("issuer fallback -- a run from a selection still knows whose filing it is")
 # --------------------------------------------------------------------------- #
 # Found auditing the local store for #165: 75 of 201 documents had a NULL
