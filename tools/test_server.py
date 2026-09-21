@@ -781,6 +781,68 @@ check("free research wrote only under its own store root",
       bool(_written) and all(_fr_home in w for w in _written))
 
 # --------------------------------------------------------------------------- #
+section("charset -- declared, not sniffed")
+# --------------------------------------------------------------------------- #
+
+check("text/html gains the charset",
+      server.with_charset("text/html") == "text/html; charset=utf-8")
+check("application/json gains it too",
+      server.with_charset("application/json") == "application/json; charset=utf-8")
+check("css and js gain it",
+      server.with_charset("text/css") == "text/css; charset=utf-8"
+      and server.with_charset("application/javascript")
+      == "application/javascript; charset=utf-8")
+check("a binary type does not -- there is no UTF-8 PNG",
+      server.with_charset("image/png") == "image/png"
+      and server.with_charset("font/woff2") == "font/woff2")
+check("an existing charset is left alone, not doubled",
+      server.with_charset("text/html; charset=iso-8859-1")
+      == "text/html; charset=iso-8859-1")
+check("a type with parameters is not mangled",
+      server.with_charset("text/html;charset=utf-8") == "text/html;charset=utf-8")
+
+# Over the wire, on both an API response and a static file. The static path goes
+# through guess_type, which is a different code path from _send.
+_cs_httpd = _THS(("127.0.0.1", 0),
+                 _partial(server.Handler, directory=str(server.REPO_ROOT)))
+threading.Thread(target=_cs_httpd.serve_forever, daemon=True).start()
+_cs_base = "http://127.0.0.1:%d" % _cs_httpd.server_address[1]
+
+
+def _ctype(path):
+    try:
+        with urllib.request.urlopen(_cs_base + path, timeout=5) as r:
+            return r.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as e:
+        return e.headers.get("Content-Type", "")
+
+
+check("a JSON response declares utf-8 on the wire",
+      "charset=utf-8" in _ctype("/api/health"))
+check("a served HTML file declares utf-8 on the wire",
+      "charset=utf-8" in _ctype("/web-dashboard/index.html"))
+
+# The header alone has to be sufficient: serve a UTF-8 file carrying no <meta
+# charset> at all and confirm the bytes and the declared type still agree.
+_nometa = Path(tempfile.mkdtemp(prefix="charset-gate-")) / "nometa.html"
+_nometa.write_text("<!doctype html><html><body>— é \U0001f5c4</body></html>",
+                   encoding="utf-8")
+_nm_httpd = _THS(("127.0.0.1", 0),
+                 _partial(server.Handler, directory=str(_nometa.parent)))
+threading.Thread(target=_nm_httpd.serve_forever, daemon=True).start()
+with urllib.request.urlopen("http://127.0.0.1:%d/nometa.html"
+                            % _nm_httpd.server_address[1], timeout=5) as _r:
+    _hdr = _r.headers.get("Content-Type", "")
+    _body = _r.read()
+check("a file with no <meta charset> is still served as utf-8",
+      "charset=utf-8" in _hdr)
+check("...and its bytes decode as utf-8 under that declaration",
+      _body.decode("utf-8").endswith("</body></html>")
+      and "\U0001f5c4" in _body.decode("utf-8"))
+_nm_httpd.shutdown()
+_cs_httpd.shutdown()
+
+# --------------------------------------------------------------------------- #
 if failures:
     print(f"\n{len(failures)} FAILURE(S):")
     for f in failures:
