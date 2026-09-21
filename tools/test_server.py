@@ -74,9 +74,62 @@ check("adding a document advances progress", snap["progress"]["done"] == 1)
 snap["documents"].append("mutated")
 check("get() hands back a copy, not the live run", len(reg.get(rid)["documents"]) == 1)
 
+reg.update(rid, rows=[{"big": "x" * 1000}], template={"also": "big"})
 listed = reg.list()
 check("list() omits the heavy per-run fields",
       len(listed) == 1 and "log" not in listed[0] and "documents" not in listed[0])
+# The header runs board polls this every couple of seconds from every view, so
+# a run's RESULT must not ride along -- only its status and the newest log line.
+check("list() omits results too, whatever kind of run produced them",
+      "rows" not in listed[0] and "template" not in listed[0])
+check("list() carries the latest log line, which is what a status board shows",
+      listed[0]["last_log"] == "expanding")
+check("list() still carries what the board renders",
+      {"id", "kind", "status", "progress", "params"} <= set(listed[0]))
+
+listed[0]["progress"]["done"] = 999
+check("list() hands back a copy, not the live runs",
+      reg.get(rid)["progress"]["done"] == 1)
+
+# The activity feed. A finished document lists survivors only, so "produced a
+# value and then dropped it" is a fact that exists nowhere but here.
+reg.event(rid, "field_start", accession="0001-25-1", field="barrier_pct")
+reg.event(rid, "field_done", accession="0001-25-1", field="barrier_pct",
+          value="60.00%", kept=True, verdict="kept", span=[10, 16])
+reg.event(rid, "field_done", accession="0001-25-1", field="coupon_barrier_pct",
+          value="13", kept=False, verdict="dropped",
+          reason="the filing never uses this field's wording")
+
+feed = reg.events_since(rid)
+check("events are returned in order, numbered from zero",
+      [e["n"] for e in feed["events"]] == [0, 1, 2])
+check("a dropped value is reported as an event, not silently discarded",
+      feed["events"][2]["verdict"] == "dropped"
+      and feed["events"][2]["value"] == "13"
+      and feed["events"][2]["reason"])
+check("the feed carries live status and progress beside the events",
+      feed["status"] == "stopped" and "fields_done" in feed["progress"])
+check("`after` returns only what the poller has not seen",
+      [e["n"] for e in reg.events_since(rid, after=1)["events"]] == [2])
+check("polling a caught-up feed returns no events, not the whole run",
+      reg.events_since(rid, after=2)["events"] == [])
+check("events for an unknown run are None, not an empty feed",
+      reg.events_since("no-such-run") is None)
+
+feed["events"].append("mutated")
+check("events_since() hands back a copy, not the live run",
+      len(reg.events_since(rid)["events"]) == 3)
+
+# The buffer is bounded -- a 450-filing run emits thousands of events and this
+# registry is the live view, not the record. A poller that fell behind has to be
+# able to SEE that it has a hole.
+_cap = reg.EVENT_CAP
+for i in range(_cap + 25):
+    reg.event(rid, "field_start", field=f"f{i}")
+capped = reg.events_since(rid)
+check("the event buffer is bounded", len(capped["events"]) == _cap)
+check("the oldest surviving event number is reported, so a gap is visible",
+      capped["dropped_before"] == capped["events"][0]["n"] > 0)
 
 reg.update(rid, status="done")
 check("update sets status", reg.get(rid)["status"] == "done")
@@ -496,6 +549,106 @@ check("marking a field absent needs no span", absent_res["saved"] is True)
 check("absence is filed as a reject verdict", absent_res["verdict"] == "reject")
 check("absence teaches that null is valid rather than teaching a value",
       "null is a valid answer" in absent_res["rendered"])
+
+# --------------------------------------------------------------------------- #
+section("extractions grid -- whose filing each value came out of")
+# --------------------------------------------------------------------------- #
+
+# The grid is grouped by issuer in the browser, which is only possible if the
+# row carries one. `extractions` does not store the issuer -- `documents` does
+# -- so this is a join that can silently regress into "every card says the same
+# thing" without any error.
+grid = server.store_extractions()
+by_acc = {d["accession"]: d for d in grid["documents"]}
+
+check("a row written through the low-level `record` path reports no issuer "
+      "rather than borrowing another filing's",
+      by_acc["0001-25-1"]["issuer"] is None)
+check("the issuer is the one that filed it, not the first run's",
+      by_acc["0001-26-1"]["issuer"] == "ISSUER A"
+      and by_acc["0002-26-1"]["issuer"] == "ISSUER B")
+check("the filing's own date rides along, not just the run's timestamp",
+      by_acc["0001-26-1"]["filing_date"] == "2026-08-01")
+check("issuers are enumerated for the filter chips",
+      grid["issuers"] == ["ISSUER A", "ISSUER B"])
+check("the join does not duplicate a document's field rows",
+      len(by_acc["0001-26-1"]["fields"]) == 2)
+check("values still come through beside the issuer",
+      {f["field"] for f in by_acc["0001-26-1"]["fields"]} == {"barrier_pct", "cusip"})
+
+# --------------------------------------------------------------------------- #
+section("claude template -- a value it cannot point at is not a finding")
+# --------------------------------------------------------------------------- #
+
+# No network and no SDK: what is checked here is the part that decides whether
+# a returned value is believed. The API call itself is one function away
+# (`request_template`), deliberately, so this gate covers the checking without
+# needing a key.
+import claude_template as ctpl
+
+_FILING = (
+    "Key Terms\n\n"
+    "Barrier Amount: 60.00% of the Initial Value, which is 6,579.942\n"
+    "CUSIP: 46660RRA4\n"
+    "Initial Value: The closing level of the Index on the Pricing Date, "
+    "which was 10,966.57\n"
+    "Payment at Maturity: $1,000 + ($1,000 x Index Return)\n"
+)
+
+_raw = {
+    "product_type": "review note",
+    "fields": [
+        {"name": "barrier_pct", "label": "Barrier Amount", "value": "60.00%",
+         "unit": "percent_of_initial", "type": "percent", "section": "Key Terms",
+         "quote": "Barrier Amount: 60.00% of the Initial Value, which is 6,579.942",
+         "spec_field": "barrier_pct"},
+        # Same quote text, but with the whitespace a table row loses. A copy is
+        # still a copy; only a paraphrase is a miss.
+        {"name": "cusip", "label": "CUSIP", "value": "46660RRA4",
+         "unit": "cusip", "type": "string", "section": "Key Terms",
+         "quote": "CUSIP:   46660RRA4", "spec_field": "cusip"},
+        # Not in the filing at all -- the failure mode this whole check exists
+        # for. A plausible number with a quote nobody wrote.
+        {"name": "coupon_barrier_pct", "label": "Coupon Barrier", "value": "70.00%",
+         "unit": "percent_of_initial", "type": "percent", "section": "Key Terms",
+         "quote": "Coupon Barrier: 70.00% of the Initial Value", "spec_field": ""},
+    ],
+    "absent_spec_fields": ["contingent_coupon_rate"],
+    "notes": "",
+}
+
+_located = ctpl.locate(_raw, _FILING)
+_by = {f["name"]: f for f in _located["fields"]}
+
+check("an invented value is dropped, not returned as a field",
+      "coupon_barrier_pct" not in _by
+      and _located["unlocatable"][0]["name"] == "coupon_barrier_pct")
+check("a quote that IS in the filing resolves to its offsets",
+      _FILING[_by["barrier_pct"]["span"][0]:_by["barrier_pct"]["span"][1]]
+      == _raw["fields"][0]["quote"])
+check("whitespace differences do not make a real quote a miss",
+      "cusip" in _by and _FILING[_by["cusip"]["span"][0]:_by["cusip"]["span"][1]]
+      == "CUSIP: 46660RRA4")
+# "$1,000" appears twice on one line and "60.00%" once; the value span has to
+# land inside the quoted occurrence or a highlight points at the wrong number.
+check("the value's own span lands inside its quote",
+      _FILING[_by["barrier_pct"]["value_span"][0]:
+              _by["barrier_pct"]["value_span"][1]] == "60.00%"
+      and _by["barrier_pct"]["span"][0] <= _by["barrier_pct"]["value_span"][0])
+check("the answer key is not handed to the model",
+      "barrier_pct" in ctpl.build_prompt(_FILING, ["barrier_pct"])
+      and "fill in" not in ctpl.build_prompt(_FILING, ["barrier_pct"]).lower())
+check("a filing longer than the cap is truncated, and says so",
+      "[The document was truncated at 100 characters.]"
+      in ctpl.build_prompt("x" * 500, [], max_chars=100))
+
+_draft = ctpl.as_field_spec(_located)
+check("the draft spec carries only located fields",
+      [f["name"] for f in _draft["fields"]] == ["barrier_pct", "cusip"])
+check("the draft spec anchors on the filing's own label",
+      "Barrier Amount" in _draft["fields"][0]["anchors"])
+check("the draft spec is labelled a draft, not the spec",
+      _draft["spec_id"].endswith("claude_draft"))
 
 # --------------------------------------------------------------------------- #
 section("health")

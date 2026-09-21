@@ -131,6 +131,43 @@ class RunRegistry:
         with self._lock:
             self._runs[run_id]["log"].append({"t": utcnow(), "message": message})
 
+    # Events, as opposed to log lines: a log line is prose for a human reading
+    # afterwards, an event is the structured record of one decision -- which
+    # field, what came back, and whether it was kept. The distinction matters
+    # because "the run dropped that value and here is why" is the thing you
+    # cannot reconstruct from a finished document, which only shows survivors.
+    EVENT_CAP = 500
+
+    def event(self, run_id, kind, **payload):
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                return
+            evs = run.setdefault("events", [])
+            evs.append({"n": run.get("_evseq", 0), "t": utcnow(),
+                        "kind": kind, **payload})
+            run["_evseq"] = run.get("_evseq", 0) + 1
+            # Bounded: a 450-filing run emits thousands, and this registry is
+            # the live view, not the record. The store is the record.
+            if len(evs) > self.EVENT_CAP:
+                del evs[:len(evs) - self.EVENT_CAP]
+
+    def events_since(self, run_id, after=-1):
+        """Events numbered above `after`, so a poller fetches only what is new."""
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                return None
+            evs = [e for e in run.get("events", []) if e["n"] > after]
+            return json.loads(json.dumps({
+                "run_id": run_id, "status": run["status"],
+                "progress": run["progress"], "error": run.get("error"),
+                # A poller that fell behind the cap needs to know it has a hole
+                # rather than quietly rendering a gap as continuity.
+                "dropped_before": (run["events"][0]["n"] if run.get("events") else 0),
+                "events": evs,
+            }))
+
     def add_document(self, run_id, doc):
         with self._lock:
             r = self._runs[run_id]
@@ -142,12 +179,21 @@ class RunRegistry:
             r = self._runs.get(run_id)
             return json.loads(json.dumps(r)) if r else None
 
+    # A run's RESULT is the bulky part -- extracted documents, scanned rows, a
+    # whole field template. The list view is a status board polled every couple
+    # of seconds, so it carries none of them and carries the one line of log a
+    # reader actually wants: the most recent.
+    _LIST_DROP = ("log", "documents", "rows", "proposals", "template",
+                  "summary_fields", "events", "_evseq")
+
     def list(self):
         with self._lock:
-            return [
-                {k: v for k, v in r.items() if k not in ("log", "documents")}
-                for r in sorted(self._runs.values(), key=lambda x: x["id"], reverse=True)
-            ]
+            out = []
+            for r in sorted(self._runs.values(), key=lambda x: x["id"], reverse=True):
+                row = {k: v for k, v in r.items() if k not in self._LIST_DROP}
+                row["last_log"] = (r["log"][-1]["message"] if r["log"] else None)
+                out.append(row)
+            return json.loads(json.dumps(out))
 
 
 RUNS = RunRegistry()
@@ -402,6 +448,9 @@ def scrubber_run(run_id, targets, fields, home):
                 RUNS.log(run_id, "stop requested -- no further filings will be started")
                 break
             accession = meta["accession"]
+            RUNS.event(run_id, "doc_start", accession=accession,
+                       issuer=meta.get("issuer"),
+                       filed=meta.get("file_date") or meta.get("sample_day"))
             cik = meta.get("cik")
             if not cik:
                 RUNS.log(run_id, f"{accession}: no CIK on the selection -- skipped")
@@ -437,6 +486,11 @@ def scrubber_run(run_id, targets, fields, home):
                     RUNS.log(run_id, f"stop requested -- {accession} written with "
                                      f"{len(out)} of {len(field_names)} fields")
                     break
+                # Emitted BEFORE the call, not after: a local model field takes
+                # tens of seconds, and "reading barrier_pct" for forty seconds
+                # is the difference between a run that looks alive and one that
+                # looks hung.
+                RUNS.event(run_id, "field_start", accession=accession, field=name)
                 try:
                     # One field at a time through LadderExtractor so the stored
                     # span is in ORIGINAL document coordinates (it resolves the
@@ -447,6 +501,8 @@ def scrubber_run(run_id, targets, fields, home):
                                           document=primary.name, fields=[name])[0]
                 except Exception as exc:  # one bad field must not kill the document
                     out.append({"field": name, "error": f"{type(exc).__name__}: {exc}"})
+                    RUNS.event(run_id, "field_error", accession=accession, field=name,
+                               detail=f"{type(exc).__name__}: {exc}")
                     RUNS.tick_field(run_id, accession, name, time.time() - t_start)
                     continue
                 # Same span repair the preview shows: what gets STORED as this
@@ -496,6 +552,26 @@ def scrubber_run(run_id, targets, fields, home):
                 # whole document lands looks hung.
                 RUNS.log(run_id, f"  {name} = {str(p.value)[:60]} "
                                  f"[{p.rung}{', gated' if gated else ''}]")
+                # The verdict, as its own event. `kept` is the whole point: a
+                # finished document lists only survivors, so a value the run
+                # produced and then threw away leaves no trace anywhere else.
+                empty = p.value in (None, "", [])
+                dropped = ("field_absent_from_document" in flags
+                           or "span_unlocatable" in flags)
+                RUNS.event(
+                    run_id, "field_done", accession=accession, field=name,
+                    value=(str(p.value)[:120] if not empty else None),
+                    rung=p.rung, gated=gated, confidence=p.confidence,
+                    span=list(span) if span else None,
+                    kept=bool(span) and not dropped,
+                    verdict=("no value" if empty else
+                             "dropped" if dropped else
+                             "kept" if span else "no span"),
+                    reason=("the filing never uses this field's wording"
+                            if "field_absent_from_document" in flags else
+                            "the value is not stated verbatim in the document"
+                            if "span_unlocatable" in flags else None),
+                    seconds=round(time.time() - t_start, 1))
                 RUNS.tick_field(run_id, accession, name, time.time() - t_start)
                 out.append({
                     "field": name, "value": p.value, "unit": p.unit,
@@ -522,6 +598,11 @@ def scrubber_run(run_id, targets, fields, home):
                 "issuer": meta.get("issuer"), "filed": meta.get("file_date"),
                 "skipped": False, "fields": out,
             })
+            RUNS.event(run_id, "doc_done", accession=accession,
+                       document=primary.name, issuer=meta.get("issuer"),
+                       fields=len(out),
+                       kept=sum(1 for f in out if f.get("span")),
+                       written=True)
 
             if stopped:
                 break
@@ -1051,6 +1132,13 @@ def scan_availability(targets, fields, run_id=None):
             "document_url": doc.get("document_url"),
         })
         if run_id:
+            RUNS.event(run_id, "doc_done", accession=doc["accession"],
+                       issuer=meta.get("issuer"), document=doc["document"],
+                       fields=len(present),
+                       kept=sum(1 for v in present.values() if v == "present"),
+                       verdict=", ".join(
+                           f"{n} absent" for n, v in present.items() if v == "absent")
+                       or "every field's wording is present")
             RUNS.update(run_id, rows=list(rows))
             RUNS.tick_field(run_id, doc["accession"], "scan", time.time() - t0)
 
@@ -1107,6 +1195,81 @@ def start_availability(params):
             RUNS.log(run_id, traceback.format_exc().strip().splitlines()[-1])
 
     threading.Thread(target=worker, daemon=True, name=f"scan-{run_id}").start()
+    return run_id
+
+
+def claude_template(params, run_id=None):
+    """What does this filing carry that we have no name for yet?
+
+    The availability scan answers the same question against the fields we
+    already named, and can only ever return a subset of them. This reads the
+    filing once with Claude and comes back with the terms it can see, each tied
+    to the sentence it came from -- which is what makes a template checkable
+    rather than a suggestion.
+    """
+    import claude_template as ct
+    import field_spec as fs
+
+    doc = load_document(params.get("cik"), params.get("accession"),
+                        params.get("document"))
+    spec = fs.load_spec(SCRUBBER / "field_specs" / "424b2_structured_note.json")
+    if run_id:
+        RUNS.log(run_id, f"reading {doc['accession']} with {ct.model_name()}")
+        RUNS.event(run_id, "doc_start", accession=doc["accession"],
+                   issuer=params.get("issuer"),
+                   detail=f"{doc['chars']:,} chars to {ct.model_name()}")
+    t0 = time.time()
+    template = ct.request_template(doc["text"], [f.name for f in spec.fields])
+    template = ct.locate(template, doc["text"])
+    if run_id:
+        for entry in template["fields"]:
+            RUNS.event(run_id, "field_done", accession=doc["accession"],
+                       field=entry["name"], value=str(entry.get("value"))[:120],
+                       span=entry.get("span"), kept=True, verdict="kept")
+        for entry in template["unlocatable"]:
+            RUNS.event(run_id, "field_done", accession=doc["accession"],
+                       field=entry["name"], value=str(entry.get("value"))[:120],
+                       kept=False, verdict="dropped",
+                       reason="the quote it gave is not in the filing")
+        RUNS.tick_field(run_id, doc["accession"], "template", time.time() - t0)
+
+    known = {f.name for f in spec.fields}
+    # The split the reader actually wants: which of these is a field we already
+    # know how to ask for, and which is a term the spec has no name for.
+    for entry in template["fields"]:
+        entry["known"] = bool(entry.get("spec_field")) and entry["spec_field"] in known
+    template.update({
+        "accession": doc["accession"], "document": doc["document"],
+        "issuer": params.get("issuer"), "document_url": doc.get("document_url"),
+        "new_fields": sum(1 for e in template["fields"] if not e["known"]),
+        "draft_spec": ct.as_field_spec(template),
+    })
+    return template
+
+
+def start_claude_template(params):
+    """Tracked like every other job, so the browser gets progress and a stop."""
+    run_id = RUNS.create("claude-template",
+                         {"limit": 1, "fields": ["template"],
+                          "accession": params.get("accession"),
+                          "document": params.get("document")})
+    RUNS.update(run_id, template=None)
+
+    def worker():
+        try:
+            RUNS.update(run_id, status="running")
+            result = claude_template(params, run_id=run_id)
+            RUNS.update(run_id, status="done", finished_at=utcnow(),
+                        template=result)
+            RUNS.log(run_id, f"{len(result['fields'])} field(s) located, "
+                             f"{result['new_fields']} not in the spec, "
+                             f"{len(result['unlocatable'])} dropped as unlocatable")
+        except Exception as exc:
+            RUNS.update(run_id, status="error", finished_at=utcnow(),
+                        error=f"{type(exc).__name__}: {exc}")
+            RUNS.log(run_id, traceback.format_exc().strip().splitlines()[-1])
+
+    threading.Thread(target=worker, daemon=True).start()
     return run_id
 
 
@@ -1461,9 +1624,17 @@ def store_extractions(run_id=None):
         where, args = "", []
         if run_id:
             where, args = " WHERE e.run_id = ?", [run_id]
+        # `documents` is where issuer/product_type/filing_date live. Without this
+        # join the grid can only say WHICH accession carried a value, not WHOSE
+        # -- and "which issuer is doing what" is the question this view exists
+        # to answer, since 424B2 templates are issuer-specific.
         rows = [dict(r) for r in conn.execute(
-            "SELECT e.*, r.started_at, r.note FROM extractions e "
-            "LEFT JOIN runs r ON r.run_id = e.run_id"
+            "SELECT e.*, r.started_at, r.note, "
+            "d.issuer AS doc_issuer, d.product_type AS doc_product_type, "
+            "d.filing_date AS doc_filing_date FROM extractions e "
+            "LEFT JOIN runs r ON r.run_id = e.run_id "
+            "LEFT JOIN documents d ON d.run_id = e.run_id "
+            "  AND d.accession = e.accession AND d.document IS e.document"
             f"{where} ORDER BY r.started_at DESC, e.rowid DESC LIMIT 4000", args)]
     except sqlite3.Error as exc:
         return {"store": str(p), "exists": True, "documents": [], "error": str(exc)}
@@ -1476,7 +1647,9 @@ def store_extractions(run_id=None):
         d = docs.setdefault(key, {
             "run_id": r.get("run_id"), "accession": r.get("accession"),
             "document": r.get("document"), "started_at": r.get("started_at"),
-            "note": r.get("note"), "fields": [],
+            "note": r.get("note"), "issuer": r.get("doc_issuer"),
+            "product_type": r.get("doc_product_type"),
+            "filing_date": r.get("doc_filing_date"), "fields": [],
         })
         try:
             value = json.loads(r["value_json"]) if r.get("value_json") is not None else r.get("value_num")
@@ -1492,7 +1665,9 @@ def store_extractions(run_id=None):
             "span": [r.get("span_start"), r.get("span_end")],
             "flags": [f.get("code") if isinstance(f, dict) else str(f) for f in (flags or [])],
         })
-    return {"store": str(p), "exists": True, "documents": list(docs.values())}
+    out = list(docs.values())
+    issuers = sorted({d["issuer"] for d in out if d.get("issuer")})
+    return {"store": str(p), "exists": True, "documents": out, "issuers": issuers}
 
 
 # --------------------------------------------------------------------------- #
@@ -1723,6 +1898,17 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(out)
         if path == "/api/runs":
             return self._json(RUNS.list())
+        # The activity feed. Incremental by design: `after` is the last event
+        # number the browser already has, so a poll every second costs one line
+        # per thing that actually happened rather than the whole run.
+        m = re.fullmatch(r"/api/runs/([\w.-]+)/events", path)
+        if m:
+            try:
+                after = int((qs.get("after") or ["-1"])[0])
+            except ValueError:
+                return self._json({"error": "after must be an integer"}, 400)
+            out = RUNS.events_since(m.group(1), after)
+            return self._json(out) if out else self._json({"error": "no such run"}, 404)
         m = re.fullmatch(r"/api/runs/([\w.-]+)", path)
         if m:
             run = RUNS.get(m.group(1))
@@ -1805,6 +1991,13 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/tools/edgar-scrubber/availability":
             try:
                 return self._json({"run_id": start_availability(params)}, 202)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/tools/edgar-scrubber/claude-template":
+            try:
+                if params.get("sync"):
+                    return self._json(claude_template(params))
+                return self._json({"run_id": start_claude_template(params)}, 202)
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
         if path == "/api/tools/edgar-scrubber/preview":
