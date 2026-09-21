@@ -380,7 +380,8 @@ def meta_issuer(targets):
     return (targets[0].get("issuer") if targets else None)
 
 
-def scrubber_run(run_id, targets, fields, home):
+def scrubber_run(run_id, targets, fields, home, self_consistency=1,
+                 shadow_external=False):
     """expand -> reduce -> extraction ladder -> local store, over a caller-chosen
     list of filings.
 
@@ -431,9 +432,30 @@ def scrubber_run(run_id, targets, fields, home):
     if taught:
         RUNS.log(run_id, f"{taught} field(s) carry human-confirmed examples from "
                          f"earlier filings")
+    # Two accuracy switches, both off by default because both cost model calls.
+    #
+    # self_consistency=2 samples the local model twice per field and escalates on
+    # disagreement. The gate signal for it already exists and has recorded
+    # "single sample, not checked" on every run so far, because the default is 1.
+    # It catches VARIANCE, not bias: a field the model gets wrong the same way
+    # every time -- estimated_value_per_1000 returning the bounds midpoint on 21
+    # of 25 filings -- sails through it. The span gate is what catches that.
+    #
+    # shadow_external asks the model for a field the EX-107 exhibit already
+    # answered and records whether it agreed (#164). One field of 33, but the
+    # only place in this system where model output can be scored against truth.
+    samples = max(1, int(self_consistency))
     ladder = ExtractionLadder(
         spec, local_client=OllamaClient(OllamaConfig.from_env({})),
-        claude_client=None, claude_enabled=False, exemplars=vstore)
+        claude_client=None, claude_enabled=False, exemplars=vstore,
+        self_consistency_samples=samples,
+        shadow_external=bool(shadow_external))
+    RUNS.log(run_id, "self-consistency: %d sample(s)%s"
+                     % (samples, " -- disagreement escalates" if samples > 1
+                        else " -- gate signal inert at 1"))
+    if shadow_external:
+        RUNS.log(run_id, "external shadow ON -- the model is asked for "
+                         "aggregate_principal too and agreement is recorded")
 
     store = OutputStore(home / "store" / "extractions.sqlite")
     store_run_id = store.start_run(spec.spec_id, getattr(spec, "version", "1"),
@@ -743,19 +765,48 @@ def resolve_targets(params):
                                      "limit": limit, "total": result["total"]}
 
 
+def accuracy_switches(params):
+    """The two opt-in accuracy settings, from params or the environment.
+
+    Environment as well as params so a run can be turned up without editing the
+    request the dashboard sends: SCRUBBER_SELF_CONSISTENCY=2 and
+    SCRUBBER_SHADOW_EXTERNAL=1.
+    """
+    def _env_int(name, default):
+        try:
+            return int(os.environ.get(name, "") or default)
+        except ValueError:
+            return default
+
+    samples = params.get("self_consistency")
+    if samples is None:
+        samples = _env_int("SCRUBBER_SELF_CONSISTENCY", 1)
+    samples = max(1, min(int(samples), 5))     # 5 is already 5x the model time
+
+    shadow = params.get("shadow_external")
+    if shadow is None:
+        shadow = os.environ.get("SCRUBBER_SHADOW_EXTERNAL", "").strip().lower() \
+            in ("1", "true", "yes", "on")
+    return samples, bool(shadow)
+
+
 def start_scrubber_run(params):
     home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
     fields = params.get("fields") or DEFAULT_FIELDS
     targets, provenance = resolve_targets(params)
     if not targets:
         raise ValueError("nothing to extract -- the query returned no filings")
+    samples, shadow = accuracy_switches(params)
 
     run_id = RUNS.create("edgar-scrubber", {**provenance, "fields": fields,
-                                             "limit": len(targets)})
+                                             "limit": len(targets),
+                                             "self_consistency": samples,
+                                             "shadow_external": shadow})
 
     def worker():
         try:
-            scrubber_run(run_id, targets, fields, home)
+            scrubber_run(run_id, targets, fields, home,
+                         self_consistency=samples, shadow_external=shadow)
         except Exception as exc:
             RUNS.update(run_id, status="error", finished_at=utcnow(),
                         error=f"{type(exc).__name__}: {exc}")
@@ -2472,7 +2523,24 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     ap.add_argument("--port", type=int, default=8137)
     ap.add_argument("--host", default="127.0.0.1")
+    # Accuracy switches, off by default because both spend model time. Set here
+    # they apply to every run this process starts, so turning them on is one
+    # command rather than an edit to what the dashboard posts.
+    ap.add_argument("--self-consistency", type=int, default=None, metavar="N",
+                    help="sample the local model N times per field and escalate "
+                         "on disagreement (default 1 = off; catches variance, "
+                         "not a bias the model repeats every time)")
+    ap.add_argument("--shadow-external", action="store_true",
+                    help="also ask the model for fields the EX-107 exhibit "
+                         "already answered, and record whether it agreed (#164)")
     args = ap.parse_args()
+
+    # argparse -> env, which is where accuracy_switches() reads its defaults, so
+    # a per-request value can still override a process-wide one.
+    if args.self_consistency is not None:
+        os.environ["SCRUBBER_SELF_CONSISTENCY"] = str(max(1, args.self_consistency))
+    if args.shadow_external:
+        os.environ["SCRUBBER_SHADOW_EXTERNAL"] = "1"
 
     # The Windows console is cp1252 by default; a non-ASCII byte in a startup
     # banner should never be what stops a server from running.
@@ -2493,6 +2561,10 @@ def main():
     print(f"  EDGAR_USER_AGENT  : {'set' if h['edgar_user_agent'] else 'MISSING (live runs will fail)'}")
     print(f"  local store       : {h['store']['path']} "
           f"({'exists' if h['store']['exists'] else 'not created yet'})")
+    _s, _sh = accuracy_switches({})
+    print(f"  self-consistency  : {_s} sample(s)"
+          f"{'' if _s > 1 else '  (off -- gate signal inert at 1)'}")
+    print(f"  external shadow   : {'ON' if _sh else 'off'}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
