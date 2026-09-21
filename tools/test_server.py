@@ -781,6 +781,67 @@ check("free research wrote only under its own store root",
       bool(_written) and all(_fr_home in w for w in _written))
 
 # --------------------------------------------------------------------------- #
+section("span gate -- a figure nothing points at is not stored (#163)")
+# --------------------------------------------------------------------------- #
+
+_EV = _spec.field("estimated_value_per_1000")      # number
+_BUF = _spec.field("buffer_pct")                   # percent
+_MAT = _spec.field("maturity_date")                # date
+_ISSUER = _spec.field("issuer")                    # string
+_PROD = _spec.field("product_type")                # enum
+_UND = _spec.field("underlyings")                  # array
+
+_SPAN = (10, 15)
+
+# With a span, nothing changes -- the gate only fires on absence.
+check("a spanned figure is stored untouched",
+      server.withhold_unsupported_value(_EV, 983.0, _SPAN, []) == (983.0, None))
+
+# Without one, the figure is withheld across every value-typed field.
+for _f, _v, _label in ((_EV, 950, "number"), (_BUF, 9.75, "percent"),
+                       (_MAT, "2028-08-31", "date")):
+    _val, _flag = server.withhold_unsupported_value(_f, _v, None, [])
+    check("an unsupported %s is not stored as a value" % _label, _val is None)
+    check("...and the %s withholding is recorded" % _label,
+          _flag is not None and _flag["code"] == "value_withheld_no_span")
+
+# The withheld value itself is named, so the run is still auditable.
+_v, _flag = server.withhold_unsupported_value(_EV, 950, None, [])
+check("the withheld figure is named in the reason", "950" in _flag["message"])
+
+# String and enum fields are untouched: they score well and locate reliably.
+check("a string field is unaffected",
+      server.withhold_unsupported_value(_ISSUER, "Citigroup", None, [])
+      == ("Citigroup", None))
+check("an enum field is unaffected",
+      server.withhold_unsupported_value(_PROD, "autocallable", None, [])
+      == ("autocallable", None))
+check("an array field is left to its own per-element check (#167)",
+      server.withhold_unsupported_value(_UND, ["Zoetis Inc."], None, [])
+      == (["Zoetis Inc."], None))
+
+# The two failure modes stay distinct -- they are different facts.
+_absent_val, _absent_flag = server.withhold_unsupported_value(
+    _BUF, 12.0, None, ["field_absent_from_document"])
+check("a field the filing does not carry is withheld too", _absent_val is None)
+check("...but is NOT relabelled as a model failure", _absent_flag is None)
+_model_val, _model_flag = server.withhold_unsupported_value(_BUF, 12.0, None, [])
+check("whereas an unlocatable model value says so explicitly",
+      _model_flag["code"] == "value_withheld_no_span")
+
+# An empty value was never a claim, so there is nothing to withhold.
+check("an absent value is left alone, not re-flagged",
+      server.withhold_unsupported_value(_EV, None, None, []) == (None, None))
+check("an empty string likewise",
+      server.withhold_unsupported_value(_EV, "", None, []) == ("", None))
+
+# The types the gate covers, stated once so a spec change is visible here.
+check("the gate covers number, percent and date",
+      server.VALUE_TYPED == {"number", "percent", "date"})
+check("22 of the 33 spec fields are value-typed",
+      sum(1 for f in _spec.fields if f.type in server.VALUE_TYPED) == 22)
+
+# --------------------------------------------------------------------------- #
 section("array fields -- a span per member, and the kind is not a member (#167)")
 # --------------------------------------------------------------------------- #
 
