@@ -2434,6 +2434,9 @@ function fieldsTable(fields){
 let SEARCH={hits:[],selected:new Set(),fields:null,defaults:[],query:null};
 
 async function openToolPanel(toolId){
+  // Each runnable tool owns its own panel. The scrubber's query form is not a
+  // general shape -- it is that tool's -- so dispatch rather than generalise.
+  if(toolId==='free-research') return openFreeResearchPanel();
   const panel=document.getElementById('toolPanel');
   panel.style.display='block';
   panel.innerHTML='<div class="loading">loading the query form…</div>';
@@ -3615,6 +3618,173 @@ function toolActions(t){
           'background:transparent;border:1px solid var(--border);color:var(--muted);cursor:not-allowed'));
   return `<div style="display:flex;gap:8px;margin-top:10px;align-items:center">${parts.join('')}</div>`;
 }
+// ---------------------------------------------------------------- Free Research
+// Two steps, one panel: pull raw filings into the local store, then fill a brief
+// template from them. They are separate calls because a pull is worth keeping
+// and re-reading with a different template — re-fetching EDGAR to try a second
+// brief would be paying twice for the same rows.
+let FR_POLL=null;
+function stopFRPolling(){ if(FR_POLL){ clearInterval(FR_POLL); FR_POLL=null; } }
+let FR={pullId:null,rowCount:0,templates:[]};
+
+async function openFreeResearchPanel(){
+  const panel=document.getElementById('toolPanel');
+  panel.style.display='block';
+  panel.innerHTML='<div class="loading">loading templates…</div>';
+  try{
+    FR={pullId:null,rowCount:0,
+        templates:await (await fetch('/api/tools/free-research/templates')).json()};
+  }catch(e){
+    panel.innerHTML=`<div class="err">Could not load Free Research: ${esc(e.message)}</div>`;
+    return;
+  }
+  const inp='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:6px 9px;font-size:13px';
+  panel.innerHTML=`
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+        <div class="name">Free Research</div>
+        <span class="muted" style="font-size:11.5px">pull the filings, then fill a brief from them</span>
+        <button style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer"
+                onclick="closeFreeResearchPanel()">close</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-top:10px">
+        <label style="font-size:11.5px;color:var(--muted)">Tickers (comma separated)
+          <input id="fr_tickers" style="${inp};width:100%;margin-top:3px" placeholder="AAPL, MSFT"></label>
+        <label style="font-size:11.5px;color:var(--muted)">CIKs (comma separated)
+          <input id="fr_ciks" style="${inp};width:100%;margin-top:3px" placeholder="0000320193"></label>
+        <label style="font-size:11.5px;color:var(--muted)">Forms (comma separated)
+          <input id="fr_forms" style="${inp};width:100%;margin-top:3px" placeholder="8-K, 10-Q"></label>
+        <label style="font-size:11.5px;color:var(--muted)">Filed since
+          <input id="fr_since" type="date" style="${inp};width:100%;margin-top:3px"></label>
+        <label style="font-size:11.5px;color:var(--muted)">Filed until
+          <input id="fr_until" type="date" style="${inp};width:100%;margin-top:3px"></label>
+        <label style="font-size:11.5px;color:var(--muted)">Template
+          <select id="fr_template" style="${inp};width:100%;margin-top:3px">
+            ${FR.templates.map(t=>`<option value="${esc(t.id)}">${esc(t.title)}</option>`).join('')}
+          </select></label>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:12px;align-items:center">
+        <button id="fr_pull_btn" onclick="runFRPull()"
+                style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:5px 11px;font-size:12px;cursor:pointer">1 · Pull filings</button>
+        <button id="fr_brief_btn" onclick="runFRBrief()" disabled
+                style="background:#21262d;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:5px 11px;font-size:12px;cursor:not-allowed">2 · Build brief</button>
+        <span id="fr_status" class="muted" style="font-size:11.5px"></span>
+      </div>
+      <div id="fr_log" style="margin-top:10px;font-family:ui-monospace,monospace;font-size:11.5px;color:var(--muted);max-height:160px;overflow:auto"></div>
+    </div>
+    <div id="fr_brief"></div>`;
+}
+function closeFreeResearchPanel(){
+  stopFRPolling();
+  const p=document.getElementById('toolPanel');
+  if(p){ p.style.display='none'; p.innerHTML=''; }
+}
+function frSetStatus(msg){ const el=document.getElementById('fr_status'); if(el) el.textContent=msg; }
+function frLog(run){
+  const el=document.getElementById('fr_log');
+  if(el&&run&&run.log) el.innerHTML=run.log.map(l=>esc(l.message)).join('<br>');
+}
+function frList(id){
+  const el=document.getElementById(id);
+  return (el&&el.value||'').split(',').map(s=>s.trim()).filter(Boolean);
+}
+function frVal(id){ const el=document.getElementById(id); return (el&&el.value)||null; }
+
+// Poll the shared run registry — the same endpoint every other tool panel
+// watches. `done` calls back; `error` and `stopped` end the watch and say so,
+// rather than spinning forever on a run that has already finished badly.
+function frWatch(runId,onDone){
+  stopFRPolling();
+  FR_POLL=setInterval(async()=>{
+    let run;
+    try{ run=await (await fetch(`/api/runs/${runId}`)).json(); }catch(e){ return; }
+    frLog(run);
+    if(run.status==='running'||run.status==='queued'){ frSetStatus(run.status+'…'); return; }
+    stopFRPolling();
+    if(run.status==='done'){ onDone(run); }
+    else{ frSetStatus(run.status==='error'?`failed: ${run.error||'unknown error'}`:run.status); }
+  },1000);
+}
+
+async function runFRPull(){
+  const body={tickers:frList('fr_tickers'),ciks:frList('fr_ciks'),
+              forms:frList('fr_forms'),since:frVal('fr_since'),until:frVal('fr_until')};
+  if(!body.tickers.length&&!body.ciks.length){ frSetStatus('name at least one ticker or CIK'); return; }
+  frSetStatus('starting…');
+  const res=await fetch('/api/tools/free-research/pull',
+    {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const out=await res.json();
+  if(!res.ok){ frSetStatus(out.error||'pull refused'); return; }
+  frWatch(out.run_id,run=>{
+    FR.pullId=run.pull_id; FR.rowCount=run.row_count||0;
+    const un=(run.unresolved_tickers||[]);
+    frSetStatus(`${FR.rowCount} row(s) pulled`+(un.length?` · unresolved: ${un.join(', ')}`:''));
+    const b=document.getElementById('fr_brief_btn');
+    if(b&&FR.rowCount){ b.disabled=false;
+      b.style.cssText='background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:5px 11px;font-size:12px;cursor:pointer'; }
+  });
+}
+
+async function runFRBrief(){
+  if(!FR.pullId){ frSetStatus('pull some filings first'); return; }
+  frSetStatus('filling slots…');
+  const res=await fetch('/api/tools/free-research/brief',
+    {method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({pull_id:FR.pullId,template_id:frVal('fr_template')})});
+  const out=await res.json();
+  if(!res.ok){ frSetStatus(out.error||'brief refused'); return; }
+  frWatch(out.run_id,async run=>{
+    frSetStatus('brief ready');
+    const view=await (await fetch(`/api/tools/free-research/brief?id=${encodeURIComponent(run.brief_id)}`)).json();
+    renderFRBrief(view);
+  });
+}
+
+// Slots in template order. A chart slot is drawn by the dashboard's own chart()
+// helper from points the SERVER read out of the stored rows — nothing on an axis
+// here came from the model, which only chose which two columns to plot.
+function renderFRBrief(view){
+  const host=document.getElementById('fr_brief');
+  if(!host) return;
+  const brief=view.brief||{}, slots=brief.slots||{}, charts=view.charts||{};
+  const order=(view.template&&view.template.slots)||
+              Object.keys(slots).map(n=>({name:n,kind:'prose'}));
+  let html=`<div class="card" style="margin-top:16px">
+    <div class="name">${esc((view.template&&view.template.title)||brief.template_id||'Brief')}</div>
+    <div class="muted" style="font-size:11px;margin:4px 0 12px">
+      ${view.row_count} row(s) · filled by ${esc(brief.model||'unknown')} · pull ${esc(brief.pull_id||'')}
+    </div>`;
+  order.forEach(slot=>{
+    const val=slots[slot.name];
+    if(val===undefined) return;
+    html+=`<div style="margin:14px 0"><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.4px">${esc(slot.name)}</div>`;
+    if(slot.kind==='chart'||charts[slot.name]){
+      const c=charts[slot.name]||{};
+      html+=(c.points&&c.points.length>1)
+        ? chart(c.points,{ylabel:c.y})
+        : `<div class="muted" style="font-size:12px;padding:10px 0">${esc(c.reason||'nothing to plot')}</div>`;
+      if(c.note&&c.points&&c.points.length>1)
+        html+=`<div class="muted" style="font-size:11px">${esc(c.note)}</div>`;
+    }else if(val&&val.columns){
+      html+=`<div class="muted" style="font-size:12px">columns: ${val.columns.map(esc).join(' · ')}</div>`;
+    }else{
+      html+=`<div style="font-size:13px;line-height:1.5">${esc(String(val))}</div>`;
+    }
+    html+='</div>';
+  });
+  const dropped=brief.dropped||[];
+  if(dropped.length){
+    html+=`<div style="margin-top:16px;border-top:1px solid var(--border);padding-top:10px">
+      <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.4px">Dropped slots</div>
+      ${dropped.map(d=>`<div class="muted" style="font-size:12px;margin-top:4px">
+        <code>${esc(d.slot)}</code> — ${esc(d.reason)}</div>`).join('')}
+      <div class="muted" style="font-size:11px;margin-top:6px">A slot is dropped when its value cannot be checked against the pulled rows.</div>
+    </div>`;
+  }
+  html+='</div>';
+  host.innerHTML=html;
+}
+
 function runnerBanner(){
   if(DEMO_ON) return `<div class="muted" style="font-size:12px;margin-bottom:12px">Demo mode — cards are catalog entries only. Serve the repo with <code>python tools/server.py</code> to actually run a tool.</div>`;
   if(!RUNNER) return `<div class="muted" style="font-size:12px;margin-bottom:12px">Tool runner not detected. Start it with <code>python tools/server.py</code> and reload to get Run buttons.</div>`;

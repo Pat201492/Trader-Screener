@@ -14,6 +14,20 @@
     "local_doc": "tools/edgar_scrubber/README.md"
   },
   {
+    "id": "free-research",
+    "kind": "gather",
+    "name": "Free Research (open-ended filing briefs)",
+    "purpose": "Pull raw filings into a LOCAL store, then fill a brief template from them with a local model — no field spec written in advance, and no metered API spend. A slot whose value cannot be checked against the pulled rows is dropped and reported, so what survives is auditable against the rows sitting next to it (#147/#152).",
+    "status": "building",
+    "source": "SEC EDGAR",
+    "refresh_cadence": "on-demand (human-supervised)",
+    "last_run": null,
+    "output_path": "~/.free-research/store (local)",
+    "graduatedTo": null,
+    "doc_link": "https://github.com/Pat201492/Trader-Screener/blob/master/tools/free_research/SCHEMA.md",
+    "local_doc": "tools/free_research/SCHEMA.md"
+  },
+  {
     "id": "magic-formula",
     "kind": "model",
     "name": "Magic Formula Rank",
