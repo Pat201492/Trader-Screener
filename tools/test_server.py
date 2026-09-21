@@ -781,6 +781,62 @@ check("free research wrote only under its own store root",
       bool(_written) and all(_fr_home in w for w in _written))
 
 # --------------------------------------------------------------------------- #
+section("array fields -- a span per member, and the kind is not a member (#167)")
+# --------------------------------------------------------------------------- #
+
+UND_DOC = ("The notes are linked to the common stock of GE Vernova Inc. "
+           "Additional notes reference Zoetis Inc., the Nasdaq-100 Index and "
+           "the Russell 2000 Index.")
+
+# 1. A classification token is never an array member.
+_names, _kinds = server.classify_array_members(["GE Vernova Inc.", "single_stock"])
+check("a classification token is split out of the list",
+      _names == ["GE Vernova Inc."] and _kinds == ["single_stock"])
+check("'common stock' is a kind, not an underlying",
+      server.classify_array_members(
+          ["Advanced Micro Devices, Inc.", "common stock"])[0]
+      == ["Advanced Micro Devices, Inc."])
+check("a real index name survives, because matching is whole-element",
+      server.classify_array_members(["Nasdaq-100 Index", "Russell 2000"])
+      == (["Nasdaq-100 Index", "Russell 2000"], []))
+check("case and a trailing point do not hide a kind",
+      server.classify_array_members(["Zoetis Inc.", "Index."])[1] == ["Index."])
+
+# 2. Spans resolve per element, not for the serialized array.
+_kept, _dropped, _spans = server.locate_array_elements(
+    UND_DOC, ["GE Vernova Inc.", "Zoetis Inc.", "Fabricated Corp."])
+check("each stated member gets its own span",
+      _kept == ["GE Vernova Inc.", "Zoetis Inc."] and len(_spans) == 2)
+check("every returned span really contains its member",
+      all(UND_DOC[s["span"][0]:s["span"][1]].strip().lower().startswith(n.lower()[:6])
+          for n, s in _spans.items()))
+
+# 3. An element the filing does not state is dropped individually, and the
+#    surviving list is what would be stored.
+check("an unstated member is dropped on its own", _dropped == ["Fabricated Corp."])
+check("the survivors are the other two, not the whole list discarded",
+      len(_kept) == 2)
+
+# 4. A multi-underlying basket keeps every genuine member.
+_basket, _bdrop, _ = server.locate_array_elements(
+    UND_DOC, ["Nasdaq-100 Index", "Russell 2000 Index"])
+check("a basket keeps every genuine member",
+      _basket == ["Nasdaq-100 Index", "Russell 2000 Index"] and _bdrop == [])
+
+# 5. The whole-array path was the bug: a serialized array is never a verbatim
+#    substring of a filing, so it could never locate.
+check("locate_value still refuses a list outright, which is why per-element exists",
+      server.locate_value(UND_DOC, ["GE Vernova Inc."]) == (None, None))
+
+# 6. The spec now carries the kind as its own field.
+_und_spec = _spec.field("underlyings")
+_kind_spec = _spec.field("underlying_type")
+check("underlyings is declared as names", _und_spec.item_type == "string")
+check("the kind has its own field", _kind_spec is not None)
+check("...and it is the enum the array used to carry",
+      set(_kind_spec.enum) == {"index", "etf", "single_stock", "basket", "worst_of"})
+
+# --------------------------------------------------------------------------- #
 section("charset -- declared, not sniffed")
 # --------------------------------------------------------------------------- #
 

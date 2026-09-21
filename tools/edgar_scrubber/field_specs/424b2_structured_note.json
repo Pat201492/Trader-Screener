@@ -84,12 +84,21 @@
     {
       "name": "underlyings",
       "type": "array",
-      "item_type": "object",
+      "item_type": "string",
       "extraction_path": "variable",
       "required": true,
       "sections": ["cover", "key_terms"],
       "wire_key": "und",
-      "description": "One entry per reference asset: {name, kind}. kind in index|etf|single_stock|basket|worst_of. Aggregated across issuers this is the dealer-hedging proxy (#110)."
+      "description": "The NAME of each reference asset, exactly as the filing prints it -- for example 'Zoetis Inc.', 'Nasdaq-100 Index'. Names only: never the kind of asset. Do not add 'single_stock', 'common stock', 'index' or any other classification as a member of this list; the kind belongs in underlying_type. A basket keeps every genuine name. Aggregated across issuers this is the dealer-hedging proxy (#110)."
+    },
+    {
+      "name": "underlying_type",
+      "type": "enum",
+      "enum": ["index", "etf", "single_stock", "basket", "worst_of"],
+      "extraction_path": "variable",
+      "sections": ["cover", "key_terms"],
+      "wire_key": "undkind",
+      "description": "What KIND of reference asset the note is linked to. This is the classification that used to be appended to the underlyings array, where it inflated basket size and created a phantom bucket when grouping by underlying (#167)."
     },
     {
       "name": "product_type",
