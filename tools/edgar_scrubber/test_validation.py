@@ -34,6 +34,7 @@ try:  # package import: tools.edgar_scrubber.test_validation
     from .normalize import normalize_html
     from .reduce import build_boilerplate_model, strip_boilerplate, split_sections, sub_block
     from .extraction_ladder import ExtractionLadder
+    from . import extraction_ladder as el
 except ImportError:  # standalone: python tools/edgar_scrubber/test_validation.py
     import validation as v
     import validate_ui as ui
@@ -41,6 +42,7 @@ except ImportError:  # standalone: python tools/edgar_scrubber/test_validation.p
     from normalize import normalize_html
     from reduce import build_boilerplate_model, strip_boilerplate, split_sections, sub_block
     from extraction_ladder import ExtractionLadder
+    import extraction_ladder as el
 
 failures = []
 
@@ -75,9 +77,11 @@ class AllFieldsClient:
     def chat_completion(self, messages, model=None, response_format=None, **kw):
         props = response_format["json_schema"]["schema"]["properties"]
         key = next(iter(props))
-        vtype = props[key]["properties"]["v"].get("type", "string")
+        vtype = props[key]["properties"][el.WIRE_VALUE_KEY].get("type", "string")
         value = {"array": [], "number": 1.0, "boolean": True}.get(vtype, "x")
-        body = json.dumps({key: {"v": value, "s": [0, 1], "c": 0.9}})
+        body = json.dumps({key: {el.WIRE_VALUE_KEY: value,
+                                 el.WIRE_SPAN_KEY: [0, 1],
+                                 el.WIRE_CONF_KEY: 0.9}})
         return {"choices": [{"message": {"content": body}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
 
@@ -116,7 +120,9 @@ class ImprovingClient:
         learned = "EXEMPLARS" in prompt and "70.0" in prompt
         value = self.GOOD if learned else self.BAD
         conf = 0.92 if learned else 0.5
-        body = json.dumps({key: {"v": value, "s": [0, 6], "c": conf}})
+        body = json.dumps({key: {el.WIRE_VALUE_KEY: value,
+                                 el.WIRE_SPAN_KEY: [0, 6],
+                                 el.WIRE_CONF_KEY: conf}})
         return {"choices": [{"message": {"content": body}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
 

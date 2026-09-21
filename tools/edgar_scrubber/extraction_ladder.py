@@ -150,8 +150,36 @@ _WIRE_TYPE_MAP = {
 }
 
 
+#: The three slots of one field's wire entry. Self-describing on purpose.
+#: They were `v`/`s`/`c` to save tokens (#104), and measured against real
+#: filings that trade was a bad one: a 7B filled the unlabelled value slot with
+#: a CONFIDENCE-shaped number. Across 25 Citigroup 424B2s, `estimated_value_per_1000`
+#: came back 0.0 twenty-one times out of twenty-five, and `contingent_coupon_rate`
+#: read 0.95/0.9/0.8/1.0 -- the vocabulary of a probability, not of a coupon
+#: (11.40) or a barrier (60.00). String fields like `issuer` and `cusip` were
+#: unaffected, because a string slot cannot be confused with a probability.
+#: The saving was ~4 tokens per field per call; the cost was the field itself.
+#: Referenced by `SYSTEM_PROMPT` and `build_wire_schema` alike so the prompt
+#: and the schema can never describe different key names.
+WIRE_VALUE_KEY = "value"
+WIRE_SPAN_KEY = "span"
+WIRE_CONF_KEY = "confidence"
+
+#: Superseded short keys, still accepted on the way IN so a cached response or
+#: a replayed transcript from before the rename still parses.
+_LEGACY_WIRE_KEYS = {WIRE_VALUE_KEY: "v", WIRE_SPAN_KEY: "s", WIRE_CONF_KEY: "c"}
+
+
 def _wire_key(f):
     return f.wire_key or f.name
+
+
+def _entry_get(entry, key):
+    """Read one slot, preferring the current name and falling back to the
+    short one it replaced."""
+    if key in entry:
+        return entry[key]
+    return entry.get(_LEGACY_WIRE_KEYS[key])
 
 
 def build_wire_schema(fields):
@@ -172,12 +200,19 @@ def build_wire_schema(fields):
         props[_wire_key(f)] = {
             "type": "object",
             "properties": {
-                "v": v_schema,
-                "s": {"type": ["array", "null"], "items": {"type": "integer"},
-                      "minItems": 2, "maxItems": 2},
-                "c": {"type": "number"},
+                WIRE_VALUE_KEY: v_schema,
+                WIRE_SPAN_KEY: {"type": ["array", "null"], "items": {"type": "integer"},
+                                "minItems": 2, "maxItems": 2},
+                # A probability, and constrained decode is what makes it one.
+                # Unbounded, this slot came back holding the VALUE the model had
+                # just emitted (a barrier of 0.95 self-certifying at "0.95"), or
+                # plain garbage -- 1.6e+30 and 1000000.0 were both observed in
+                # the store. Both make `evaluate_gate`'s floor meaningless, and
+                # a copied value inverts it: a wrong big number passes, a right
+                # small one escalates.
+                WIRE_CONF_KEY: {"type": "number", "minimum": 0.0, "maximum": 1.0},
             },
-            "required": ["v", "s"],
+            "required": [WIRE_VALUE_KEY, WIRE_SPAN_KEY, WIRE_CONF_KEY],
         }
     return {
         "type": "json_schema",
@@ -194,12 +229,26 @@ def build_wire_schema(fields):
 # constant, not inlined in `build_messages`, so `static_prefix` builds the
 # EXACT same text a real call sends -- one source of truth, not two copies
 # that can drift apart (#106).
+# Every slot is described, and the value slot FIRST. The previous wording
+# explained the span and the confidence and never once mentioned the value
+# key -- so the only numeric instruction in the whole prompt was "0 to 1",
+# and that is exactly the range the value slot came back in. Saying what the
+# value is, and saying explicitly that it is not the confidence, is the other
+# half of the `v` -> `value` rename above.
 SYSTEM_PROMPT = (
     "You are an SEC EDGAR extraction engine. Extract exactly the requested "
-    "field from SOURCE TEXT. `s` must be the [start, end] character offset "
-    "pair into SOURCE TEXT for the span that supports the value, or null if "
-    "you cannot locate one -- never guess a span. `c` is your confidence in "
-    "the value, 0 to 1."
+    "field from SOURCE TEXT. "
+    f"`{WIRE_VALUE_KEY}` is the extracted field itself: the number or text "
+    "the document states, in the document's own units. A percentage is the "
+    "percent figure as written, not a fraction of one. A per-note dollar "
+    "amount is the dollar figure as written. Use null when the document "
+    "does not state the field. "
+    f"`{WIRE_SPAN_KEY}` is the [start, end] character offset pair into "
+    "SOURCE TEXT for the text that supports the value, or null if you "
+    "cannot locate one -- never guess a span. "
+    f"`{WIRE_CONF_KEY}` is how sure you are, 0 to 1. It describes the "
+    f"value; it is never itself the answer. Never copy `{WIRE_CONF_KEY}` "
+    f"into `{WIRE_VALUE_KEY}`."
 )
 
 
@@ -250,6 +299,29 @@ def build_messages(field_def, text, *, table_context=None, exemplars=None):
     ]
 
 
+#: A `c` that was present but is not a probability. Distinct from None ("the
+#: model did not report one", which `evaluate_gate` passes vacuously): garbage
+#: here is positive evidence the output is unreliable, so it must FAIL the
+#: gate rather than be waved through. `-inf` is out of band and fails closed
+#: against any floor even if some future path forgets to check it explicitly.
+INVALID_CONFIDENCE = float("-inf")
+
+
+def coerce_confidence(raw):
+    """Wire `c` -> a probability in [0,1], None if absent, INVALID_CONFIDENCE
+    if present but not one. Constrained decode should already guarantee the
+    range (`build_wire_schema`); this is the backstop for an unconstrained
+    client, a schema-ignoring model, or a replayed old payload."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return INVALID_CONFIDENCE
+    value = float(raw)
+    if value != value or value < 0.0 or value > 1.0:   # NaN or out of range
+        return INVALID_CONFIDENCE
+    return value
+
+
 def parse_ladder_response(fields, payload):
     """wire-keyed `{v, s, c}` payload -> {canonical_name: (value, span, conf)}."""
     by_key = {_wire_key(f): f for f in fields}
@@ -261,11 +333,13 @@ def parse_ladder_response(fields, payload):
         if f is None:
             continue
         if isinstance(entry, dict):
-            value, s, conf = entry.get("v"), entry.get("s"), entry.get("c")
+            value = _entry_get(entry, WIRE_VALUE_KEY)
+            s = _entry_get(entry, WIRE_SPAN_KEY)
+            conf = _entry_get(entry, WIRE_CONF_KEY)
         else:
             value, s, conf = entry, None, None
         span = tuple(s) if isinstance(s, (list, tuple)) and len(s) == 2 else None
-        out[f.name] = (value, span, conf)
+        out[f.name] = (value, span, coerce_confidence(conf))
     return out
 
 
@@ -532,7 +606,12 @@ def evaluate_gate(field_def, value, span, *, ex107=None, spec=None, samples=None
     else:
         signals.append(GateSignal("self_consistency", True, "single sample, not checked"))
 
-    if model_confidence is not None:
+    if model_confidence is INVALID_CONFIDENCE or model_confidence == INVALID_CONFIDENCE:
+        # Not "low confidence" -- a model that reports 1.6e+30 has told you
+        # nothing about this value except that its output cannot be read.
+        signals.append(GateSignal("model_confidence", False,
+                                   "self-reported confidence is not a probability in [0,1]"))
+    elif model_confidence is not None:
         conf_ok = model_confidence >= confidence_floor
         signals.append(GateSignal("model_confidence", conf_ok,
                                    "" if conf_ok else
@@ -934,7 +1013,18 @@ class ExtractionLadder:
 
         shadow: ShadowComparison when rule in shadow mode (comparing rule vs model).
         """
+        # The gate has already had its say on an unreadable confidence; what
+        # lands in the store must be a probability or nothing, so `Results`
+        # and `Coverage` can never average a 1.6e+30 into a score.
+        if confidence == INVALID_CONFIDENCE:
+            confidence = None
+            flags_extra = [Flag(f.name, "confidence_uninterpretable", "warn",
+                                "the model reported a confidence outside [0,1]; it is "
+                                "discarded and this value is treated as unverified")]
+        else:
+            flags_extra = []
         flags = self.spec.check_value(f.name, value, ex107=ex107) if value is not None else []
+        flags = list(flags) + flags_extra
         if gated:
             flags = list(flags) + [Flag(
                 f.name, "gated_no_claude", "warn",
@@ -979,8 +1069,9 @@ if __name__ == "__main__":
             self.value, self.span, self.conf = value, span, conf
         def chat_completion(self, messages, model=None, temperature=None,
                              max_tokens=None, top_p=None, response_format=None):
-            body = json.dumps({"ev1000": {"v": self.value, "s": list(self.span) if self.span else None,
-                                           "c": self.conf}})
+            body = json.dumps({"ev1000": {WIRE_VALUE_KEY: self.value,
+                                           WIRE_SPAN_KEY: list(self.span) if self.span else None,
+                                           WIRE_CONF_KEY: self.conf}})
             return {"choices": [{"message": {"content": body}}],
                     "usage": {"prompt_tokens": 120, "completion_tokens": 12}}
 

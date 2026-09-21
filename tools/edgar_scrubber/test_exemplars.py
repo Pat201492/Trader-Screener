@@ -76,7 +76,9 @@ class ScriptedClient:
     def chat_completion(self, messages, model=None, response_format=None, **kw):
         self.last_messages = messages
         key = _wire_key(response_format)
-        body = json.dumps({key: {"v": self.value, "s": list(self.span), "c": self.conf}})
+        body = json.dumps({key: {el.WIRE_VALUE_KEY: self.value,
+                                 el.WIRE_SPAN_KEY: list(self.span),
+                                 el.WIRE_CONF_KEY: self.conf}})
         return {"choices": [{"message": {"content": body}}],
                 "usage": {"prompt_tokens": 40, "completion_tokens": 5}}
 
@@ -100,7 +102,9 @@ class ExemplarReadingClient:
             value = float(m.group(1)) if m else self.BAD
         else:
             value = self.BAD
-        body = json.dumps({key: {"v": value, "s": [0, 4], "c": 0.9}})
+        body = json.dumps({key: {el.WIRE_VALUE_KEY: value,
+                                 el.WIRE_SPAN_KEY: [0, 4],
+                                 el.WIRE_CONF_KEY: 0.9}})
         return {"choices": [{"message": {"content": body}}],
                 "usage": {"prompt_tokens": 40, "completion_tokens": 5}}
 

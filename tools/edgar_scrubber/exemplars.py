@@ -372,7 +372,9 @@ if __name__ == "__main__":
         def chat_completion(self, messages, model=None, response_format=None, **kw):
             import json as _json
             key = next(iter(response_format["json_schema"]["schema"]["properties"]))
-            body = _json.dumps({key: {"v": self.value, "s": list(self.span), "c": 0.9}})
+            body = _json.dumps({key: {el.WIRE_VALUE_KEY: self.value,
+                                      el.WIRE_SPAN_KEY: list(self.span),
+                                      el.WIRE_CONF_KEY: 0.9}})
             return {"choices": [{"message": {"content": body}}],
                     "usage": {"prompt_tokens": 50, "completion_tokens": 5}}
 
