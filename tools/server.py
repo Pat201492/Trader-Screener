@@ -575,6 +575,11 @@ def scrubber_run(run_id, targets, fields, home):
                         })
                 flags = [f.get("code") for f in p_flags]
                 gated = "gated_no_claude" in flags
+                stored_value, withheld_flag = withhold_unsupported_value(
+                    fdef, stored_value, span, flags)
+                if withheld_flag:
+                    p_flags.append(withheld_flag)
+                    flags = [f.get("code") for f in p_flags]
                 field_values.append(FieldValue(
                     field=p.field, value=stored_value, unit=p.unit,
                     span=tuple(span) if span else None,
@@ -597,19 +602,28 @@ def scrubber_run(run_id, targets, fields, home):
                 # finished document lists only survivors, so a value the run
                 # produced and then threw away leaves no trace anywhere else.
                 empty = p.value in (None, "", [])
+                withheld = "value_withheld_no_span" in flags
                 dropped = ("field_absent_from_document" in flags
-                           or "span_unlocatable" in flags)
+                           or "span_unlocatable" in flags
+                           or "element_span_unlocatable" in flags
+                           or withheld)
                 RUNS.event(
                     run_id, "field_done", accession=accession, field=name,
+                    # The model's value, not the stored one: a figure the run
+                    # produced and then withheld leaves no trace anywhere else.
                     value=(str(p.value)[:120] if not empty else None),
                     rung=p.rung, gated=gated, confidence=p.confidence,
                     span=list(span) if span else None,
                     kept=bool(span) and not dropped,
                     verdict=("no value" if empty else
+                             "withheld" if withheld else
                              "dropped" if dropped else
                              "kept" if span else "no span"),
                     reason=("the filing never uses this field's wording"
                             if "field_absent_from_document" in flags else
+                            "no span supports this figure, and every span-less "
+                            "figure on the sample was wrong (#163)"
+                            if withheld else
                             "the value is not stated verbatim in the document"
                             if "span_unlocatable" in flags else None),
                     seconds=round(time.time() - t_start, 1))
@@ -940,6 +954,60 @@ def anchor_positions(low_text, field):
             out.append(at + len(key))
             start = at + len(key)
     return sorted(out)
+
+
+# Fields whose value is a figure: a number, a rate, a date. For these, a span is
+# a FAILING gate rather than advisory (#163).
+#
+# The measurement behind this: on run #0018, across 25 Citigroup filings,
+# estimated_value_per_1000 scored 2/6 correct WITH a located span and 0/19
+# WITHOUT one. Not most of the span-less values were wrong -- all of them were.
+# A located span is not sufficient (33-64% correct) but its absence was a
+# perfect negative filter on that sample, and the ladder was already recording
+# it: `span_unlocatable` named exactly the values the model had invented, and
+# the runner stored them anyway.
+#
+# String and enum fields are deliberately excluded. issuer and cusip already
+# score well and locate reliably, and gating them would cost coverage to catch
+# nothing. Arrays are excluded here because they resolve per element instead
+# (#167), which is a stricter check than this one.
+VALUE_TYPED = frozenset(("number", "percent", "date"))
+
+
+def withhold_unsupported_value(fdef, value, span, flag_codes):
+    """Refuse to store a figure nothing in the filing points at (#163).
+
+    Returns `(value, flag_or_None)`. A withheld value becomes None and the
+    reason is recorded, so a reader can tell the field was attempted.
+
+    The two failure modes stay distinct, because they are different facts:
+
+      * `field_absent_from_document` -- the filing does not carry this field.
+        Already flagged upstream; nothing is added here, and the value is
+        withheld because there was nothing to read.
+      * `value_withheld_no_span` -- the filing may well state it, but the model
+        produced something no span supports. That is a model failure, not a
+        document property, and conflating the two would lose the distinction
+        the store needs to tell "this note type has no buffer" from "we could
+        not read the buffer".
+
+    This deliberately reduces apparent coverage. A field dropping from 84%
+    present to 24% present is the correct reading of the same evidence, not a
+    regression -- the other 60% were values nothing could check.
+    """
+    if fdef is None or getattr(fdef, "type", None) not in VALUE_TYPED:
+        return value, None
+    if value in (None, "", []) or span is not None:
+        return value, None
+    if "field_absent_from_document" in flag_codes:
+        return None, None          # already explained, and correctly so
+    return None, {
+        "field": fdef.name, "code": "value_withheld_no_span", "severity": "warn",
+        "message": ("withheld %r: no span in this filing supports it. Every "
+                    "span-less value of this kind on the 25-filing sample was "
+                    "wrong (#163), so it is not stored as a value."
+                    % (value if not isinstance(value, str) else value[:80])),
+    }
 
 
 # Tokens that classify an underlying rather than name one (#167). The model
