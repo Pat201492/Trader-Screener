@@ -288,6 +288,75 @@ def test_external_shadow_measures_the_model_without_changing_the_value():
 
 
 # --------------------------------------------------------------------------- #
+def test_the_prompt_hands_the_model_nothing_it_can_mistake_for_an_answer():
+    section("Prompt hygiene: bounds are a rejection test, notes never ship")
+    # Measured on run #0018. estimated_value_per_1000 carries bounds 900..1000,
+    # the prompt said `BOUNDS: {'min': 900, 'max': 1000}`, and the field came
+    # back as exactly 950 -- the midpoint -- on 21 of 25 filings:
+    #
+    #     value == 950:  21 rows,  2 spanned   (9%)
+    #     value != 950:   4 rows,  4 spanned   (100%)
+    #
+    # Every non-midpoint value was supported by the filing; almost no midpoint
+    # was. contingent_coupon_rate, same 0..100 bounds, returns its midpoint 50
+    # zero times in 195 extractions -- so this is not an artifact of bounded
+    # fields, it is what the model does when it cannot find the number.
+    line = el._bounds_line({"min": 900, "max": 1000})
+    check("bounds are stated as a rejection, not a range to pick from",
+          "REJECTED IF" in line and "not a range to pick from" in line)
+    check("the prompt names the failure mode explicitly",
+          "middle" in line.lower())
+    check("and says what to do instead", "null" in line.lower())
+    check("the raw bounds dict never reaches the prompt",
+          "{'min'" not in line and '{"min"' not in line)
+
+    one_sided = el._bounds_line({"min": 0})
+    check("a one-sided bound still renders without inventing a midpoint",
+          "below 0" in one_sided and "middle" in one_sided.lower())
+
+    ev = NOTE_SPEC.field("estimated_value_per_1000")
+    prefix = el.static_prefix(ev)
+    check("the assembled prompt carries no bounds dict",
+          "{'min': 900" not in prefix and '"min": 900' not in prefix)
+    check("the assembled prompt carries the rejection framing",
+          "REJECTED IF" in prefix)
+
+    # A description is sent to the model; a note is not. Everything in
+    # `description` goes into the prompt verbatim, so issue numbers and
+    # judgements about how well the model does read as context to a human and
+    # as suggestion to a 7B.
+    check("the field's note is NOT in the prompt",
+          bool(ev.note) and ev.note not in prefix)
+    check("its description IS", ev.description in prefix)
+    for fname in ("underlyings", "product_type", "aggregate_principal",
+                  "filing_stage", "observation_dates", "estimated_value_low",
+                  "underlying_type", "pricing_date"):
+        f = NOTE_SPEC.field(fname)
+        if f is None or not f.note:
+            continue
+        check("%s: note stays out of the prompt" % fname,
+              f.note not in el.static_prefix(f))
+
+    # The general rule, asserted over the whole spec rather than field by field.
+    import re as _re
+    leaky = [f.name for f in NOTE_SPEC.fields
+             if f.description and (_re.search(r"#\d+", f.description)
+                                    or _re.search(r"\bthe model\b", f.description, _re.I))]
+    check("no description in the shipped spec talks to the maintainer",
+          not leaky, )
+    if leaky:
+        print("      leaking:", ", ".join(leaky))
+
+    # The worked-example regression this file already guards against, restated:
+    # a number in a description is a number the model can copy.
+    numbers = [f.name for f in NOTE_SPEC.fields
+               if f.name == "estimated_value_per_1000"
+               and _re.search(r"\b9\d\d(\.\d+)?\b", f.description or "")]
+    check("the worst-performing field's description states no number",
+          not numbers)
+
+
+# --------------------------------------------------------------------------- #
 def test_prose_dates_normalize_and_wake_the_cross_check():
     section("Dates (#166): prose in, ISO stored, and date_after stops being dead")
     MAT = NOTE_SPEC.field("maturity_date")
@@ -917,6 +986,7 @@ def main():
     test_rule_shadow_mode()
     test_xbrl_rung_short_circuits()
     test_external_shadow_measures_the_model_without_changing_the_value()
+    test_the_prompt_hands_the_model_nothing_it_can_mistake_for_an_answer()
     test_prose_dates_normalize_and_wake_the_cross_check()
     test_local_confident_no_escalation()
     test_out_of_bounds_escalates_to_claude()

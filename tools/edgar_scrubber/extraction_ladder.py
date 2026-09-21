@@ -254,6 +254,51 @@ SYSTEM_PROMPT = (
 )
 
 
+def _bounds_line(bounds):
+    """State bounds as a REJECTION CRITERION, never as a range to produce in.
+
+    Measured, not guessed. `BOUNDS: {'min': 900, 'max': 1000}` was going into
+    the prompt for `estimated_value_per_1000`, and on run #0018 that field came
+    back as exactly 950 -- the midpoint -- on 21 of 25 filings. The split is
+    what makes it unarguable:
+
+        value == 950 (the midpoint):  21 rows,  2 with a span   (9%)
+        value != 950:                  4 rows,  4 with a span   (100%)
+
+    Every value that was not the midpoint was supported by the filing's text.
+    Almost none of the midpoints were. The model, unable to find the number,
+    answered in the middle of the range it had been handed.
+
+    The control rules out a coincidence: `contingent_coupon_rate` carries the
+    same 0..100 bounds, and across 195 extractions it returns the midpoint 50
+    exactly zero times -- that field reads cleanly and never needs to guess.
+    `coupon_barrier_pct` shows the same signature as estimated_value: 6 values
+    sitting exactly on 50, none of them spanned.
+
+    This is the third fabricated constant this field has produced. It was 0.0,
+    then 970.2 copied verbatim out of a worked example in the prompt (#161),
+    now the midpoint of the bounds. The pattern is not really about bounds: the
+    model fills the slot from whatever the prompt hands it, so the prompt must
+    hand it nothing that can be mistaken for an answer.
+    """
+    lo, hi = bounds.get("min"), bounds.get("max")
+    if lo is not None and hi is not None:
+        rng = f"below {lo} or above {hi}"
+    elif lo is not None:
+        rng = f"below {lo}"
+    elif hi is not None:
+        rng = f"above {hi}"
+    else:
+        return "REJECTED IF: (no bounds)"
+    return (
+        f"REJECTED IF: a value {rng} is thrown away. This is a check applied "
+        "to your answer after the fact, not a range to pick from. Never choose "
+        "a number because it falls inside it, and never answer with the middle "
+        "of it. If the document does not state this field, answer null -- null "
+        "is always a better answer than a plausible-looking number."
+    )
+
+
 def _static_user_parts(field_def, exemplars):
     """The field-spec + exemplar portion of the prompt: identical on every
     call for a given (field, exemplar set), regardless of which document is
@@ -268,7 +313,7 @@ def _static_user_parts(field_def, exemplars):
     if field_def.enum:
         parts.append(f"ALLOWED VALUES: {', '.join(field_def.enum)}")
     if field_def.bounds:
-        parts.append(f"BOUNDS: {field_def.bounds}")
+        parts.append(_bounds_line(field_def.bounds))
     if exemplars:
         parts.append("EXEMPLARS for this issuer/field (#106):\n" +
                       "\n".join(f"- {e}" for e in exemplars))

@@ -54,7 +54,16 @@ class FieldDefinition:
     item_type: str = None
     item_enum: tuple = None
     bounds: dict = None
+    # `description` is sent to the MODEL. Write it as an instruction to a reader
+    # of the filing and nothing else.
     description: str = ""
+    # `note` is for whoever maintains the spec and is NEVER sent to the model.
+    # Issue numbers, cross-references to other fields, and judgements about how
+    # well the model does ("genuinely needs the model", "almost certainly
+    # grabbed the wrong number") belong here. They read as context to a human
+    # and as suggestion to a 7B, and everything in `description` goes into the
+    # prompt verbatim.
+    note: str = ""
     # #144: {field, equals, flag_code?, severity?, message?} -- waives
     # `required` when another record value (usually filing_stage) equals
     # `equals`. See FieldSpec._required_waived / validate_record.
@@ -77,6 +86,7 @@ class FieldDefinition:
             item_enum=tuple(d["item_enum"]) if d.get("item_enum") is not None else None,
             bounds=d.get("bounds"),
             description=d.get("description", ""),
+            note=d.get("note", ""),
             required_unless=d.get("required_unless"),
             raw=d,
         )
