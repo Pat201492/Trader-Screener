@@ -1273,6 +1273,181 @@ def start_claude_template(params):
     return run_id
 
 
+# --------------------------------------------------------------------------- #
+# Free Research
+#
+# Same shape as the scrubber above -- a POST starts a tracked run, the browser
+# watches it through the shared registry, and the results land in a LOCAL store.
+# A different store, though: Free Research keeps its own under
+# ~/.free-research, so the two tools cannot overwrite each other's idea of what
+# a filing said. Neither writes shared pipeline data.
+# --------------------------------------------------------------------------- #
+
+def _fr():
+    """The Free Research modules, imported lazily.
+
+    The dashboard must still start when the local model is not installed, so
+    these imports happen at the point of use rather than at module load.
+
+    The package addresses its siblings as `tools.<name>`, so the REPO ROOT has
+    to be importable, not just `tools/`. Script mode puts this file's own
+    directory on sys.path and not its parent, so put the parent there too --
+    the same shim `tools/edgar_scrubber/conftest.py` applies for flat imports,
+    pointed one level up.
+    """
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from tools.free_research import chartdata, fill as fill_mod
+    from tools.free_research import store as store_mod, template as template_mod
+    from tools.free_research.sources import edgar as edgar_source
+    return store_mod, template_mod, fill_mod, edgar_source, chartdata
+
+
+def fr_edgar_client():
+    """An EdgarClient for a Free Research pull, cached beside the scrubber's."""
+    ua = os.environ.get("EDGAR_USER_AGENT", "").strip()
+    if not ua:
+        raise RuntimeError(
+            "EDGAR_USER_AGENT is not set. The SEC fair-access policy requires a "
+            "contactable '<name> <email>' on every request; see SETUP.md."
+        )
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    return EdgarClient(user_agent=ua, cache_dir=str(home / "cache"))
+
+
+def fr_store():
+    """The Free Research store, rooted by env the way the scrubber's home is."""
+    store_mod = _fr()[0]
+    home = os.environ.get("FREE_RESEARCH_HOME") or None
+    return store_mod.Store(home=home)
+
+
+def fr_templates():
+    """Every template that validates, as the dashboard needs to show them."""
+    template_mod = _fr()[1]
+    return [{"id": t["id"], "title": t.get("title") or t["id"],
+             "description": t.get("description"),
+             "slots": [{"name": s["name"], "kind": s["kind"],
+                        "columns": list(s["columns"])}
+                       for s in template_mod.slots(t)]}
+            for t in template_mod.list_templates()]
+
+
+def fr_brief_view(brief_id):
+    """A brief, its template, and the points for each of its chart slots.
+
+    Assembled here rather than in the page: the chart values are read from the
+    stored rows, and the browser should never be the thing that decides what a
+    number on an axis is.
+    """
+    store_mod, template_mod, _, _, chartdata = _fr()
+    store = fr_store()
+    brief = store.read_brief(brief_id)
+    rows = store.read_rows(brief["pull_id"])
+    try:
+        tpl = template_mod.load_by_id(brief["template_id"])
+    except Exception:
+        tpl = None
+    charts = {}
+    for name, value in (brief.get("slots") or {}).items():
+        if isinstance(value, dict) and "x" in value and "y" in value:
+            result = chartdata.points_for(value, rows)
+            result["note"] = chartdata.summarize(result)
+            charts[name] = result
+    return {"brief": brief, "pull": store.read_pull(brief["pull_id"]),
+            "template": tpl, "charts": charts, "row_count": len(rows)}
+
+
+def start_fr_pull(params):
+    """Background EDGAR pull into the Free Research store."""
+    _, _, _, edgar_source, _ = _fr()
+    forms = params.get("forms") or []
+    ciks = params.get("ciks") or []
+    tickers = params.get("tickers") or []
+    if not ciks and not tickers:
+        raise ValueError("a pull needs at least one CIK or ticker")
+
+    run_id = RUNS.create("free-research-pull",
+                         {"forms": forms, "ciks": ciks, "tickers": tickers,
+                          "since": params.get("since"), "until": params.get("until"),
+                          "limit": len(ciks) + len(tickers), "fields": ["pull"]})
+
+    def worker():
+        try:
+            RUNS.update(run_id, status="running")
+            RUNS.log(run_id, "pulling %d target(s) from EDGAR"
+                             % (len(ciks) + len(tickers)))
+            RUNS.event(run_id, "doc_start", detail="EDGAR submissions")
+            client = fr_edgar_client()
+            record = edgar_source.pull(
+                fr_store(), client, forms=forms, since=params.get("since"),
+                until=params.get("until"), ciks=ciks, tickers=tickers)
+            RUNS.update(run_id, status="done", finished_at=utcnow(),
+                        pull_id=record["id"], row_count=record.get("row_count", 0),
+                        unresolved_tickers=record.get("unresolved_tickers") or [])
+            RUNS.event(run_id, "field_done", field="pull", kept=True,
+                       verdict="kept", value="%d row(s)" % record.get("row_count", 0))
+            RUNS.log(run_id, "wrote %d row(s) to pull %s"
+                             % (record.get("row_count", 0), record["id"]))
+        except Exception as exc:
+            RUNS.update(run_id, status="error", finished_at=utcnow(),
+                        error="%s: %s" % (type(exc).__name__, exc))
+            RUNS.log(run_id, traceback.format_exc().strip().splitlines()[-1])
+
+    threading.Thread(target=worker, daemon=True, name="fr-pull-%s" % run_id).start()
+    return run_id
+
+
+def start_fr_brief(params):
+    """Background fill of one template against one completed pull."""
+    _, template_mod, fill_mod, _, _ = _fr()
+    pull_id = params.get("pull_id")
+    template_id = params.get("template_id") or "filing_brief"
+    store = fr_store()
+    # Checked BEFORE the run is created: a run that could only ever fail is
+    # noise in the run list, and the caller deserves the error now, not in a
+    # log line thirty seconds from now.
+    if not pull_id or not store.has_pull(pull_id):
+        raise LookupError("no such pull: %r" % pull_id)
+    tpl = template_mod.load_by_id(template_id)
+
+    run_id = RUNS.create("free-research-brief",
+                         {"pull_id": pull_id, "template_id": template_id,
+                          "limit": 1,
+                          "fields": [s["name"] for s in template_mod.slots(tpl)]})
+
+    def worker():
+        try:
+            RUNS.update(run_id, status="running")
+            RUNS.log(run_id, "filling %d slot(s) of %s"
+                             % (len(template_mod.slots(tpl)), template_id))
+            client = fill_mod.local_client()
+            brief = fill_mod.fill(store, client, pull_id, tpl)
+            # Every slot is an event, kept or dropped. A slot that produced a
+            # value and then lost it for being uncheckable is a fact that
+            # exists nowhere else -- the stored brief only keeps survivors.
+            for name in (brief.get("slots") or {}):
+                RUNS.event(run_id, "field_done", field=name, kept=True,
+                           verdict="kept")
+            for d in (brief.get("dropped") or []):
+                RUNS.event(run_id, "field_done", field=d["slot"], kept=False,
+                           verdict="dropped", reason=d["reason"])
+            RUNS.update(run_id,
+                        status="stopped" if RUNS.stop_requested(run_id) else "done",
+                        finished_at=utcnow(), brief_id=brief["id"],
+                        dropped=brief.get("dropped") or [])
+            kept = len(brief.get("slots") or {})
+            RUNS.log(run_id, "brief %s: %d slot(s) kept, %d dropped"
+                             % (brief["id"], kept, len(brief.get("dropped") or [])))
+        except Exception as exc:
+            RUNS.update(run_id, status="error", finished_at=utcnow(),
+                        error="%s: %s" % (type(exc).__name__, exc))
+            RUNS.log(run_id, traceback.format_exc().strip().splitlines()[-1])
+
+    threading.Thread(target=worker, daemon=True, name="fr-brief-%s" % run_id).start()
+    return run_id
+
+
 def start_preview(params):
     """Run a check in the background so the browser can watch it.
 
@@ -1870,7 +2045,7 @@ class Handler(SimpleHTTPRequestHandler):
             manifest = json.loads((REPO_ROOT / "web-dashboard" / "tools-manifest.json")
                                   .read_text(encoding="utf-8"))
             for t in manifest:
-                t["runnable"] = t.get("id") == "edgar-scrubber"
+                t["runnable"] = t.get("id") in ("edgar-scrubber", "free-research")
             return self._json(manifest)
         if path == "/api/tools/edgar-scrubber/fields":
             import field_spec
@@ -1896,6 +2071,29 @@ class Handler(SimpleHTTPRequestHandler):
                             "ciks": list(sq.ciks or []), "startdt": sq.startdt,
                             "enddt": sq.enddt})
             return self._json(out)
+        if path == "/api/tools/free-research/templates":
+            try:
+                return self._json(fr_templates())
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+        if path == "/api/tools/free-research/pulls":
+            try:
+                return self._json(fr_store().list_pulls())
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+        if path == "/api/tools/free-research/briefs":
+            try:
+                return self._json(fr_store().list_briefs())
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+        if path == "/api/tools/free-research/brief":
+            brief_id = (qs.get("id") or [None])[0]
+            if not brief_id:
+                return self._json({"error": "brief id is required"}, 400)
+            try:
+                return self._json(fr_brief_view(brief_id))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 404)
         if path == "/api/runs":
             return self._json(RUNS.list())
         # The activity feed. Incremental by design: `after` is the last event
@@ -1981,6 +2179,21 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(edgar_search_daily(params)
                                   if params.get("mode") == "daily"
                                   else edgar_search(params))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/tools/free-research/pull":
+            try:
+                return self._json({"run_id": start_fr_pull(params)}, 202)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/tools/free-research/brief":
+            # A brief naming a pull that is not here fails HERE, with a 4xx and
+            # no run created: a run that could only ever fail is noise in the
+            # run list, and the caller should hear about it now.
+            try:
+                return self._json({"run_id": start_fr_brief(params)}, 202)
+            except LookupError as exc:
+                return self._json({"error": str(exc)}, 404)
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
         m = re.fullmatch(r"/api/runs/([\w.-]+)/stop", path)
