@@ -662,6 +662,125 @@ check("health never raises when ollama is unreachable -- it reports detail",
 check("saved queries are discovered", "424b2-jpm-2025-pilot" in h["queries"])
 
 # --------------------------------------------------------------------------- #
+section("free research")
+# --------------------------------------------------------------------------- #
+import threading
+import urllib.error
+import urllib.request
+from functools import partial as _partial
+from http.server import ThreadingHTTPServer as _THS
+
+_fr_home = tempfile.mkdtemp(prefix="fr-gate-")
+os.environ["FREE_RESEARCH_HOME"] = _fr_home
+
+# Templates come off disk and must all validate.
+_tpls = server.fr_templates()
+check("free research lists its templates",
+      "filing_brief" in [t["id"] for t in _tpls])
+check("a listed template carries its slots and their columns",
+      all(s.get("columns") for t in _tpls for s in t["slots"]))
+
+# A brief needs a pull that exists. This is refused BEFORE a run is made.
+_runs_before = len(server.RUNS.list())
+try:
+    server.start_fr_brief({"pull_id": "pull_does_not_exist"})
+    _refused = False
+except LookupError:
+    _refused = True
+check("a brief naming an unknown pull is refused", _refused)
+check("...and no run was created for it",
+      len(server.RUNS.list()) == _runs_before)
+
+try:
+    server.start_fr_pull({})
+    _no_target = False
+except ValueError:
+    _no_target = True
+check("a pull naming neither CIK nor ticker is refused", _no_target)
+
+# A brief view assembles its chart points from the STORED rows, not the model.
+_store = server.fr_store()
+_pull = _store.create_pull("edgar", {"forms": ["8-K"]})
+_store.write_rows(_pull["id"], [
+    {"month": "2025-07", "count": 2, "form": "8-K"},
+    {"month": "2025-08", "count": 5, "form": "8-K"},
+    {"month": "2025-09", "count": None, "form": "8-K"},
+])
+_brief = _store.create_brief(
+    _pull["id"], "filing_brief",
+    {"by_month": {"mark": "bar", "x": "month", "y": "count"}},
+    "qwen2.5:7b", dropped=[{"slot": "summary", "reason": "ungrounded number"}])
+_view = server.fr_brief_view(_brief["id"])
+check("the brief view reads points out of the stored rows",
+      _view["charts"]["by_month"]["points"] == [["2025-07", 2.0], ["2025-08", 5.0]])
+check("an unplottable row is counted, not silently dropped",
+      _view["charts"]["by_month"]["skipped"] == 1)
+check("the view carries the pull the brief was built from",
+      _view["pull"]["id"] == _pull["id"])
+check("dropped slots survive into the view",
+      _view["brief"]["dropped"][0]["slot"] == "summary")
+
+# Routes, over a real loopback server -- stdlib only, no outside network.
+_httpd = _THS(("127.0.0.1", 0), _partial(server.Handler, directory=str(server.REPO_ROOT)))
+threading.Thread(target=_httpd.serve_forever, daemon=True).start()
+_base = "http://127.0.0.1:%d" % _httpd.server_address[1]
+
+
+def _get(path):
+    try:
+        with urllib.request.urlopen(_base + path, timeout=5) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8") or "{}")
+
+
+def _post(path, payload):
+    req = urllib.request.Request(
+        _base + path, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8") or "{}")
+
+
+_st, _body = _get("/api/tools/free-research/templates")
+check("GET templates serves the validated templates",
+      _st == 200 and "filing_brief" in [t["id"] for t in _body])
+
+_st, _body = _get("/api/tools/free-research/briefs")
+check("GET briefs lists stored briefs",
+      _st == 200 and _brief["id"] in [b["id"] for b in _body])
+
+_st, _body = _get("/api/tools/free-research/brief?id=%s" % _brief["id"])
+check("GET brief returns one by id", _st == 200 and _body["brief"]["id"] == _brief["id"])
+
+_st, _body = _get("/api/tools/free-research/brief?id=nope")
+check("GET brief for an unknown id is a 4xx, not an empty 200", _st == 404)
+
+_st, _body = _get("/api/tools/free-research/brief")
+check("GET brief with no id is a 400", _st == 400)
+
+_st, _body = _post("/api/tools/free-research/brief", {"pull_id": "pull_nope"})
+check("POST brief naming an unknown pull is a 404 naming it",
+      _st == 404 and "pull_nope" in _body.get("error", ""))
+
+_st, _body = _post("/api/tools/free-research/pull", {})
+check("POST pull with no target is a 400", _st == 400)
+
+_st, _body = _get("/api/tools")
+check("the manifest marks free-research runnable when it is listed",
+      _st == 200 and all(t.get("runnable") is not None for t in _body))
+
+_httpd.shutdown()
+
+# The routes write only the Free Research store, never shared pipeline data.
+_written = {os.path.join(dp, n) for dp, _, ns in os.walk(_fr_home) for n in ns}
+check("free research wrote only under its own store root",
+      bool(_written) and all(_fr_home in w for w in _written))
+
+# --------------------------------------------------------------------------- #
 if failures:
     print(f"\n{len(failures)} FAILURE(S):")
     for f in failures:
