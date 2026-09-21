@@ -511,13 +511,48 @@ def scrubber_run(run_id, targets, fields, home):
                 # the #105 review loop has nothing to review.
                 fdef = spec.field(name)
                 vocab = field_vocabulary_present(low_text, fdef)
+                p_flags = list(p.flags or [])
+                element_spans = None
+                stored_value = p.value
                 if vocab is False:
                     span, span_method = None, None
+                elif isinstance(p.value, list):
+                    # Array fields resolve per element (#167). A serialized
+                    # array is never a verbatim substring of a filing, so the
+                    # whole-value path marked every one of them unlocatable and
+                    # no span-based check could see inside them.
+                    named, kinds = classify_array_members(p.value)
+                    kept, dropped, element_spans = locate_array_elements(
+                        nd.text, named, near=anchor_positions(low_text, fdef))
+                    if kinds:
+                        p_flags.append({
+                            "field": p.field, "code": "classification_in_array",
+                            "severity": "warn",
+                            "message": "dropped %s from the list: a classification "
+                                       "is not a member. The kind belongs in its "
+                                       "own field, not a slot in the array."
+                                       % ", ".join(repr(k) for k in kinds),
+                        })
+                    if dropped:
+                        p_flags.append({
+                            "field": p.field, "code": "element_span_unlocatable",
+                            "severity": "warn",
+                            "message": "dropped %s: not stated verbatim anywhere in "
+                                       "the document text, so no span could be "
+                                       "verified for %s"
+                                       % (", ".join(repr(d) for d in dropped),
+                                          "it" if len(dropped) == 1 else "them"),
+                        })
+                    # What survives is what gets stored: a list whose every
+                    # member the filing actually states.
+                    stored_value = kept
+                    span = (tuple(element_spans[str(kept[0]).strip()]["span"])
+                            if kept else None)
+                    span_method = "per-element" if kept else None
                 else:
                     span, span_method = locate_value(
                         nd.text, p.value, p.source_span,
                         near=anchor_positions(low_text, fdef))
-                p_flags = list(p.flags or [])
                 if vocab is False and p.value not in (None, "", []):
                     # The filing never uses this field's vocabulary. A value
                     # here is almost certainly invented to fill the slot, and
@@ -529,22 +564,28 @@ def scrubber_run(run_id, targets, fields, home):
                                    "this note type likely does not carry it, so the "
                                    "value is unsupported",
                     })
-                elif span is None and p.value not in (None, "", []):
-                    p_flags.append({
-                        "field": p.field, "code": "span_unlocatable", "severity": "warn",
-                        "message": "the value is not stated verbatim anywhere in the "
-                                   "document text; no span could be verified",
-                    })
+                elif span is None and stored_value not in (None, "", []):
+                    # An array reports per element above; this is the scalar case.
+                    if not isinstance(stored_value, list):
+                        p_flags.append({
+                            "field": p.field, "code": "span_unlocatable",
+                            "severity": "warn",
+                            "message": "the value is not stated verbatim anywhere in "
+                                       "the document text; no span could be verified",
+                        })
                 flags = [f.get("code") for f in p_flags]
                 gated = "gated_no_claude" in flags
                 field_values.append(FieldValue(
-                    field=p.field, value=p.value, unit=p.unit,
+                    field=p.field, value=stored_value, unit=p.unit,
                     span=tuple(span) if span else None,
                     provenance=(f"{p.provenance}+span:{span_method}"
                                 if span_method else p.provenance),
                     confidence=p.confidence, flags=p_flags))
-                if name == "underlyings" and isinstance(p.value, list):
-                    underlyings = [{"name": str(u), "kind": None} for u in p.value]
+                if name == "underlyings" and isinstance(stored_value, list):
+                    kinds_seen = classify_array_members(p.value)[1]
+                    underlyings = [{"name": str(u),
+                                    "kind": kinds_seen[0] if kinds_seen else None}
+                                   for u in stored_value]
                 if name == "product_type" and p.value:
                     product_type = str(p.value)
                 # Per-field, not per-document: a 9-field document is minutes of
@@ -901,6 +942,67 @@ def anchor_positions(low_text, field):
     return sorted(out)
 
 
+# Tokens that classify an underlying rather than name one (#167). The model
+# appends these to the array -- ["GE Vernova Inc.", "single_stock"] -- so a
+# consumer counting basket size sees two underlyings where the note has one, and
+# grouping by underlying grows a phantom "single_stock" bucket.
+#
+# Matched against the WHOLE element, never as a substring: "Nasdaq-100 Index®"
+# is a real index name and must survive, while a bare "index" is a kind.
+CLASSIFICATION_TOKENS = frozenset((
+    "single_stock", "single stock", "common stock", "common shares",
+    "ordinary shares", "index", "indices", "equity index", "etf", "fund",
+    "basket", "worst_of", "worst of", "adr", "ads", "stock", "share", "shares",
+    "equity", "reference stock", "reference asset", "underlying",
+    "underlying stock", "underlying asset", "n/a", "none",
+))
+
+
+def classify_array_members(values):
+    """Split an array value into (names, kinds) (#167).
+
+    A classification is not an underlying. If the kind is worth capturing it
+    deserves its own field, which is what `underlying_type` is for -- it does
+    not deserve a slot in the list of what the note references.
+    """
+    names, kinds = [], []
+    for v in values or []:
+        text = str(v).strip()
+        if not text:
+            continue
+        (kinds if text.lower().strip(".") in CLASSIFICATION_TOKENS
+         else names).append(text)
+    return names, kinds
+
+
+def locate_array_elements(text, values, near=None):
+    """Resolve a span for EACH member of an array value (#167).
+
+    Returns `(kept, dropped, spans)`. `kept` is the members the filing actually
+    states, `dropped` is those it does not, and `spans` maps a kept member to
+    where it was found.
+
+    Why per element: span logic locates *the value*, and a JSON array is never a
+    verbatim substring of a filing, so every array field came back
+    `span_unlocatable` -- 25 of 25 for `underlyings`. That made the field
+    invisible to every check built on span support, including the gate in #163.
+    `["Zoetis Inc."]` is correct and `["GE Vernova Inc.", "single_stock"]` is
+    contaminated, and nothing could tell them apart.
+    """
+    kept, dropped, spans = [], [], {}
+    for member in values or []:
+        name = str(member).strip()
+        if not name:
+            continue
+        span, method = locate_value(text, name, None, near=near)
+        if span:
+            kept.append(member)
+            spans[name] = {"span": list(span), "method": method}
+        else:
+            dropped.append(member)
+    return kept, dropped, spans
+
+
 def locate_value(text, value, hint_span=None, near=None):
     """Find where `value` is actually stated in `text`.
 
@@ -920,6 +1022,7 @@ def locate_value(text, value, hint_span=None, near=None):
     """
     if value is None or isinstance(value, (list, dict, bool)):
         return None, None
+
 
     # A model span is only believed when the text under it really says the value.
     raw = str(value).strip()
