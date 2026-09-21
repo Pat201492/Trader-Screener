@@ -2014,8 +2014,39 @@ def serve_doc(rel_path):
 # HTTP
 # --------------------------------------------------------------------------- #
 
+# Text types we serve are UTF-8 on the wire, and say so. Binary types carry no
+# charset -- there is no such thing as a UTF-8 PNG.
+TEXT_TYPES = frozenset((
+    "text/html", "text/css", "text/plain", "text/markdown", "text/csv",
+    "application/javascript", "application/json", "image/svg+xml",
+    "application/xml", "text/xml",
+))
+
+
+def with_charset(ctype):
+    """`text/html` -> `text/html; charset=utf-8`, for text types only.
+
+    Without this the dashboard renders only because index.html carries a <meta
+    charset> in its first 1024 bytes and the browser sniffs it -- a second line
+    of defence doing the first one's job. In #162 a double-encoded file took a
+    screenshot to notice and the transport layer had to be ruled out first;
+    declaring the charset removes that ambiguity, and covers files served
+    without a <meta> tag of their own, the API responses included.
+    """
+    if not ctype:
+        return ctype
+    base = ctype.split(";", 1)[0].strip().lower()
+    if "charset=" in ctype.lower() or base not in TEXT_TYPES:
+        return ctype
+    return "%s; charset=utf-8" % base
+
+
 class Handler(SimpleHTTPRequestHandler):
     server_version = "TraderScreenerTools/1.0"
+
+    def guess_type(self, path):
+        """Static files, with the charset declared. Binary types untouched."""
+        return with_charset(SimpleHTTPRequestHandler.guess_type(self, path))
 
     def end_headers(self):
         # Dev server: the dashboard is edited while it is open, and a browser
@@ -2027,7 +2058,7 @@ class Handler(SimpleHTTPRequestHandler):
     def _send(self, status, body, ctype="application/json"):
         raw = body if isinstance(body, bytes) else str(body).encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Type", with_charset(ctype))
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
