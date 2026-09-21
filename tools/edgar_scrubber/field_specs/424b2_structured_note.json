@@ -89,7 +89,8 @@
       "required": true,
       "sections": ["cover", "key_terms"],
       "wire_key": "und",
-      "description": "The NAME of each reference asset, exactly as the filing prints it -- for example 'Zoetis Inc.', 'Nasdaq-100 Index'. Names only: never the kind of asset. Do not add 'single_stock', 'common stock', 'index' or any other classification as a member of this list; the kind belongs in underlying_type. A basket keeps every genuine name. Aggregated across issuers this is the dealer-hedging proxy (#110)."
+      "description": "The NAME of each reference asset, exactly as the filing prints it -- for example 'Zoetis Inc.', 'Nasdaq-100 Index'. Names only: never the kind of asset. Do not add 'single_stock', 'common stock', 'index' or any other classification as a member of this list. A basket keeps every genuine name.",
+      "note": "The kind lives in underlying_type. Aggregated across issuers this is the dealer-hedging proxy (#110). Classification tokens leaking into the array was #167."
     },
     {
       "name": "underlying_type",
@@ -98,7 +99,8 @@
       "extraction_path": "variable",
       "sections": ["cover", "key_terms"],
       "wire_key": "undkind",
-      "description": "What KIND of reference asset the note is linked to. This is the classification that used to be appended to the underlyings array, where it inflated basket size and created a phantom bucket when grouping by underlying (#167)."
+      "description": "What KIND of reference asset the note is linked to.",
+      "note": "The classification that used to be appended to the underlyings array, where it inflated basket size and created a phantom bucket when grouping by underlying (#167)."
     },
     {
       "name": "product_type",
@@ -117,7 +119,8 @@
       "required": true,
       "sections": ["cover", "key_terms"],
       "wire_key": "ptype",
-      "description": "Payoff family. Genuinely needs the model — issuers phrase it many ways."
+      "description": "The payoff family of the note. Choose the allowed value matching the payoff the filing describes, not merely its title wording. If none of the allowed values fits, answer 'other'.",
+      "note": "Genuinely needs the model -- issuers phrase it many ways."
     },
     {
       "name": "pricing_date",
@@ -127,7 +130,8 @@
       "sections": ["cover", "dates"],
       "wire_key": "pdate",
       "anchors": ["Pricing Date:", "Pricing date", "Trade Date:"],
-      "description": "ISO YYYY-MM-DD."
+      "description": "The date the notes were priced, read from the line labelled Pricing Date or Trade Date. Report the date exactly as the filing prints it -- 'August 28, 2026' is a correct answer. Do not convert it to another format.",
+      "note": "Was 'ISO YYYY-MM-DD.', which asked the model to convert; it returned prose anyway and every value tripped type_mismatch. normalize.parse_date_prose does the conversion now (#166), so the model is asked only to read."
     },
     {
       "name": "issue_date",
@@ -154,7 +158,8 @@
       "extraction_path": "variable",
       "sections": ["dates", "coupon_terms"],
       "wire_key": "obs",
-      "description": "Coupon / barrier observation schedule; often irregular — needs the model."
+      "description": "Every scheduled coupon or barrier observation date the filing lists, in the order it lists them. The schedule is often irregular, so read the dates the document gives rather than assuming a regular interval.",
+      "note": "Variable-length per note; needs the model rather than a fixed anchor."
     },
     {
       "name": "final_valuation_date",
@@ -183,7 +188,8 @@
       "wire_key": "agg",
       "anchors": ["Aggregate Principal Amount:", "Principal Amount:", "Aggregate principal amount"],
       "bounds": { "min": 0 },
-      "description": "Total notional. Cross-checked against the EX-107 fee exhibit. Aggregates into issuance-by-underlying (#110)."
+      "description": "The total principal amount of this offering, in dollars.",
+      "note": "Resolved from the EX-107 fee exhibit at rung 2 before the model is asked (#101); the external_shadow rule records whether the model agrees when shadow_external is on (#164). Aggregates into issuance-by-underlying (#110)."
     },
     {
       "name": "contingent_coupon_rate",
@@ -331,7 +337,8 @@
       "wire_key": "ev1000",
       "anchors": ["our estimated value", "estimated value of the notes", "Estimated Value:"],
       "bounds": { "min": 900, "max": 1000 },
-      "description": "SEC-mandated 'our estimated value of the notes'. Against the $1,000 issue price this is the issuer markup. Outside 900-1000 the model almost certainly grabbed the wrong number. Null and unflagged-as-error on a preliminary filing (#144) -- see required_unless and estimated_value_low/estimated_value_high."
+      "description": "The issuer's own estimated value of the notes, per $1,000 principal amount, as the filing states it. The filing introduces it with wording like 'our estimated value of the notes'. Report the figure the document states. If the document does not state a single figure -- a preliminary pricing supplement often gives only a range -- answer null.",
+      "note": "SEC-mandated disclosure; against the $1,000 issue price this is the issuer markup. Null and unflagged-as-error on a preliminary filing (#144) -- see required_unless and estimated_value_low/estimated_value_high. Worst performing field in the spec: it has returned 0.0, then 970.2 copied verbatim from a worked example in the prompt, then 950 -- the midpoint of these bounds -- on 21 of 25 filings (#163). Never put a number in this description."
     },
     {
       "name": "estimated_value_low",
@@ -342,7 +349,8 @@
       "wire_key": "ev1000lo",
       "anchors": ["expected to be between", "estimated initial value"],
       "bounds": { "min": 900, "max": 1000 },
-      "description": "Low end of the preliminary estimated-value RANGE ('expected to be between $X and $Y'). A preliminary 424B2 discloses this instead of a point value (#144); populated alongside estimated_value_high, not instead of trying estimated_value_per_1000 first."
+      "description": "The low end of the estimated value range, per $1,000 principal amount, when the filing states a range such as 'expected to be between $X and $Y' rather than a single figure.",
+      "note": "A preliminary 424B2 discloses this instead of a point value (#144); populated alongside estimated_value_high, not instead of trying estimated_value_per_1000 first."
     },
     {
       "name": "estimated_value_high",
@@ -363,7 +371,8 @@
       "sections": ["cover"],
       "wire_key": "stage",
       "anchors": ["Subject to Completion", "Preliminary Pricing Supplement", "Final Pricing Supplement"],
-      "description": "Preliminary vs final 424B2 (#144), from the SEC-mandated cover-page legend. Deterministic from field_spec.detect_filing_stage() -- not something that needs a model guess -- but carried as a spec field too so a stored record is self-describing about which required fields it may legitimately be missing."
+      "description": "Whether this is a preliminary or a final pricing supplement, from the cover-page legend.",
+      "note": "Deterministic from field_spec.detect_filing_stage() -- not something that needs a model guess -- but carried as a spec field too so a stored record is self-describing about which required fields it may legitimately be missing (#144)."
     },
     {
       "name": "agent_commission_pct",
