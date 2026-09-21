@@ -193,14 +193,39 @@ def run_checks():
           any(f.code == "cross_check_failed" and f.field == "maturity_date"
               for f in bad_date))
 
-    # EX-107 cross-check (#101): prose aggregate vs the fee exhibit.
-    ok107 = note.validate_record(GOOD_NOTE, ex107={"aggregate_principal": 2500000})
+    # external_equals (#101), on a spec that actually enforces it. The shipped
+    # 424B2 spec no longer does: #164 established that rung 2 returns the
+    # exhibit's value before the model is asked, so enforcing equality there
+    # compared the value to itself and passed on 25 of 25 filings. The rule and
+    # its code path are still live for any spec where the model IS the source,
+    # so they are tested on one.
+    enforced_raw = json.loads(json.dumps(note.raw))
+    enforced_raw["spec_id"] = "structured_note_external_equals_fixture"
+    enforced_raw["cross_checks"] = [{
+        "rule": "external_equals", "field": "aggregate_principal",
+        "source": "ex107", "source_field": "aggregate_principal",
+        "tolerance_pct": 0.5, "severity": "error",
+        "message": "aggregate_principal must match the EX-107 fee exhibit",
+    }]
+    enforced = fs.FieldSpec.from_dict(enforced_raw)
+    ok107 = enforced.validate_record(GOOD_NOTE, ex107={"aggregate_principal": 2500000})
     check("aggregate matching EX-107 -> no cross-check flag",
           not any(f.code == "cross_check_failed" for f in ok107))
-    bad107 = note.validate_record(GOOD_NOTE, ex107={"aggregate_principal": 9999999})
+    bad107 = enforced.validate_record(GOOD_NOTE, ex107={"aggregate_principal": 9999999})
     check("aggregate disagreeing with EX-107 -> flagged",
           any(f.code == "cross_check_failed" and f.field == "aggregate_principal"
               for f in bad107))
+
+    # And the shipped spec deliberately does NOT flag it, because the stored
+    # value came FROM the exhibit. A passing check here would be the value
+    # agreeing with itself.
+    shipped107 = note.validate_record(GOOD_NOTE, ex107={"aggregate_principal": 9999999})
+    check("the shipped spec does not pretend to verify aggregate_principal (#164)",
+          not any(f.code == "cross_check_failed" and f.field == "aggregate_principal"
+                  for f in shipped107))
+    check("...and it says so in the rule it does carry",
+          any(c["rule"] == "external_shadow" and c["field"] == "aggregate_principal"
+              for c in note.cross_checks))
 
     # ── AC: wire format is transport-only, never stored ──
     section("AC: short wire keys (#104) map back to canonical, never reach a record")
@@ -291,6 +316,54 @@ def run_checks():
             raised_ru = True
     check("required_unless missing its 'field' key fails loudly at load",
           raised_ru)
+
+    # ── A cross-check rule nothing implements is rejected at load (#164) ──
+    section("AC: the spec cannot advertise a cross-check that never runs (#164)")
+    # `_check_cross` is an if/elif chain with no else, so an unimplemented rule
+    # name used to fall straight through: the spec read as if the check were
+    # happening and nothing ran. That is the shape of the bug #164 was opened
+    # about, one level up -- the rule was implemented but unreachable.
+    base = {"spec_id": "x", "form_type": "424B2", "population": "x",
+            "version": "1", "detection": {"signals": [{"pattern": "z"}]},
+            "fields": [{"name": "a", "type": "number",
+                        "extraction_path": "table-resident", "sections": []},
+                       {"name": "b", "type": "number",
+                        "extraction_path": "table-resident", "sections": []}]}
+
+    def loads_with(cross):
+        d = dict(base, cross_checks=cross)
+        try:
+            fs.FieldSpec.from_dict(d)
+            return True
+        except ValueError:
+            return False
+
+    check("an unimplemented rule name is rejected",
+          loads_with([{"rule": "totally_made_up", "field": "a"}]) is False)
+    check("a typo in a real rule name is rejected",
+          loads_with([{"rule": "date_aftr", "field": "a", "reference": "b"}]) is False)
+    check("every implemented rule still loads",
+          all(loads_with([{"rule": r, "field": "a", "reference": "b"}])
+              for r in sorted(fs.KNOWN_CROSS_RULES)))
+    check("the error names the offending rule",
+          "totally_made_up" in _rule_error([{"rule": "totally_made_up", "field": "a"}]))
+    check("a spec with no cross-checks still loads", loads_with([]) is True)
+    check("the shipped 424B2 spec passes its own guard",
+          "structured_note" in specs)
+
+
+def _rule_error(cross):
+    """The message raised for a bad cross_checks block, or '' if none was."""
+    d = {"spec_id": "x", "form_type": "424B2", "population": "x",
+         "version": "1", "detection": {"signals": [{"pattern": "z"}]},
+         "fields": [{"name": "a", "type": "number",
+                     "extraction_path": "table-resident", "sections": []}],
+         "cross_checks": cross}
+    try:
+        fs.FieldSpec.from_dict(d)
+        return ""
+    except ValueError as exc:
+        return str(exc)
 
 
 def main():

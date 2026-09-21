@@ -837,7 +837,7 @@ class ExtractionLadder:
                  claude_client=None, claude_model=None, claude_enabled=True,
                  confidence_floor=0.35, self_consistency_samples=1,
                  prompt_version="v1", exemplar_set_version=None,
-                 max_tokens=512, log=None):
+                 max_tokens=512, log=None, shadow_external=False):
         self.spec = spec
         self.rules = rules
         self.exemplars = exemplars
@@ -850,6 +850,10 @@ class ExtractionLadder:
         self.claude_enabled = claude_enabled
         self.confidence_floor = confidence_floor
         self.self_consistency_samples = self_consistency_samples
+        # Ask the model for fields the EX-107 exhibit already answered, purely to
+        # record whether it agrees (#164). Off by default: it spends tokens on a
+        # field that already resolves exact, and changes no stored value.
+        self.shadow_external = shadow_external
         self.prompt_version = prompt_version
         self.exemplar_set_version = exemplar_set_version
         self.max_tokens = max_tokens
@@ -890,6 +894,63 @@ class ExtractionLadder:
                 f"prefix; only a version bump may change it."
             )
         self._static_prefix_seen[key] = (exemplar_version, prefix)
+
+    def _external_shadow_fields(self):
+        """Fields the spec asks to shadow against an external source (#164)."""
+        out = {}
+        for c in getattr(self.spec, "cross_checks", ()) or ():
+            if c.get("rule") == "external_shadow":
+                out[c["field"]] = c
+        return out
+
+    def _shadow_external(self, f, text, ex107, *, issuer=None, form=None,
+                          table_context=None):
+        """Ask the model for a field the exhibit already answered, and compare.
+
+        Why this exists (#164): rung 2 returns the XBRL value before the model is
+        ever asked, so the spec's old `external_equals` cross-check compared that
+        value against itself and passed on all 25 filings in the sample. The
+        short-circuit is the right behaviour -- exact, at zero token cost -- but
+        it left the one field with external ground truth measuring nothing.
+
+        `aggregate_principal` is the only field of 33 where truth is known
+        independently of the model. Shadowing it is the only way this system can
+        measure how well the model reads a field where the answer is checkable,
+        which is a prior worth having for the 32 fields where it is not (#165).
+
+        Off by default: it spends tokens on a field that is already exact. The
+        stored value never changes -- this only records whether the model agreed.
+        """
+        if not self.shadow_external or self.local_client is None:
+            return None
+        spec_check = self._external_shadow_fields().get(f.name)
+        if spec_check is None:
+            return None
+        external = ex107.get(spec_check.get("source_field", f.name))
+        if external is None:
+            return None
+        try:
+            exemplars, _ = _lookup_exemplars(self.exemplars, form, issuer, f.name)
+            value, span, _conf, _samples, _tin, _tout, retries = _extract_via_model(
+                self.local_client, self.local_model, f, text,
+                table_context=table_context, exemplars=exemplars,
+                n_samples=self.self_consistency_samples, max_tokens=self.max_tokens)
+            self.log.malformed_retries += retries
+        except Exception as exc:
+            # A shadow measurement must never fail the extraction it shadows:
+            # the stored value is the exhibit's and does not depend on this.
+            return ShadowComparison(rule_value=external, model_value=None,
+                                     rule_span=None, model_span=None,
+                                     agreement=False,
+                                     note="shadow model call failed: %s" % exc)
+        tol = float(spec_check.get("tolerance_pct", 0)) / 100.0
+        agree = False
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            agree = abs(value - external) <= abs(external) * tol
+        return ShadowComparison(
+            rule_value=external, model_value=value,
+            rule_span=None, model_span=span, agreement=agree,
+            note=None if agree else "exhibit=%r vs model=%r" % (external, value))
 
     def extract(self, field_name, *, text, issuer=None, ex107=None,
                 accession=None, document=None, table_context=None):
@@ -947,8 +1008,11 @@ class ExtractionLadder:
         # Rung 2: XBRL / EX-107 fee exhibit (#101).
         if ex107 and ex107.get(field_name) is not None:
             prov = Provenance(rung="xbrl", document=document)
+            shadow = self._shadow_external(f, text, ex107, issuer=issuer,
+                                            form=form, table_context=table_context)
             return self._finish(f, ex107[field_name], None, "xbrl", prov, 1.0,
-                                 None, ex107, accession=accession, document=document)
+                                 None, ex107, accession=accession, document=document,
+                                 shadow=shadow)
 
         if self.local_client is None:
             raise RuntimeError(

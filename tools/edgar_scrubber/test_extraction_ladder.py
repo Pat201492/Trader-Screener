@@ -206,6 +206,88 @@ def test_xbrl_rung_short_circuits():
 
 
 # --------------------------------------------------------------------------- #
+def test_external_shadow_measures_the_model_without_changing_the_value():
+    section("Rung 2 shadow (#164): the one field with ground truth, measured")
+    AP = NOTE_SPEC.field("aggregate_principal")
+
+    # Off by default -- the whole point is that an ordinary run spends nothing
+    # extra on a field that already resolves exact.
+    quiet = FakeChatClient([])
+    off = el.ExtractionLadder(NOTE_SPEC, local_client=quiet, local_model="qwen2.5:7b")
+    r = off.extract("aggregate_principal", text=DOC,
+                     ex107={"aggregate_principal": 2_500_000},
+                     accession="0001", document="424b2.htm")
+    check("shadow is off by default",
+          off.log.entries[0].shadow is None and len(quiet.calls) == 0)
+
+    # On, and the model agrees.
+    agreeing = FakeChatClient([(wire_body(AP, 2_500_000, span=span_of("2500000")), USAGE)])
+    on = el.ExtractionLadder(NOTE_SPEC, local_client=agreeing, local_model="qwen2.5:7b",
+                              shadow_external=True)
+    r = on.extract("aggregate_principal", text=DOC,
+                    ex107={"aggregate_principal": 2_500_000},
+                    accession="0001", document="424b2.htm")
+    sh = on.log.entries[0].shadow
+    check("the model IS asked when shadowing", len(agreeing.calls) == 1)
+    check("the stored value is still the exhibit's", r.value == 2_500_000)
+    check("provenance is still xbrl:ex107", r.provenance == "xbrl:ex107")
+    check("agreement is recorded", sh is not None and sh.agreement is True)
+    check("the exhibit's number is the reference side",
+          sh.rule_value == 2_500_000 and sh.model_value == 2_500_000)
+
+    # On, and the model disagrees -- recorded, and the stored value unmoved.
+    wrong = FakeChatClient([(wire_body(AP, 1_000_000, span=span_of("2500000")), USAGE)])
+    on2 = el.ExtractionLadder(NOTE_SPEC, local_client=wrong, local_model="qwen2.5:7b",
+                               shadow_external=True)
+    r2 = on2.extract("aggregate_principal", text=DOC,
+                      ex107={"aggregate_principal": 2_500_000},
+                      accession="0001", document="424b2.htm")
+    sh2 = on2.log.entries[0].shadow
+    check("disagreement is recorded", sh2.agreement is False)
+    check("the disagreement names both numbers",
+          "2500000" in str(sh2.note) and "1000000" in str(sh2.note))
+    check("a disagreeing shadow does NOT change the stored value",
+          r2.value == 2_500_000)
+    check("the run log surfaces it as a shadow disagreement",
+          "aggregate_principal" in on2.log.shadow_disagreements())
+
+    # Within tolerance (0.5% of 2,500,000 = 12,500) counts as agreement.
+    near = FakeChatClient([(wire_body(AP, 2_495_000, span=span_of("2500000")), USAGE)])
+    on3 = el.ExtractionLadder(NOTE_SPEC, local_client=near, local_model="qwen2.5:7b",
+                               shadow_external=True)
+    r3 = on3.extract("aggregate_principal", text=DOC,
+                      ex107={"aggregate_principal": 2_500_000},
+                      accession="0001", document="424b2.htm")
+    check("a value inside tolerance_pct agrees",
+          on3.log.entries[0].shadow.agreement is True)
+
+    # A shadow measurement must never break the extraction it shadows.
+    class Exploding:
+        def chat_completion(self, *a, **k):
+            raise RuntimeError("model is down")
+
+    on4 = el.ExtractionLadder(NOTE_SPEC, local_client=Exploding(),
+                               local_model="qwen2.5:7b", shadow_external=True)
+    r4 = on4.extract("aggregate_principal", text=DOC,
+                      ex107={"aggregate_principal": 2_500_000},
+                      accession="0001", document="424b2.htm")
+    check("a failed shadow call does not fail the extraction", r4.value == 2_500_000)
+    check("...and the failure is recorded, not swallowed",
+          "failed" in str(on4.log.entries[0].shadow.note))
+
+    # A field with no external_shadow rule is never shadowed.
+    other = FakeChatClient([])
+    on5 = el.ExtractionLadder(NOTE_SPEC, local_client=other, local_model="qwen2.5:7b",
+                               shadow_external=True)
+    r5 = on5.extract("estimated_value_per_1000", text=DOC,
+                      ex107={"estimated_value_per_1000": 972.4},
+                      accession="0001", document="424b2.htm")
+    check("a field the spec does not ask to shadow is not shadowed",
+          on5.log.entries[0].shadow is None and len(other.calls) == 0)
+    check("...and that field still resolves from the exhibit", r5.value == 972.4)
+
+
+# --------------------------------------------------------------------------- #
 def test_local_confident_no_escalation():
     section("Rung 3: in-bounds, spanned, confident local value -> no escalation")
     local = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.92), USAGE)])
@@ -355,16 +437,30 @@ def test_span_resolution_failure_escalates():
 # --------------------------------------------------------------------------- #
 def test_span_beats_cross_check_when_both_fail():
     section("Gate priority: span (2nd) outranks cross_check (3rd) when both fail (#104)")
-    AGG_FIELD = NOTE_SPEC.field("aggregate_principal")
-    # aggregate_principal (field_specs/424b2_structured_note.json:44) carries an
-    # external_equals cross-check against ex107. Drive evaluate_gate() directly
-    # (extract()'s rung-2 shortcut would otherwise short-circuit whenever ex107
-    # already holds this field, masking the scenario): value in bounds (min: 0),
-    # no locatable span, and a value that disagrees with EX-107 beyond
-    # tolerance_pct. Priority order (bounds, span, cross_check, ...) says the
-    # gate reason must be "span", not "cross_check".
+    # This checks the gate's PRIORITY ORDER, which is a property of the gate and
+    # not of the shipped spec. It used to borrow aggregate_principal's
+    # external_equals rule, and broke the moment #164 replaced that rule with
+    # external_shadow -- a priority test should not depend on which fields
+    # happen to carry an enforced cross-check today. So it builds its own spec
+    # with one, which also keeps external_equals itself covered for any spec
+    # that uses it later.
+    raw = json.loads(json.dumps(NOTE_SPEC.raw))
+    raw["spec_id"] = "structured_note_crosscheck_fixture"
+    raw["cross_checks"] = [{
+        "rule": "external_equals", "field": "aggregate_principal",
+        "source": "ex107", "source_field": "aggregate_principal",
+        "tolerance_pct": 0.5, "severity": "error",
+        "message": "aggregate_principal must match the EX-107 fee exhibit",
+    }]
+    ENFORCED = fs.FieldSpec.from_dict(raw)
+    AGG_FIELD = ENFORCED.field("aggregate_principal")
+    # Drive evaluate_gate() directly (extract()'s rung-2 shortcut would otherwise
+    # short-circuit whenever ex107 already holds this field, masking the
+    # scenario): value in bounds (min: 0), no locatable span, and a value that
+    # disagrees with EX-107 beyond tolerance_pct. Priority order (bounds, span,
+    # cross_check, ...) says the gate reason must be "span", not "cross_check".
     gate = el.evaluate_gate(AGG_FIELD, 2_500_000, None, ex107={"aggregate_principal": 2_000_000},
-                             spec=NOTE_SPEC, model_confidence=0.9)
+                             spec=ENFORCED, model_confidence=0.9)
     by_name = {s.name: s.passed for s in gate.signals}
     check("bounds passed", by_name["bounds"] is True)
     check("span failed", by_name["span"] is False)
@@ -753,6 +849,7 @@ def main():
     test_rule_rung_with_manager()
     test_rule_shadow_mode()
     test_xbrl_rung_short_circuits()
+    test_external_shadow_measures_the_model_without_changing_the_value()
     test_local_confident_no_escalation()
     test_out_of_bounds_escalates_to_claude()
     test_span_resolution_failure_escalates()

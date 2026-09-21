@@ -116,6 +116,28 @@ def _parse_date(v):
 
 # ── Form-type spec ──────────────────────────────────────────────────────────
 
+# Every cross-check rule `_check_cross` can actually run. A spec naming anything
+# else is rejected at load (#164): that if/elif chain falls through silently, so
+# a typo or a retired rule name reads as a verification that is happening when it
+# is not -- which is exactly the failure #164 was opened about.
+KNOWN_CROSS_RULES = frozenset((
+    "date_after", "date_after_or_equal", "lte", "lt", "gte", "gt",
+    "external_equals", "external_shadow",
+))
+
+
+def _assert_known_rules(cross_checks, spec_id=None):
+    unknown = sorted({c.get("rule") for c in cross_checks
+                      if c.get("rule") not in KNOWN_CROSS_RULES})
+    if unknown:
+        raise ValueError(
+            "spec %r declares cross-check rule(s) nothing implements: %s. "
+            "Known rules: %s. A rule name that is not implemented is a check "
+            "the spec advertises and never performs."
+            % (spec_id or "<unnamed>", ", ".join(repr(u) for u in unknown),
+               ", ".join(sorted(KNOWN_CROSS_RULES))))
+
+
 @dataclass
 class FieldSpec:
     spec_id: str
@@ -133,6 +155,8 @@ class FieldSpec:
 
     @classmethod
     def from_dict(cls, d):
+        cross = tuple(d.get("cross_checks", ()))
+        _assert_known_rules(cross, d.get("spec_id"))
         return cls(
             spec_id=d["spec_id"],
             form_type=d["form_type"],
@@ -142,7 +166,7 @@ class FieldSpec:
             detection=d["detection"],
             sections=tuple(d.get("sections", ())),
             fields=tuple(FieldDefinition.from_dict(f) for f in d["fields"]),
-            cross_checks=tuple(d.get("cross_checks", ())),
+            cross_checks=cross,
             raw=d,
         )
 
@@ -382,6 +406,16 @@ class FieldSpec:
                 allowed = abs(b) * tol
                 if abs(a - b) > allowed:
                     flags.append(Flag(c["field"], "cross_check_failed", sev, msg))
+
+            elif rule == "external_shadow":
+                # Deliberately nothing here (#164). The external source IS the
+                # stored value for these fields -- rung 2 returns the exhibit's
+                # number before the model is asked -- so comparing the record
+                # against the exhibit would compare the value to itself and pass
+                # every time. The real comparison runs in the ladder, which asks
+                # the model anyway and records whether it agreed. See
+                # ExtractionLadder(shadow_external=True).
+                continue
 
         return flags
 
