@@ -135,7 +135,8 @@
       "required": true,
       "sections": ["cover", "dates"],
       "wire_key": "mdate",
-      "anchors": ["Maturity Date:", "Maturity date", "Stated Maturity:"]
+      "anchors": ["Maturity Date:", "Maturity date", "Stated Maturity:"],
+      "description": "The date the note matures, read from the line labelled Maturity Date. These filings state four dates within a few lines of each other -- strike, pricing/trade, issue/settlement and maturity -- and the maturity line is often prefixed with qualifying words such as 'Unless earlier automatically redeemed,'. Return the date that follows the Maturity Date label, not the date nearest to it, and never the pricing or trade date. Maturity is the latest of the four."
     },
     {
       "name": "observation_dates",

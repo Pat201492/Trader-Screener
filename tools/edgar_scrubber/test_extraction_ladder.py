@@ -288,6 +288,73 @@ def test_external_shadow_measures_the_model_without_changing_the_value():
 
 
 # --------------------------------------------------------------------------- #
+def test_prose_dates_normalize_and_wake_the_cross_check():
+    section("Dates (#166): prose in, ISO stored, and date_after stops being dead")
+    MAT = NOTE_SPEC.field("maturity_date")
+    DATE_DOC = ("KEY TERMS. Strike date:: August 27, 2026. Pricing date:: "
+                "August 28, 2026. Issue date:: on or about September 2, 2026. "
+                "Maturity date:: Unless earlier automatically redeemed, "
+                "August 31, 2028.")
+
+    local = FakeChatClient([(wire_body(MAT, "August 31, 2028",
+                                        span=span_of("August 31, 2028", DATE_DOC),
+                                        conf=0.9), USAGE)])
+    ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local,
+                                  local_model="qwen2.5:7b")
+    r = ladder.extract("maturity_date", text=DATE_DOC, accession="0001",
+                        document="424b2.htm")
+    codes = {f.code for f in r.flags}
+    check("a prose date is stored as ISO", r.value == "2028-08-31")
+    check("type_mismatch no longer fires on it", "type_mismatch" not in codes)
+    check("the conversion is recorded rather than silent",
+          "date_normalized" in codes)
+
+    # An already-ISO value converts to itself and earns no flag: nothing happened.
+    local2 = FakeChatClient([(wire_body(MAT, "2028-08-31",
+                                         span=span_of("August 31, 2028", DATE_DOC),
+                                         conf=0.9), USAGE)])
+    l2 = el.ExtractionLadder(NOTE_SPEC, local_client=local2, local_model="qwen2.5:7b")
+    r2 = l2.extract("maturity_date", text=DATE_DOC, accession="0001",
+                     document="424b2.htm")
+    check("an ISO value is left alone and flagged as nothing",
+          r2.value == "2028-08-31"
+          and "date_normalized" not in {f.code for f in r2.flags})
+
+    # A string carrying no date at all is NOT converted -- inventing one would
+    # be worse than the mismatch, and the mismatch is the honest signal.
+    local3 = FakeChatClient([(wire_body(MAT, "see the pricing supplement",
+                                         span=span_of("KEY TERMS", DATE_DOC),
+                                         conf=0.9), USAGE)])
+    l3 = el.ExtractionLadder(NOTE_SPEC, local_client=local3, local_model="qwen2.5:7b")
+    r3 = l3.extract("maturity_date", text=DATE_DOC, accession="0001",
+                     document="424b2.htm")
+    check("a non-date still trips type_mismatch",
+          "type_mismatch" in {f.code for f in r3.flags})
+
+    # The point of all of it: date_after(maturity_date, pricing_date) was dead,
+    # because both operands failed _parse_date before it could compare them.
+    # With ISO values it fires -- and the failure it catches is exactly the bug
+    # in #166 part 2, maturity read as the pricing date.
+    confused = NOTE_SPEC.validate_record({"maturity_date": "2026-08-28",
+                                           "pricing_date": "2026-08-28"})
+    check("maturity == pricing is caught by date_after",
+          any(f.code == "cross_check_failed" and f.field == "maturity_date"
+              for f in confused))
+    correct = NOTE_SPEC.validate_record({"maturity_date": "2028-08-31",
+                                          "pricing_date": "2026-08-28"})
+    check("a correctly-read pair passes it",
+          not any(f.code == "cross_check_failed" and f.field == "maturity_date"
+                  for f in correct))
+    # And it was genuinely dead before: prose operands parse to None, so the
+    # check skipped rather than comparing.
+    prose_pair = NOTE_SPEC.validate_record({"maturity_date": "August 28, 2026",
+                                             "pricing_date": "August 28, 2026"})
+    check("...whereas prose operands made it skip silently, which is the old bug",
+          not any(f.code == "cross_check_failed" and f.field == "maturity_date"
+                  for f in prose_pair))
+
+
+# --------------------------------------------------------------------------- #
 def test_local_confident_no_escalation():
     section("Rung 3: in-bounds, spanned, confident local value -> no escalation")
     local = FakeChatClient([(wire_body(EV_FIELD, 972.4, span=span_of("972.4"), conf=0.92), USAGE)])
@@ -850,6 +917,7 @@ def main():
     test_rule_shadow_mode()
     test_xbrl_rung_short_circuits()
     test_external_shadow_measures_the_model_without_changing_the_value()
+    test_prose_dates_normalize_and_wake_the_cross_check()
     test_local_confident_no_escalation()
     test_out_of_bounds_escalates_to_claude()
     test_span_resolution_failure_escalates()

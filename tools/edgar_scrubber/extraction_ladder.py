@@ -61,9 +61,11 @@ from dataclasses import asdict, dataclass, field as _dc_field
 
 try:  # package import: tools.edgar_scrubber.extraction_ladder
     from .field_spec import Flag
+    from .normalize import parse_date_prose as _parse_date_prose
     from .output_store import FieldValue
 except ImportError:  # standalone: python tools/edgar_scrubber/extraction_ladder.py
     from field_spec import Flag
+    from normalize import parse_date_prose as _parse_date_prose
     from output_store import FieldValue
 
 
@@ -829,6 +831,25 @@ class LadderResult:
 
 # ── Ladder ───────────────────────────────────────────────────────────────────
 
+def _normalize_dateish(f, value):
+    """A date-typed value as ISO, plus any flag the conversion earned (#166).
+
+    Returns `(value, flags)`. A prose date becomes ISO. A string that carries no
+    date at all is left exactly as it came back, so `type_mismatch` still fires
+    on it -- converting it would be inventing one, and the distinction between
+    "stated in prose" and "not a date" is the thing worth keeping.
+    """
+    if getattr(f, "type", None) != "date" or value is None:
+        return value, []
+    iso = _parse_date_prose(value)
+    if iso is None:
+        return value, []
+    if isinstance(value, str) and value.strip() == iso:
+        return iso, []
+    return iso, [Flag(f.name, "date_normalized", "info",
+                      "%s normalized to ISO from %r" % (f.name, value))]
+
+
 class ExtractionLadder:
     """Four rungs, cheapest first. See module docstring."""
 
@@ -1087,6 +1108,13 @@ class ExtractionLadder:
                                 "discarded and this value is treated as unverified")]
         else:
             flags_extra = []
+        # A date-typed field is declared ISO but stated in prose -- "August 31,
+        # 2028" -- so normalize before anything checks or stores it (#166).
+        # Without this every date tripped type_mismatch and was unusable: not
+        # comparable, not sortable, and invisible to the date_after cross-check
+        # against pricing_date, which therefore never ran either.
+        value, date_flags = _normalize_dateish(f, value)
+        flags_extra = list(flags_extra) + date_flags
         flags = self.spec.check_value(f.name, value, ex107=ex107) if value is not None else []
         flags = list(flags) + flags_extra
         if gated:
