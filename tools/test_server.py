@@ -781,6 +781,43 @@ check("free research wrote only under its own store root",
       bool(_written) and all(_fr_home in w for w in _written))
 
 # --------------------------------------------------------------------------- #
+section("issuer fallback -- a run from a selection still knows whose filing it is")
+# --------------------------------------------------------------------------- #
+# Found auditing the local store for #165: 75 of 201 documents had a NULL
+# issuer, and they were exactly runs #0016, #0017 and #0018 -- 25 each. Run
+# #0015 covered the SAME 25 filings and recorded the issuer fine.
+#
+# The model was not at fault. It read "Citigroup Global Markets Holdings Inc."
+# on 25 of 25 filings in #0018. `documents.issuer` is written from EDGAR search
+# metadata, and `resolve_targets` passes an explicit {accession, cik} selection
+# straight through, so a run started that way has no display name to write.
+#
+# It matters because exemplars, rules and coverage are all keyed by issuer: a
+# NULL detaches everything the run produced from the issuer it belongs to, and
+# nothing complains.
+
+check("an explicit selection carries no issuer metadata, which is the bug",
+      server.resolve_targets(
+          {"accessions": [{"accession": "0000950103-26-013335", "cik": "831001"}]}
+      )[0][0].get("issuer") is None)
+
+check("a selection is still accepted -- the fix is a fallback, not a refusal",
+      server.resolve_targets(
+          {"accessions": [{"accession": "0000950103-26-013335", "cik": "831001"}]}
+      )[1]["source"] == "selection")
+
+# The fallback itself, as the run applies it.
+_meta_with = {"issuer": "CITIGROUP INC"}
+_meta_without = {}
+check("EDGAR's display name wins when the run came from a search",
+      (_meta_with.get("issuer") or "model reading") == "CITIGROUP INC")
+check("the model's reading is used when metadata has none",
+      (_meta_without.get("issuer") or "Citigroup Global Markets Holdings Inc.")
+      == "Citigroup Global Markets Holdings Inc.")
+check("and a document with neither stays None rather than inventing one",
+      (_meta_without.get("issuer") or None) is None)
+
+# --------------------------------------------------------------------------- #
 section("span gate -- a figure nothing points at is not stored (#163)")
 # --------------------------------------------------------------------------- #
 
