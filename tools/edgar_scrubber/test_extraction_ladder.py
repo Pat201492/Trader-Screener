@@ -991,8 +991,151 @@ def test_span_support_passes_vacuously_without_source_text():
     check("bounds still beats span_support for `reason`", both.reason == "bounds")
 
 
+# --------------------------------------------------------------------------- #
+# Candidate-SELECT rung (#178)
+# --------------------------------------------------------------------------- #
+
+try:  # the deterministic enumerator this rung selects from
+    from . import candidates as cand
+except ImportError:
+    import candidates as cand
+
+
+def candidate_body(index, conf=0.9, decoy_value=None):
+    """A SELECT-rung response: an index (or null) and a confidence. `decoy_value`
+    stuffs a value-shaped key the ladder must IGNORE -- proving the stored value
+    is read from the candidate, never parsed out of model text."""
+    payload = {"index": index, el.WIRE_CONF_KEY: conf}
+    if decoy_value is not None:
+        payload["value"] = decoy_value
+    return json.dumps(payload)
+
+
+def _user_content(call):
+    for msg in call["messages"]:
+        if msg.get("role") == "user":
+            return msg["content"]
+    raise AssertionError("no user message in call")
+
+
+def test_candidate_select_prompt_lists_candidates_not_section_text():
+    section("Candidate-SELECT (#178): prompt is the candidate list, not the section text")
+    candidates = cand.candidates_for(EV_FIELD, DOC)
+    check("the enumerator found candidates in the fixture", len(candidates) > 1)
+
+    local = FakeChatClient([(candidate_body(0), USAGE)])
+    ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
+                                  candidate_select=True)
+    ladder.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
+
+    content = _user_content(local.calls[0])
+    check("the prompt carries the candidate list", "CANDIDATES" in content and "[0]" in content)
+    check("every candidate's printed form is listed",
+          all(c["raw"] in content for c in candidates))
+    check("the full section text is NOT in the prompt", DOC not in content)
+    check("no SOURCE TEXT block on this path", "SOURCE TEXT" not in content)
+    check("constrained decode still on", local.calls[0]["response_format"] is not None)
+
+
+def test_candidate_select_value_and_span_from_the_chosen_candidate():
+    section("Candidate-SELECT (#178): value and span come from the candidate, not model text")
+    candidates = cand.candidates_for(EV_FIELD, DOC)
+    # Choose an in-bounds, spanned candidate whose value differs from the decoy
+    # free-text number the fake also emits.
+    pick = next(i for i, c in enumerate(candidates) if c["value"] == 985.5)
+    decoy = 111.0
+    check("the chosen value differs from the decoy the model emits",
+          candidates[pick]["value"] != decoy)
+
+    local = FakeChatClient([(candidate_body(pick, conf=0.9, decoy_value=decoy), USAGE)])
+    claude = FakeChatClient([])  # must not be called: 985.5 is in bounds and spanned
+    ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
+                                  claude_client=claude, claude_model="claude-sonnet-4-6",
+                                  candidate_select=True)
+    r = ladder.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
+
+    check("stored value is the chosen candidate's, not the decoy",
+          r.value == 985.5 and r.value != decoy)
+    check("span is the chosen candidate's span", r.span == candidates[pick]["span"])
+    check("the span slices to the candidate's printed form",
+          DOC[r.span[0]:r.span[1]] == candidates[pick]["raw"])
+    check("path recorded as candidate_select", r.path == "candidate_select")
+    check("the log entry records the path",
+          ladder.log.entries[0].path == "candidate_select")
+    check("no escalation for an in-bounds, spanned choice", r.escalated is False)
+    check("Claude never called", len(claude.calls) == 0)
+
+
+def test_candidate_select_out_of_range_and_null_yield_no_value():
+    section("Candidate-SELECT (#178): a bad index yields no value, never a clamped one")
+    n = len(cand.candidates_for(EV_FIELD, DOC))
+
+    for label, idx in (("out-of-range index", n + 50), ("null index", None)):
+        local = FakeChatClient([(candidate_body(idx), USAGE)])
+        ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
+                                      claude_client=None, candidate_select=True)
+        r = ladder.extract("estimated_value_per_1000", text=DOC, accession="0001", document="424b2.htm")
+        check(f"{label}: no value stored (not clamped or invented)", r.value is None)
+        check(f"{label}: span is None too", r.span is None)
+        check(f"{label}: still recorded as candidate_select path",
+              ladder.log.entries[0].path == "candidate_select")
+
+    # The parser is the guard, unit-checked directly.
+    check("parse_candidate_response: null -> None index",
+          el.parse_candidate_response({"index": None, el.WIRE_CONF_KEY: 0.5})[0] is None)
+    check("parse_candidate_response: a float is not an index",
+          el.parse_candidate_response({"index": 2.0, el.WIRE_CONF_KEY: 0.5})[0] is None)
+    check("parse_candidate_response: a bool is not an index",
+          el.parse_candidate_response({"index": True, el.WIRE_CONF_KEY: 0.5})[0] is None)
+
+
+def test_candidate_select_date_keeps_printed_form():
+    section("Candidate-SELECT (#178): a chosen date stores ISO but keeps its prose form")
+    MAT = NOTE_SPEC.field("maturity_date")
+    DATE_DOC = ("Strike Date: August 27, 2026\nPricing Date: August 28, 2026\n"
+                "Issue Date: September 2, 2026\nMaturity Date: August 31, 2028")
+    candidates = cand.candidates_for(MAT, DATE_DOC)
+    pick = next(i for i, c in enumerate(candidates) if c["raw"] == "August 31, 2028")
+
+    local = FakeChatClient([(candidate_body(pick), USAGE)])
+    ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
+                                  candidate_select=True)
+    r = ladder.extract("maturity_date", text=DATE_DOC, accession="0001", document="424b2.htm")
+    check("stored value is ISO", r.value == "2028-08-31")
+    check("the printed prose form is kept for locating", r.raw_value == "August 31, 2028")
+    check("the span slices to the prose form", DATE_DOC[r.span[0]:r.span[1]] == "August 31, 2028")
+
+
+def test_free_form_path_unchanged_when_no_candidates():
+    section("Candidate-SELECT (#178): a field with no candidates uses free-form, untouched")
+    ISSUER = NOTE_SPEC.field("issuer")
+    check("a string field has no candidates", cand.candidates_for(ISSUER, DOC) == [])
+
+    body = wire_body(ISSUER, "JPMorgan Chase", span=span_of("424B2"), conf=0.9)
+    # Same scripted response drives both ladders; only the flag differs.
+    off = el.ExtractionLadder(NOTE_SPEC, local_client=FakeChatClient([(body, USAGE)]),
+                               local_model="qwen2.5:7b")
+    on = el.ExtractionLadder(NOTE_SPEC, local_client=FakeChatClient([(body, USAGE)]),
+                              local_model="qwen2.5:7b", candidate_select=True)
+    r_off = off.extract("issuer", text=DOC, accession="0001", document="424b2.htm")
+    r_on = on.extract("issuer", text=DOC, accession="0001", document="424b2.htm")
+
+    check("flag on but no candidates -> free_form path", r_on.path == "free_form")
+    check("value produced by the free-form model", r_on.value == "JPMorgan Chase")
+    check("identical to the flag-off run (nothing regressed)",
+          r_off.value == r_on.value and r_off.rung == r_on.rung
+          and r_off.path == r_on.path == "free_form")
+    check("the free-form prompt still carries SOURCE TEXT",
+          "SOURCE TEXT" in _user_content(on.local_client.calls[0]))
+
+
 def main():
     print("Extraction provider ladder gate (#104)")
+    test_candidate_select_prompt_lists_candidates_not_section_text()
+    test_candidate_select_value_and_span_from_the_chosen_candidate()
+    test_candidate_select_out_of_range_and_null_yield_no_value()
+    test_candidate_select_date_keeps_printed_form()
+    test_free_form_path_unchanged_when_no_candidates()
     test_rule_rung_short_circuits()
     test_rule_rung_with_manager()
     test_rule_shadow_mode()
