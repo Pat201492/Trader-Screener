@@ -447,7 +447,7 @@ store.record(run_id, "0001-25-1", "doc.htm", FieldValue(
     flags=[{"code": "gated_no_claude", "severity": "warn"}]))
 store.record(run_id, "0001-25-1", "doc.htm", FieldValue(
     field="barrier_pct", value=70.0, unit="percent_of_initial", span=(1, 5),
-    provenance="local:qwen2.5:7b", confidence=0.9, flags=[]))
+    provenance="local:qwen2.5:7b", confidence=0.9, flags=[], candidate_count=4))
 store.close()
 
 data = server.store_extractions()
@@ -467,6 +467,17 @@ check("filtering by run_id keeps the run",
 check("filtering by an unknown run_id returns nothing",
       len(server.store_extractions("no-such-run")["documents"]) == 0)
 check("store_runs lists the run", any(r["run_id"] == run_id for r in server.store_runs()["runs"]))
+
+# --------------------------------------------------------------------------- #
+section("candidate sets are scratch (#179) -- the count is surfaced, never the list")
+# --------------------------------------------------------------------------- #
+check("the API surfaces candidate_count for a value chosen from candidates",
+      by_name["barrier_pct"]["candidate_count"] == 4)
+check("candidate_count is 0 on a free-form field", by_name["cusip"]["candidate_count"] == 0)
+check("no API field carries a candidate LIST",
+      all(not any(k != "candidate_count" and "candidate" in k for k in f)
+          and not isinstance(f.get("candidate_count"), (list, dict))
+          for d in data["documents"] for f in d["fields"]))
 
 # --------------------------------------------------------------------------- #
 section("coverage -- what can we grab consistently, per issuer")

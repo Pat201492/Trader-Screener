@@ -621,7 +621,11 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
                     span=tuple(span) if span else None,
                     provenance=(f"{p.provenance}+span:{span_method}"
                                 if span_method else p.provenance),
-                    confidence=p.confidence, flags=p_flags))
+                    confidence=p.confidence, flags=p_flags,
+                    # The chosen value's count, never the list (#179): the
+                    # candidates are scratch and reach neither the store nor the
+                    # run event; the count does, and 0 marks the free-form path.
+                    candidate_count=getattr(p, "candidate_count", 0)))
                 if name == "underlyings" and isinstance(stored_value, list):
                     kinds_seen = classify_array_members(p.value)[1]
                     underlyings = [{"name": str(u),
@@ -656,6 +660,8 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
                     value=(str(p.value)[:120] if not empty else None),
                     rung=p.rung, gated=gated, confidence=p.confidence,
                     span=list(span) if span else None,
+                    # The count the value was chosen from, never the list (#179).
+                    candidate_count=getattr(p, "candidate_count", 0),
                     kept=bool(span) and not dropped,
                     verdict=("no value" if empty else
                              "withheld" if withheld else
@@ -678,6 +684,7 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
                     "span": list(span) if span else None,
                     "span_source": span_method,
                     "span_text": nd.text[span[0]:span[1]] if span else None,
+                    "candidate_count": getattr(p, "candidate_count", 0),
                     "flags": flags,
                 })
 
@@ -2107,6 +2114,10 @@ def store_extractions(run_id=None):
             "confidence": r.get("confidence"), "provenance": r.get("provenance"),
             "span": [r.get("span_start"), r.get("span_end")],
             "flags": [f.get("code") if isinstance(f, dict) else str(f) for f in (flags or [])],
+            # The count the value was chosen from, never the list (#179). 0 marks
+            # the free-form fallback. A candidate list is scratch and is not stored,
+            # so there is none to surface here.
+            "candidate_count": r.get("candidate_count"),
         })
     out = list(docs.values())
     issuers = sorted({d["issuer"] for d in out if d.get("issuer")})

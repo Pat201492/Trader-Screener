@@ -840,6 +840,9 @@ class LogEntry:
     # the value itself. Recorded so a run can be compared against one that used
     # the other path.
     path: str = "free_form"
+    # How many deterministic candidates the value was chosen from (#179). The run
+    # record carries this COUNT, never the list; 0 is the free-form path.
+    candidate_count: int = 0
 
     def as_dict(self):
         d = asdict(self)
@@ -962,6 +965,11 @@ class LadderResult:
     # Which model path produced the value (#178): "candidate_select" or
     # "free_form". "rule"/"xbrl" rungs leave it "free_form" -- no model ran.
     path: str = "free_form"
+    # How many deterministic candidates the value was chosen from (#179). The
+    # candidate LIST is working data and is discarded; only this COUNT survives.
+    # 0 is exactly the free-form path -- no enumeration ran -- so a fallback is
+    # visible after the fact ("chosen from 3" vs "chosen from 47" vs "free-form").
+    candidate_count: int = 0
     # The value BEFORE date normalization, i.e. the form the filing prints.
     # A span is earned by finding the value's own text in the document, so the
     # search has to use this and not the ISO form: the filing says
@@ -972,11 +980,13 @@ class LadderResult:
     raw_value: object = None
 
     def to_field_value(self):
-        """Bridge into output_store (#109) -- the same record the store wants."""
+        """Bridge into output_store (#109) -- the same record the store wants.
+        Carries `candidate_count` (#179) and nothing of the candidate list."""
         return FieldValue(field=self.field, value=self.value, unit=self.unit,
                            span=self.span, provenance=self.provenance,
                            confidence=self.confidence,
-                           flags=[f.as_dict() for f in self.flags])
+                           flags=[f.as_dict() for f in self.flags],
+                           candidate_count=self.candidate_count)
 
 
 # ── Ladder ───────────────────────────────────────────────────────────────────
@@ -1228,6 +1238,10 @@ class ExtractionLadder:
         # found values in the text; otherwise the free-form path, byte-for-byte
         # unchanged, so a field with no candidates never regresses.
         candidates = candidates_for(f, text) if self.candidate_select else []
+        # The candidate list is working data -- built wide so the choice can be
+        # narrow, then discarded (#179). Only this count survives onto the result,
+        # the run record and the store; 0 is exactly the free-form path below.
+        candidate_count = len(candidates)
         if candidates:
             path = "candidate_select"
             samples = None                 # no self-consistency on an index pick
@@ -1253,7 +1267,8 @@ class ExtractionLadder:
                                tokens_in=tin, tokens_out=tout)
             return self._finish(f, value, span, "local", prov, conf, gate, ex107,
                                  accession=accession, document=document,
-                                 path=path, raw_value=raw_selected)
+                                 path=path, raw_value=raw_selected,
+                                 candidate_count=candidate_count)
 
         # Rung 4: Claude, only for the gated remainder. It uses the same path the
         # local rung did -- the SELECT rung when candidates exist -- so a value is
@@ -1275,7 +1290,8 @@ class ExtractionLadder:
                                tokens_in=ctin, tokens_out=ctout, cost_usd=cost)
             return self._finish(f, c_value, c_span, "claude", prov, c_conf, gate, ex107,
                                  accession=accession, document=document, escalated=True,
-                                 path=path, raw_value=c_raw)
+                                 path=path, raw_value=c_raw,
+                                 candidate_count=candidate_count)
 
         # Local-only mode: flag the gate failure, keep going -- never raise.
         prov = Provenance(rung="local", document=document, span=span, model=self.local_model,
@@ -1283,7 +1299,8 @@ class ExtractionLadder:
                            exemplar_set=exemplar_set, tokens_in=tin, tokens_out=tout)
         return self._finish(f, value, span, "local", prov, conf, gate, ex107,
                              accession=accession, document=document, gated=True,
-                             path=path, raw_value=raw_selected)
+                             path=path, raw_value=raw_selected,
+                             candidate_count=candidate_count)
 
     def extract_document(self, field_names, *, text, issuer=None, ex107=None,
                           accession=None, document=None, table_context=None):
@@ -1295,7 +1312,7 @@ class ExtractionLadder:
 
     def _finish(self, f, value, span, rung, provenance, confidence, gate, ex107, *,
                 accession, document, escalated=False, gated=False, shadow=None,
-                path="free_form", raw_value=None):
+                path="free_form", raw_value=None, candidate_count=0):
         """Finish extraction: apply field specs, record in log, return result.
 
         shadow: ShadowComparison when rule in shadow mode (comparing rule vs model).
@@ -1338,13 +1355,14 @@ class ExtractionLadder:
                                confidence=confidence, rung=rung,
                                provenance=provenance.as_string(), flags=flags,
                                escalated=escalated, gated=gated, path=path,
+                               candidate_count=candidate_count,
                                raw_value=raw_value)
         self.log.record(LogEntry(
             accession=accession, document=document, field=f.name, rung=rung,
             value=value, unit=f.unit, span=span, confidence=confidence,
             flags=[fl.as_dict() for fl in flags], escalated=escalated, gated=gated,
             gate=gate.as_dict() if gate else None, provenance=provenance.as_dict(),
-            shadow=shadow, path=path,
+            shadow=shadow, path=path, candidate_count=candidate_count,
         ))
         return result
 
