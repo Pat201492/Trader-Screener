@@ -1,0 +1,22 @@
+{
+  "cik": 320193,
+  "taxonomy": "us-gaap",
+  "tag": "RevenueFromContractWithCustomerExcludingAssessedTax",
+  "label": "Revenue from Contract with Customer, Excluding Assessed Tax",
+  "description": "ASC 606 revenue tag. Measured to cover FY2019-2025 on Apple.",
+  "entityName": "Apple Inc.",
+  "units": {
+    "USD": [
+      {"start": "2017-10-01", "end": "2018-09-29", "val": 265596000000, "accn": "0000320193-19-000119", "fy": 2019, "fp": "FY", "form": "10-K", "filed": "2019-10-31"},
+
+      {"start": "2018-09-30", "end": "2019-09-28", "val": 260174000000, "accn": "0000320193-19-000119", "fy": 2019, "fp": "FY", "form": "10-K", "filed": "2019-10-31"},
+      {"start": "2018-09-30", "end": "2018-12-29", "val": 84310000000, "accn": "0000320193-19-000010", "fy": 2019, "fp": "Q1", "form": "10-Q", "filed": "2019-01-30"},
+      {"start": "2018-12-30", "end": "2019-03-30", "val": 58015000000, "accn": "0000320193-19-000066", "fy": 2019, "fp": "Q2", "form": "10-Q", "filed": "2019-05-01"},
+      {"start": "2019-03-31", "end": "2019-06-29", "val": 53809000000, "accn": "0000320193-19-000076", "fy": 2019, "fp": "Q3", "form": "10-Q", "filed": "2019-07-31"},
+
+      {"start": "2019-09-29", "end": "2020-09-26", "val": 274515000000, "accn": "0000320193-20-000096", "fy": 2020, "fp": "FY", "form": "10-K", "filed": "2020-10-30"},
+      {"start": "2019-09-29", "end": "2020-09-26", "val": 274515000000, "accn": "0000320193-21-000105", "fy": 2021, "fp": "FY", "form": "10-K", "filed": "2021-10-29"},
+      {"start": "2019-09-29", "end": "2020-09-26", "val": 274515000000, "accn": "0000320193-22-000108", "fy": 2022, "fp": "FY", "form": "10-K", "filed": "2022-10-28"}
+    ]
+  }
+}

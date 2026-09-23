@@ -1,0 +1,13 @@
+{
+  "cik": 320193,
+  "taxonomy": "us-gaap",
+  "tag": "Revenues",
+  "label": "Revenues",
+  "description": "Interim revenue tag. Measured to cover FY2018 only on Apple.",
+  "entityName": "Apple Inc.",
+  "units": {
+    "USD": [
+      {"start": "2017-10-01", "end": "2018-09-29", "val": 265595000000, "accn": "0000320193-18-000145", "fy": 2018, "fp": "FY", "form": "10-K", "filed": "2018-11-05"}
+    ]
+  }
+}

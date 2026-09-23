@@ -1,0 +1,15 @@
+{
+  "cik": 320193,
+  "taxonomy": "us-gaap",
+  "tag": "SalesRevenueNet",
+  "label": "Revenue, Net",
+  "description": "Pre-ASC-606 revenue tag. Measured to cover FY2009-2017 on Apple.",
+  "entityName": "Apple Inc.",
+  "units": {
+    "USD": [
+      {"start": "2015-09-27", "end": "2016-09-24", "val": 215639000000, "accn": "0000320193-16-000317", "fy": 2016, "fp": "FY", "form": "10-K", "filed": "2016-10-26"},
+      {"start": "2016-06-26", "end": "2016-09-24", "val": 46852000000, "accn": "0000320193-16-000317", "fy": 2016, "fp": "FY", "form": "10-K", "filed": "2016-10-26"},
+      {"start": "2016-09-25", "end": "2017-09-30", "val": 229234000000, "accn": "0000320193-17-000070", "fy": 2017, "fp": "FY", "form": "10-K", "filed": "2017-11-03"}
+    ]
+  }
+}
