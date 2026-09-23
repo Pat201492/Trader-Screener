@@ -148,6 +148,12 @@ class FieldValue:
     provenance: str = None
     confidence: float = None
     flags: list = dc_field(default_factory=list)
+    # How many deterministic candidates the value was chosen from (#179). The
+    # candidate LIST is scratch and is never stored; the COUNT survives, because
+    # "chosen from 3" and "chosen from 47" are different facts about the same
+    # answer, and a count of 0 is exactly the free-form fallback, visible after
+    # the fact. Only the chosen value, its span and this count reach the store.
+    candidate_count: int = 0
 
 
 @dataclass
@@ -171,7 +177,7 @@ class DocumentExtraction:
     @classmethod
     def from_record(cls, accession, document, record, *, units=None,
                     spans=None, provenance=None, confidence=None, flags=None,
-                    filing_date_field="pricing_date"):
+                    candidate_counts=None, filing_date_field="pricing_date"):
         """Build from a canonical-keyed extraction record (the field_spec output).
 
         Lifts issuer / product_type / underlyings / the filing date out of the
@@ -184,6 +190,7 @@ class DocumentExtraction:
         provenance = provenance or {}
         confidence = confidence or {}
         flags = flags or {}
+        candidate_counts = candidate_counts or {}
 
         fields = []
         for name, value in record.items():
@@ -195,6 +202,7 @@ class DocumentExtraction:
                 provenance=provenance.get(name),
                 confidence=confidence.get(name),
                 flags=flags.get(name, []),
+                candidate_count=candidate_counts.get(name, 0),
             ))
 
         return cls(
@@ -264,6 +272,7 @@ CREATE TABLE IF NOT EXISTS extractions (
     provenance   TEXT,
     confidence   REAL,
     flags_json   TEXT,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 
@@ -306,8 +315,22 @@ class OutputStore:
         self._conn.execute("PRAGMA foreign_keys = ON")
         if not readonly:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
         self.readonly = readonly
+
+    def _migrate(self):
+        """Additive migrations for a store opened from an older run (#179). A new
+        column is added only when the CREATE TABLE IF NOT EXISTS above found a
+        pre-existing `extractions` table without it, so the append-only history is
+        never rebuilt. Old rows read back their DEFAULT, which for candidate_count
+        is 0 -- the free-form value, honest for rows written before the count."""
+        cols = {r["name"] for r in
+                self._conn.execute("PRAGMA table_info(extractions)").fetchall()}
+        if "candidate_count" not in cols:
+            self._conn.execute(
+                "ALTER TABLE extractions ADD COLUMN candidate_count "
+                "INTEGER NOT NULL DEFAULT 0")
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -425,12 +448,13 @@ class OutputStore:
         self._conn.execute(
             "INSERT INTO extractions "
             "(run_id, accession, document, field, value_json, value_num, unit, "
-            " span_start, span_end, provenance, confidence, flags_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " span_start, span_end, provenance, confidence, flags_json, "
+            " candidate_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (run_id, accession, document, fv.field,
              json.dumps(fv.value), value_num, fv.unit,
              span_start, span_end, fv.provenance, fv.confidence,
-             json.dumps(fv.flags or [])),
+             json.dumps(fv.flags or []), int(fv.candidate_count or 0)),
         )
 
     def _require_run(self, run_id):
@@ -541,7 +565,7 @@ class OutputStore:
                 return []
         rows = self._conn.execute(
             "SELECT field, value_json, value_num, unit, span_start, span_end, "
-            "       provenance, confidence, flags_json "
+            "       provenance, confidence, flags_json, candidate_count "
             "FROM extractions WHERE run_id = ? AND accession = ? AND document = ? "
             "ORDER BY field",
             (run_id, accession, document),
@@ -555,7 +579,7 @@ class OutputStore:
         rows = self._conn.execute(
             "SELECT e.run_id, r.spec_version, r.started_at, e.field, "
             "       e.value_json, e.value_num, e.unit, e.span_start, e.span_end, "
-            "       e.provenance, e.confidence, e.flags_json "
+            "       e.provenance, e.confidence, e.flags_json, e.candidate_count "
             "FROM extractions e JOIN runs r ON r.run_id = e.run_id "
             "WHERE e.accession = ? AND e.document = ? AND e.field = ? "
             "ORDER BY r.started_at, e.run_id",
@@ -592,6 +616,7 @@ class OutputStore:
             "provenance": r["provenance"],
             "confidence": r["confidence"],
             "flags": json.loads(r["flags_json"]) if r["flags_json"] else [],
+            "candidate_count": r["candidate_count"],
         }
 
     # -- manifest support --------------------------------------------------

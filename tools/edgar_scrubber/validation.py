@@ -151,6 +151,10 @@ class FieldProposal:
     # earned by locating the value's own text, so the search must use this form:
     # the document says "August 28, 2026" and never "2026-08-28".
     raw_value: object = None
+    # How many deterministic candidates the value was chosen from (#179). The
+    # candidate list itself is never carried on a proposal; only this count is,
+    # so it can reach the store beside the chosen value. 0 is the free-form path.
+    candidate_count: int = 0
 
 
 @dataclass
@@ -1045,7 +1049,8 @@ class LadderExtractor:
                 provenance=result.provenance, confidence=result.confidence,
                 rung=result.rung, unit=result.unit,
                 flags=[f.as_dict() for f in result.flags],
-                raw_value=result.raw_value))
+                raw_value=result.raw_value,
+                candidate_count=getattr(result, "candidate_count", 0)))
         return proposals
 
 

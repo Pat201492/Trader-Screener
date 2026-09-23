@@ -204,6 +204,36 @@ def run_checks():
     check("manifest stats count documents and runs",
           stats["document_count"] == 1 and stats["run_count"] == 1)
 
+    # ── AC (#179): candidate_count survives; the candidate list never does ──
+    section("AC (#179): the chosen value's candidate_count is stored; no list is")
+    cc = fresh_store()
+    ccrun = cc.start_run("424b2.structured_note", "1.0.0", "2026-08-05T10:00:00Z")
+    cc.write_document(ccrun, DocumentExtraction(
+        "0003-24-000003", "424b2.htm", issuer="X",
+        fields=[
+            # A value chosen from five deterministic candidates (#178).
+            FieldValue("estimated_value_per_1000", 972.0, candidate_count=5),
+            # A free-form field: no enumeration ran, so the count is 0.
+            FieldValue("issuer", "X", candidate_count=0),
+        ]))
+    got = {f["field"]: f for f in cc.fields("0003-24-000003", "424b2.htm")}
+    check("candidate_count round-trips for the chosen value",
+          got["estimated_value_per_1000"]["candidate_count"] == 5)
+    check("candidate_count is 0 exactly on the free-form field",
+          got["issuer"]["candidate_count"] == 0)
+    check("FieldValue defaults candidate_count to 0 (the free-form value)",
+          FieldValue("x", 1).candidate_count == 0)
+    check("from_record threads candidate_counts and defaults the rest to 0",
+          [f.candidate_count for f in DocumentExtraction.from_record(
+              "a", "d", {"barrier_pct": 70.0, "issuer": "X"},
+              candidate_counts={"barrier_pct": 3}).fields] == [3, 0])
+    cols = {r[1] for r in cc._conn.execute("PRAGMA table_info(extractions)")}
+    check("no column exists that could hold a candidate LIST",
+          not any("candidate" in c and c != "candidate_count" for c in cols))
+    # field_history carries the count too, so it survives across spec versions.
+    hist = cc.field_history("0003-24-000003", "424b2.htm", "estimated_value_per_1000")
+    check("field_history carries candidate_count", hist[0]["candidate_count"] == 5)
+
 
 def main():
     print("EDGAR scrubber output-store gate (#109)")

@@ -1129,8 +1129,74 @@ def test_free_form_path_unchanged_when_no_candidates():
           "SOURCE TEXT" in _user_content(on.local_client.calls[0]))
 
 
+def test_candidate_count_stored_but_not_the_list():
+    section("Candidate sets are scratch (#179): the COUNT survives, the LIST does not")
+    # Rejected candidates carry distinctive figures that appear nowhere in the
+    # chosen value, so walking the run record and the store for them proves the
+    # list was discarded and only the count kept.
+    DISTINCT = ("424B2 pricing supplement. A hypothetical example shows 314159 and "
+                "a footnote mentions 271828. Our estimated value of the notes is "
+                "972.0 per $1,000 principal amount.")
+    candidates = cand.candidates_for(EV_FIELD, DISTINCT)
+    pick = next(i for i, c in enumerate(candidates) if c["value"] == 972.0)
+    check("the enumerator found several candidates", len(candidates) > 1)
+    check("the distinctive rejects are among the candidates",
+          {314159, 271828} <= {c["value"] for c in candidates})
+
+    local = FakeChatClient([(candidate_body(pick), USAGE)])
+    ladder = el.ExtractionLadder(NOTE_SPEC, local_client=local, local_model="qwen2.5:7b",
+                                  candidate_select=True)
+    r = ladder.extract("estimated_value_per_1000", text=DISTINCT,
+                       accession="0001", document="424b2.htm")
+    check("the result records candidate_count = the list length",
+          r.candidate_count == len(candidates))
+    check("the log entry records the same count",
+          ladder.log.entries[0].candidate_count == len(candidates))
+    # The run record is fully reconstructible from to_jsonl(); the list of
+    # rejected candidates must appear nowhere in it.
+    line = ladder.log.to_jsonl()[0]
+    check("no rejected candidate text in the run record",
+          "314159" not in line and "271828" not in line)
+
+    # Write it to the local store through the #109 bridge, then WALK the store.
+    try:
+        from output_store import OutputStore
+    except ImportError:
+        from .output_store import OutputStore
+    store = OutputStore(":memory:")
+    rid = store.start_run("424b2.structured_note", "1.0.0", "2026-08-05T10:00:00Z")
+    store.record(rid, "0001", "424b2.htm", r.to_field_value())
+    dump = " ".join(
+        " ".join("" if v is None else str(v) for v in tuple(row))
+        for row in store._conn.execute("SELECT * FROM extractions").fetchall())
+    check("the store holds the chosen value", "972.0" in dump)
+    check("no rejected candidate text reached the store",
+          "314159" not in dump and "271828" not in dump)
+    stored = store.fields("0001", "424b2.htm", run_id=rid)[0]
+    check("candidate_count round-trips out of the store",
+          stored["candidate_count"] == len(candidates))
+    check("the store has no column that could hold a candidate list",
+          not any("candidate" in c[1] and c[1] != "candidate_count"
+                  for c in store._conn.execute("PRAGMA table_info(extractions)")))
+
+
+def test_candidate_count_is_zero_exactly_on_free_form():
+    section("Candidate sets are scratch (#179): count 0 is EXACTLY the free-form path")
+    ISSUER = NOTE_SPEC.field("issuer")
+    body = wire_body(ISSUER, "JPMorgan Chase", span=span_of("424B2"), conf=0.9)
+    ladder = el.ExtractionLadder(NOTE_SPEC,
+                                 local_client=FakeChatClient([(body, USAGE)]),
+                                 local_model="qwen2.5:7b", candidate_select=True)
+    r = ladder.extract("issuer", text=DOC, accession="0001", document="424b2.htm")
+    check("a field with no candidates takes the free-form path", r.path == "free_form")
+    check("candidate_count is exactly 0 on the free-form path", r.candidate_count == 0)
+    check("the log entry agrees", ladder.log.entries[0].candidate_count == 0)
+
+
 def main():
     print("Extraction provider ladder gate (#104)")
+    test_candidate_count_stored_but_not_the_list()
+    test_candidate_count_is_zero_exactly_on_free_form()
     test_candidate_select_prompt_lists_candidates_not_section_text()
     test_candidate_select_value_and_span_from_the_chosen_candidate()
     test_candidate_select_out_of_range_and_null_yield_no_value()
