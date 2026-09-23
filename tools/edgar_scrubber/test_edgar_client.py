@@ -377,6 +377,70 @@ def test_url_construction():
 
 
 # --------------------------------------------------------------------------- #
+# 10b. ticker -> CIK lookup + XBRL fact endpoints (#182)
+# --------------------------------------------------------------------------- #
+_TICKERS_FIXTURE = {
+    "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+    "1": {"cik_str": 19617, "ticker": "JPM", "title": "JPMORGAN CHASE & CO"},
+    "2": {"cik_str": 70858, "ticker": "BAC", "title": "BANK OF AMERICA CORP"},
+}
+
+
+def test_ticker_to_cik():
+    section("ticker -> CIK10, case-insensitive, unknown fails loud (#182)")
+    ft = FakeTransport({ec.EdgarClient.TICKERS_URL: ok_json(_TICKERS_FIXTURE)})
+    client = ec.EdgarClient(UA, new_cache_dir(), transport=ft)
+
+    mapping = client.company_tickers()
+    check("company_tickers maps ticker -> CIK10 from the SEC file",
+          mapping["AAPL"] == "0000320193" and mapping["JPM"] == "0000019617")
+    check("company_tickers requested exactly the SEC file URL",
+          ft.calls[0] == ec.EdgarClient.TICKERS_URL)
+
+    check("ticker_to_cik('aapl') == '0000320193'", client.ticker_to_cik("aapl") == "0000320193")
+    check("ticker_to_cik('AAPL') == '0000320193'", client.ticker_to_cik("AAPL") == "0000320193")
+
+    try:
+        client.ticker_to_cik("NOSUCHTICKER")
+        check("unknown ticker raises (not None)", False)
+    except ec.EdgarError as e:
+        check("unknown ticker raises an EdgarError subclass",
+              isinstance(e, ec.EdgarError) and type(e) is not ec.EdgarError)
+
+    # everything above resolved from ONE fetch of the tickers file (cache)
+    check("all ticker lookups shared a single network fetch",
+          len([u for u in ft.calls if u == ec.EdgarClient.TICKERS_URL]) == 1)
+
+
+def test_xbrl_endpoints_zero_second_network():
+    section("XBRL fact endpoints build exact URLs; 2nd call = ZERO network (#182)")
+    concept_url = ("https://data.sec.gov/api/xbrl/companyconcept/"
+                   "CIK0000320193/us-gaap/Revenues.json")
+    facts_url = "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json"
+    ft = FakeTransport({
+        concept_url: ok_json({"tag": "Revenues"}),
+        facts_url: ok_json({"cik": 320193}),
+        ec.EdgarClient.TICKERS_URL: ok_json(_TICKERS_FIXTURE),
+    })
+    client = ec.EdgarClient(UA, new_cache_dir(), transport=ft)
+
+    client.company_concept("320193", "us-gaap", "Revenues")
+    check("company_concept requests the exact XBRL URL", ft.calls[-1] == concept_url)
+    client.company_facts("320193")
+    check("company_facts requests the exact XBRL URL", ft.calls[-1] == facts_url)
+
+    # a ticker-driven pull resolves the CIK then reads facts; repeat = 0 network
+    client.company_facts(client.ticker_to_cik("aapl"))
+    n_after_warm = len(ft.calls)
+    client.company_concept("320193", "us-gaap", "Revenues")
+    client.company_facts("320193")
+    client.company_tickers()
+    client.company_facts(client.ticker_to_cik("AAPL"))
+    check("every repeated new-method call served from cache (zero new network)",
+          len(ft.calls) == n_after_warm)
+
+
+# --------------------------------------------------------------------------- #
 # 11. iter_hits pagination + stop conditions
 # --------------------------------------------------------------------------- #
 def test_iter_hits_pagination():
@@ -471,7 +535,9 @@ def main():
         test_rate_limiter_concurrency, test_shared_limiter,
         test_retry_backoff, test_retry_exhausted, test_403_fails_loud,
         test_display_name_parsing, test_search_total_saturation,
-        test_url_construction, test_iter_hits_pagination, test_primary_document,
+        test_url_construction, test_ticker_to_cik,
+        test_xbrl_endpoints_zero_second_network,
+        test_iter_hits_pagination, test_primary_document,
         test_live_integration,
     ]
     for t in tests:

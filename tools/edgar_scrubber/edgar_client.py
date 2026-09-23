@@ -78,6 +78,14 @@ class EdgarConfigError(EdgarError):
     """
 
 
+class EdgarLookupError(EdgarError):
+    """A requested identifier isn't in a resolved SEC index — e.g. an unknown
+    ticker in `company_tickers.json`. Raised rather than returning None so a
+    typo'd ticker fails loud at the lookup instead of as a confusing 404 on the
+    CIK-shaped URL it would have built downstream.
+    """
+
+
 class EdgarHTTPError(EdgarError):
     """A non-200 the client will not retry (e.g. 404), or retries exhausted."""
 
@@ -566,6 +574,40 @@ class EdgarClient:
             or pick(lambda n: n.endswith((".htm", ".html")))
             or pick(lambda n: n.endswith(".txt"))
         )
+
+    # -- ticker -> CIK -----------------------------------------------------
+    TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+
+    def company_tickers(self):
+        """Map every exchange ticker to its zero-padded CIK10.
+
+        Parses `company_tickers.json`, whose live shape is a dict keyed by an
+        arbitrary row index: ``{"0": {"cik_str": 320193, "ticker": "AAPL",
+        "title": "Apple Inc."}, ...}``. Tickers are upper-cased so lookups are
+        case-insensitive; CIKs are padded to the CIK10 the XBRL/submissions
+        endpoints expect, so the value drops straight into `company_facts` etc.
+        Cached like any other fetch — a second call issues zero network.
+        """
+        raw = self.get_json(self.TICKERS_URL)
+        rows = raw.values() if isinstance(raw, dict) else raw
+        out = {}
+        for row in rows:
+            tick = (row.get("ticker") or "").strip().upper()
+            if tick:
+                out[tick] = cik10(row["cik_str"])
+        return out
+
+    def ticker_to_cik(self, ticker):
+        """Resolve a ticker to its CIK10, case-insensitively.
+
+        Raises `EdgarLookupError` (not None) for an unknown ticker so a typo
+        surfaces here rather than as a 404 on a malformed CIK URL downstream.
+        """
+        key = (ticker or "").strip().upper()
+        cik = self.company_tickers().get(key)
+        if cik is None:
+            raise EdgarLookupError(f"ticker {ticker!r} not found in {self.TICKERS_URL}")
+        return cik
 
     # -- XBRL --------------------------------------------------------------
     def company_facts(self, cik):
