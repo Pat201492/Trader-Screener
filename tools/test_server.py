@@ -802,23 +802,23 @@ for _var in ("SCRUBBER_SELF_CONSISTENCY", "SCRUBBER_SHADOW_EXTERNAL"):
     os.environ.pop(_var, None)
 
 check("both switches are off with no params and no env",
-      server.accuracy_switches({}) == (1, False))
+      server.accuracy_switches({}) == (1, False, False))
 check("self-consistency comes from params",
-      server.accuracy_switches({"self_consistency": 2}) == (2, False))
+      server.accuracy_switches({"self_consistency": 2}) == (2, False, False))
 check("shadow comes from params",
-      server.accuracy_switches({"shadow_external": True}) == (1, True))
+      server.accuracy_switches({"shadow_external": True}) == (1, True, False))
 
 os.environ["SCRUBBER_SELF_CONSISTENCY"] = "3"
 os.environ["SCRUBBER_SHADOW_EXTERNAL"] = "1"
 check("the environment supplies defaults, so --self-consistency reaches a run",
-      server.accuracy_switches({}) == (3, True))
+      server.accuracy_switches({}) == (3, True, False))
 check("an explicit param still overrides the environment",
-      server.accuracy_switches({"self_consistency": 1}) == (1, True))
+      server.accuracy_switches({"self_consistency": 1}) == (1, True, False))
 check("...in both directions",
-      server.accuracy_switches({"shadow_external": False}) == (3, False))
+      server.accuracy_switches({"shadow_external": False}) == (3, False, False))
 os.environ["SCRUBBER_SELF_CONSISTENCY"] = "not a number"
 check("a junk env value falls back to off rather than raising",
-      server.accuracy_switches({}) == (1, True))
+      server.accuracy_switches({}) == (1, True, False))
 os.environ["SCRUBBER_SELF_CONSISTENCY"] = "99"
 check("sampling is capped -- 99 passes per field is not a setting anyone wants",
       server.accuracy_switches({})[0] == 5)
@@ -827,6 +827,17 @@ check("and floored at 1, since zero samples is no extraction at all",
       server.accuracy_switches({})[0] == 1)
 for _var in ("SCRUBBER_SELF_CONSISTENCY", "SCRUBBER_SHADOW_EXTERNAL"):
     os.environ.pop(_var, None)
+
+check("candidate-select is off with no params and no env",
+      server.accuracy_switches({})[2] is False)
+check("candidate-select comes from params",
+      server.accuracy_switches({"candidate_select": True})[2] is True)
+os.environ["SCRUBBER_CANDIDATE_SELECT"] = "1"
+check("candidate-select comes from the environment too",
+      server.accuracy_switches({})[2] is True)
+check("an explicit param still overrides it",
+      server.accuracy_switches({"candidate_select": False})[2] is False)
+os.environ.pop("SCRUBBER_CANDIDATE_SELECT", None)
 
 # The switches have to actually reach the ladder, not just be parsed.
 import inspect as _inspect
@@ -843,6 +854,11 @@ check("it passes the shadow flag to the ladder",
       "shadow_external=bool(shadow_external)" in _src)
 check("and records which setting a run used, so a comparison is attributable",
       "self-consistency:" in _src)
+check("candidate-select reaches the ladder too",
+      "candidate_select=bool(candidate_select)" in _src)
+check("scrubber_run accepts it, defaulted off",
+      "candidate_select" in _sig.parameters
+      and _sig.parameters["candidate_select"].default is False)
 
 # --------------------------------------------------------------------------- #
 section("issuer fallback -- a run from a selection still knows whose filing it is")

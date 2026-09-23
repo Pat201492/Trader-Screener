@@ -381,7 +381,7 @@ def meta_issuer(targets):
 
 
 def scrubber_run(run_id, targets, fields, home, self_consistency=1,
-                 shadow_external=False):
+                 shadow_external=False, candidate_select=False):
     """expand -> reduce -> extraction ladder -> local store, over a caller-chosen
     list of filings.
 
@@ -444,12 +444,22 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
     # shadow_external asks the model for a field the EX-107 exhibit already
     # answered and records whether it agreed (#164). One field of 33, but the
     # only place in this system where model output can be scored against truth.
+    #
+    # candidate_select (#177/#178) enumerates the plausible values in code first
+    # and asks the model for an INDEX instead of a figure, so a value it returns
+    # is one the filing states. It was built, tested and unreachable: #178 owned
+    # the rung and #179 owned the store contract, and no issue owned letting a
+    # run switch it on.
     samples = max(1, int(self_consistency))
     ladder = ExtractionLadder(
         spec, local_client=OllamaClient(OllamaConfig.from_env({})),
         claude_client=None, claude_enabled=False, exemplars=vstore,
         self_consistency_samples=samples,
-        shadow_external=bool(shadow_external))
+        shadow_external=bool(shadow_external),
+        candidate_select=bool(candidate_select))
+    if candidate_select:
+        RUNS.log(run_id, "candidate-select ON -- the model picks from values "
+                         "located in the filing rather than producing its own")
     RUNS.log(run_id, "self-consistency: %d sample(s)%s"
                      % (samples, " -- disagreement escalates" if samples > 1
                         else " -- gate signal inert at 1"))
@@ -801,7 +811,12 @@ def accuracy_switches(params):
     if shadow is None:
         shadow = os.environ.get("SCRUBBER_SHADOW_EXTERNAL", "").strip().lower() \
             in ("1", "true", "yes", "on")
-    return samples, bool(shadow)
+
+    cands = params.get("candidate_select")
+    if cands is None:
+        cands = os.environ.get("SCRUBBER_CANDIDATE_SELECT", "").strip().lower() \
+            in ("1", "true", "yes", "on")
+    return samples, bool(shadow), bool(cands)
 
 
 def start_scrubber_run(params):
@@ -810,17 +825,19 @@ def start_scrubber_run(params):
     targets, provenance = resolve_targets(params)
     if not targets:
         raise ValueError("nothing to extract -- the query returned no filings")
-    samples, shadow = accuracy_switches(params)
+    samples, shadow, cands = accuracy_switches(params)
 
     run_id = RUNS.create("edgar-scrubber", {**provenance, "fields": fields,
                                              "limit": len(targets),
                                              "self_consistency": samples,
-                                             "shadow_external": shadow})
+                                             "shadow_external": shadow,
+                                             "candidate_select": cands})
 
     def worker():
         try:
             scrubber_run(run_id, targets, fields, home,
-                         self_consistency=samples, shadow_external=shadow)
+                         self_consistency=samples, shadow_external=shadow,
+                         candidate_select=cands)
         except Exception as exc:
             RUNS.update(run_id, status="error", finished_at=utcnow(),
                         error=f"{type(exc).__name__}: {exc}")
@@ -2572,6 +2589,10 @@ def main():
     ap.add_argument("--shadow-external", action="store_true",
                     help="also ask the model for fields the EX-107 exhibit "
                          "already answered, and record whether it agreed (#164)")
+    ap.add_argument("--candidate-select", action="store_true",
+                    help="enumerate the plausible values in code and ask the "
+                         "model for an INDEX, so a returned value is one the "
+                         "filing states (#177/#178)")
     args = ap.parse_args()
 
     # argparse -> env, which is where accuracy_switches() reads its defaults, so
@@ -2580,6 +2601,8 @@ def main():
         os.environ["SCRUBBER_SELF_CONSISTENCY"] = str(max(1, args.self_consistency))
     if args.shadow_external:
         os.environ["SCRUBBER_SHADOW_EXTERNAL"] = "1"
+    if args.candidate_select:
+        os.environ["SCRUBBER_CANDIDATE_SELECT"] = "1"
 
     # The Windows console is cp1252 by default; a non-ASCII byte in a startup
     # banner should never be what stops a server from running.
@@ -2600,10 +2623,11 @@ def main():
     print(f"  EDGAR_USER_AGENT  : {'set' if h['edgar_user_agent'] else 'MISSING (live runs will fail)'}")
     print(f"  local store       : {h['store']['path']} "
           f"({'exists' if h['store']['exists'] else 'not created yet'})")
-    _s, _sh = accuracy_switches({})
+    _s, _sh, _cs = accuracy_switches({})
     print(f"  self-consistency  : {_s} sample(s)"
           f"{'' if _s > 1 else '  (off -- gate signal inert at 1)'}")
     print(f"  external shadow   : {'ON' if _sh else 'off'}")
+    print(f"  candidate-select  : {'ON' if _cs else 'off'}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
