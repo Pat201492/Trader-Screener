@@ -60,10 +60,12 @@ import re
 from dataclasses import asdict, dataclass, field as _dc_field
 
 try:  # package import: tools.edgar_scrubber.extraction_ladder
+    from .candidates import candidates_for
     from .field_spec import Flag
     from .normalize import parse_date_prose as _parse_date_prose
     from .output_store import FieldValue
 except ImportError:  # standalone: python tools/edgar_scrubber/extraction_ladder.py
+    from candidates import candidates_for
     from field_spec import Flag
     from normalize import parse_date_prose as _parse_date_prose
     from output_store import FieldValue
@@ -344,6 +346,93 @@ def build_messages(field_def, text, *, table_context=None, exemplars=None):
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": "\n\n".join(parts)},
     ]
+
+
+# ── Candidate-SELECT rung (#178) ─────────────────────────────────────────────
+#
+# The free-form rungs above ask the model to PRODUCE a value; measured on run
+# #0018 that let `estimated_value_per_1000` come back as 950 -- the midpoint of
+# its bounds -- on 21 of 25 filings, a number printed nowhere in any of them.
+# This rung asks the model to CHOOSE instead: `candidates.candidates_for`
+# enumerates every value the document actually states (with its label and its
+# offsets, deterministically, no model), and the model returns an INDEX into
+# that list, never a value of its own. The chosen value is read straight out of
+# the candidate, so every stored value is one the filing states and carries a
+# span by construction. `null` means "none of these"; an index outside the list
+# is treated as `null`, never clamped -- clamping would invent a choice the
+# model did not make. Model-produced text is never parsed into a value here: the
+# only thing read off the response is the integer index.
+
+#: A candidate list is a couple of hundred tokens against the thousands the
+#: free-form SOURCE TEXT costs (#177), so the whole section slice is deliberately
+#: absent from this prompt -- the model is told to pick only from the list.
+CANDIDATE_SYSTEM_PROMPT = (
+    "You are an SEC EDGAR extraction engine. Below is a numbered list of every "
+    "value the source document states that could be the requested field, each "
+    "with the label it appears under. Choose the ONE whose label and printed "
+    "form match the requested field and return its index. Return index null if "
+    "NONE of them is the field -- never invent a value, and never return an "
+    "index that is not in the list. `confidence` is how sure you are, 0 to 1."
+)
+
+
+def build_candidate_lines(candidates):
+    """One line per candidate: `[i] Label: printed form` (label omitted when the
+    candidate carries none). This is what the model chooses from -- the printed
+    form, never a value the model composes."""
+    lines = []
+    for i, c in enumerate(candidates):
+        label = c.get("label") or ""
+        prefix = f"{label}: " if label else ""
+        lines.append(f"[{i}] {prefix}{c['raw']}")
+    return "\n".join(lines)
+
+
+def build_candidate_messages(field_def, candidates, *, exemplars=None):
+    """Field spec + exemplars (the same static prefix the free-form path uses),
+    then the candidate LIST last -- and crucially NOT the section text, which is
+    what the model would otherwise generate a number out of (#178)."""
+    parts = list(_static_user_parts(field_def, exemplars))
+    parts.append("CANDIDATES (choose exactly one by index, or null if none "
+                 "is the field):\n" + build_candidate_lines(candidates))
+    return [
+        {"role": "system", "content": CANDIDATE_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n\n".join(parts)},
+    ]
+
+
+def build_candidate_schema():
+    """Constrained-decode schema for the SELECT rung: an integer index (or null
+    for "none of these") plus a confidence. There is no value slot -- the value
+    is read from the chosen candidate, never from the model (#178)."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "edgar_candidate_select",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": ["integer", "null"]},
+                    WIRE_CONF_KEY: {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                },
+                "required": ["index", WIRE_CONF_KEY],
+            },
+            "strict": True,
+        },
+    }
+
+
+def parse_candidate_response(payload):
+    """SELECT-rung payload -> `(index, confidence)`. `index` is an int or None;
+    anything that is not a plain int (null, a bool, a float, a string) becomes
+    None so the caller yields no value rather than a coerced one (#178). The
+    caller, not this parser, range-checks the index against the list length."""
+    if not isinstance(payload, dict):
+        return None, None
+    index = payload.get("index")
+    if isinstance(index, bool) or not isinstance(index, int):
+        index = None
+    return index, coerce_confidence(payload.get(WIRE_CONF_KEY))
 
 
 #: A `c` that was present but is not a probability. Distinct from None ("the
@@ -746,6 +835,11 @@ class LogEntry:
     gate: dict
     provenance: dict
     shadow: dict = None           # ShadowComparison when rule is in shadow window
+    # Which model path produced the value (#178): "candidate_select" when the
+    # model chose an index into an enumerated list, "free_form" when it produced
+    # the value itself. Recorded so a run can be compared against one that used
+    # the other path.
+    path: str = "free_form"
 
     def as_dict(self):
         d = asdict(self)
@@ -865,6 +959,9 @@ class LadderResult:
     flags: list           # of field_spec.Flag
     escalated: bool = False
     gated: bool = False
+    # Which model path produced the value (#178): "candidate_select" or
+    # "free_form". "rule"/"xbrl" rungs leave it "free_form" -- no model ran.
+    path: str = "free_form"
     # The value BEFORE date normalization, i.e. the form the filing prints.
     # A span is earned by finding the value's own text in the document, so the
     # search has to use this and not the ISO form: the filing says
@@ -911,7 +1008,8 @@ class ExtractionLadder:
                  claude_client=None, claude_model=None, claude_enabled=True,
                  confidence_floor=0.35, self_consistency_samples=1,
                  prompt_version="v1", exemplar_set_version=None,
-                 max_tokens=512, log=None, shadow_external=False):
+                 max_tokens=512, log=None, shadow_external=False,
+                 candidate_select=False):
         self.spec = spec
         self.rules = rules
         self.exemplars = exemplars
@@ -928,6 +1026,10 @@ class ExtractionLadder:
         # record whether it agrees (#164). Off by default: it spends tokens on a
         # field that already resolves exact, and changes no stored value.
         self.shadow_external = shadow_external
+        # Off by default: this is a new rung being measured against the
+        # free-form path (#178), and a field with no candidates falls back to
+        # free-form regardless, so nothing regresses when it is off.
+        self.candidate_select = candidate_select
         self.prompt_version = prompt_version
         self.exemplar_set_version = exemplar_set_version
         self.max_tokens = max_tokens
@@ -1026,6 +1128,29 @@ class ExtractionLadder:
             rule_span=None, model_span=span, agreement=agree,
             note=None if agree else "exhibit=%r vs model=%r" % (external, value))
 
+    def _select_via_candidates(self, client, model, field_def, candidates, *,
+                                exemplars=None):
+        """Run the candidate-SELECT rung against one client (#178).
+
+        Returns `(value, span, raw, confidence, tokens_in, tokens_out,
+        retries)`. The model returns an index; the value/span/raw are read out
+        of `candidates[index]`, never parsed from model text. An index that is
+        null OR outside the list yields `(None, None, None, ...)` -- no value,
+        not a clamped or invented one.
+        """
+        schema = build_candidate_schema()
+        messages = build_candidate_messages(field_def, candidates, exemplars=exemplars)
+        payload, usage, retries = chat_json(client, model, messages, schema,
+                                             temperature=0.0, max_tokens=self.max_tokens)
+        index, conf = parse_candidate_response(payload)
+        tokens_in = usage.get("prompt_tokens") or 0
+        tokens_out = usage.get("completion_tokens") or 0
+        if index is None or not (0 <= index < len(candidates)):
+            return None, None, None, conf, tokens_in, tokens_out, retries
+        chosen = candidates[index]
+        return (chosen["value"], chosen.get("span"), chosen.get("raw"),
+                conf, tokens_in, tokens_out, retries)
+
     def extract(self, field_name, *, text, issuer=None, ex107=None,
                 accession=None, document=None, table_context=None):
         f = self.spec.field(field_name)
@@ -1098,10 +1223,23 @@ class ExtractionLadder:
         exemplars, ex_version = _lookup_exemplars(self.exemplars, form, issuer, field_name)
         exemplar_set = ex_version if ex_version is not None else self.exemplar_set_version
         self._check_static_prefix(f, exemplars, ex_version, issuer, field_name)
-        value, span, conf, samples, tin, tout, retries = _extract_via_model(
-            self.local_client, self.local_model, f, text, table_context=table_context,
-            exemplars=exemplars, n_samples=self.self_consistency_samples,
-            max_tokens=self.max_tokens)
+
+        # Candidate-SELECT (#178) when it is on AND the deterministic enumerator
+        # found values in the text; otherwise the free-form path, byte-for-byte
+        # unchanged, so a field with no candidates never regresses.
+        candidates = candidates_for(f, text) if self.candidate_select else []
+        if candidates:
+            path = "candidate_select"
+            samples = None                 # no self-consistency on an index pick
+            value, span, raw_selected, conf, tin, tout, retries = self._select_via_candidates(
+                self.local_client, self.local_model, f, candidates, exemplars=exemplars)
+        else:
+            path = "free_form"
+            raw_selected = None
+            value, span, conf, samples, tin, tout, retries = _extract_via_model(
+                self.local_client, self.local_model, f, text, table_context=table_context,
+                exemplars=exemplars, n_samples=self.self_consistency_samples,
+                max_tokens=self.max_tokens)
         self.log.malformed_retries += retries
 
         gate = evaluate_gate(f, value, span, ex107=ex107, spec=self.spec, samples=samples,
@@ -1114,13 +1252,21 @@ class ExtractionLadder:
                                exemplar_set=exemplar_set,
                                tokens_in=tin, tokens_out=tout)
             return self._finish(f, value, span, "local", prov, conf, gate, ex107,
-                                 accession=accession, document=document)
+                                 accession=accession, document=document,
+                                 path=path, raw_value=raw_selected)
 
-        # Rung 4: Claude, only for the gated remainder.
+        # Rung 4: Claude, only for the gated remainder. It uses the same path the
+        # local rung did -- the SELECT rung when candidates exist -- so a value is
+        # never parsed out of model text on this path at either rung.
         if self.claude_available:
-            c_value, c_span, c_conf, _samples, ctin, ctout, cretries = _extract_via_model(
-                self.claude_client, self.claude_model, f, text, table_context=table_context,
-                exemplars=exemplars, n_samples=1, max_tokens=self.max_tokens)
+            if candidates:
+                c_value, c_span, c_raw, c_conf, ctin, ctout, cretries = self._select_via_candidates(
+                    self.claude_client, self.claude_model, f, candidates, exemplars=exemplars)
+            else:
+                c_value, c_span, c_conf, _samples, ctin, ctout, cretries = _extract_via_model(
+                    self.claude_client, self.claude_model, f, text, table_context=table_context,
+                    exemplars=exemplars, n_samples=1, max_tokens=self.max_tokens)
+                c_raw = None
             self.log.malformed_retries += cretries
             cost = estimate_cost(self.claude_model, ctin, ctout)
             prov = Provenance(rung="claude", document=document, span=c_span, model=self.claude_model,
@@ -1128,14 +1274,16 @@ class ExtractionLadder:
                                exemplar_set=exemplar_set,
                                tokens_in=ctin, tokens_out=ctout, cost_usd=cost)
             return self._finish(f, c_value, c_span, "claude", prov, c_conf, gate, ex107,
-                                 accession=accession, document=document, escalated=True)
+                                 accession=accession, document=document, escalated=True,
+                                 path=path, raw_value=c_raw)
 
         # Local-only mode: flag the gate failure, keep going -- never raise.
         prov = Provenance(rung="local", document=document, span=span, model=self.local_model,
                            prompt_version=self.prompt_version,
                            exemplar_set=exemplar_set, tokens_in=tin, tokens_out=tout)
         return self._finish(f, value, span, "local", prov, conf, gate, ex107,
-                             accession=accession, document=document, gated=True)
+                             accession=accession, document=document, gated=True,
+                             path=path, raw_value=raw_selected)
 
     def extract_document(self, field_names, *, text, issuer=None, ex107=None,
                           accession=None, document=None, table_context=None):
@@ -1146,10 +1294,18 @@ class ExtractionLadder:
         ]
 
     def _finish(self, f, value, span, rung, provenance, confidence, gate, ex107, *,
-                accession, document, escalated=False, gated=False, shadow=None):
+                accession, document, escalated=False, gated=False, shadow=None,
+                path="free_form", raw_value=None):
         """Finish extraction: apply field specs, record in log, return result.
 
         shadow: ShadowComparison when rule in shadow mode (comparing rule vs model).
+        path: which model path produced the value ("candidate_select"|"free_form"),
+            recorded on the log entry (#178).
+        raw_value: the printed form to keep as `LadderResult.raw_value`. The
+            candidate-SELECT path passes the chosen candidate's printed string
+            (so a date's prose form survives for locating, while `value` holds
+            the numeric/ISO form); the free-form path leaves it None and the
+            printed form defaults to the value itself, exactly as before.
         """
         # The gate has already had its say on an unreadable confidence; what
         # lands in the store must be a probability or nothing, so `Results`
@@ -1166,7 +1322,8 @@ class ExtractionLadder:
         # Without this every date tripped type_mismatch and was unusable: not
         # comparable, not sortable, and invisible to the date_after cross-check
         # against pricing_date, which therefore never ran either.
-        raw_value = value
+        if raw_value is None:
+            raw_value = value
         value, date_flags = _normalize_dateish(f, value)
         flags_extra = list(flags_extra) + date_flags
         flags = self.spec.check_value(f.name, value, ex107=ex107) if value is not None else []
@@ -1180,14 +1337,14 @@ class ExtractionLadder:
         result = LadderResult(field=f.name, value=value, unit=f.unit, span=span,
                                confidence=confidence, rung=rung,
                                provenance=provenance.as_string(), flags=flags,
-                               escalated=escalated, gated=gated,
+                               escalated=escalated, gated=gated, path=path,
                                raw_value=raw_value)
         self.log.record(LogEntry(
             accession=accession, document=document, field=f.name, rung=rung,
             value=value, unit=f.unit, span=span, confidence=confidence,
             flags=[fl.as_dict() for fl in flags], escalated=escalated, gated=gated,
             gate=gate.as_dict() if gate else None, provenance=provenance.as_dict(),
-            shadow=shadow,
+            shadow=shadow, path=path,
         ))
         return result
 
