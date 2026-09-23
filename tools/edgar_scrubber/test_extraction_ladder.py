@@ -378,6 +378,18 @@ def test_prose_dates_normalize_and_wake_the_cross_check():
     check("the conversion is recorded rather than silent",
           "date_normalized" in codes)
 
+    # Regression, run #0019: normalization and the span gate each worked alone
+    # and cancelled each other in sequence. The ladder converted "August 31,
+    # 2028" to ISO, then the runner searched the filing for "2028-08-31" -- which
+    # a filing never prints -- found no span, and withheld all 25 dates. The
+    # printed form has to survive alongside the stored one.
+    check("the printed form is kept for locating",
+          r.raw_value == "August 31, 2028" and r.value == "2028-08-31")
+    check("a locator using raw_value finds it in the document",
+          DATE_DOC.find(str(r.raw_value)) >= 0)
+    check("...and the ISO form is genuinely absent from the document, which is "
+          "why locating on it failed", DATE_DOC.find(str(r.value)) == -1)
+
     # An already-ISO value converts to itself and earns no flag: nothing happened.
     local2 = FakeChatClient([(wire_body(MAT, "2028-08-31",
                                          span=span_of("August 31, 2028", DATE_DOC),

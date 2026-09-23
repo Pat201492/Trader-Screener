@@ -580,8 +580,14 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
                             if kept else None)
                     span_method = "per-element" if kept else None
                 else:
+                    # Locate the value as the FILING prints it, not as we store
+                    # it. A date is normalized to ISO before it gets here, and
+                    # searching a filing for "2026-08-31" never matches because
+                    # the document says "August 31, 2026" -- which withheld every
+                    # date on run #0019.
+                    locate_target = p.raw_value if p.raw_value is not None else p.value
                     span, span_method = locate_value(
-                        nd.text, p.value, p.source_span,
+                        nd.text, locate_target, p.source_span,
                         near=anchor_positions(low_text, fdef))
                 if vocab is False and p.value not in (None, "", []):
                     # The filing never uses this field's vocabulary. A value
@@ -637,7 +643,8 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
                 # finished document lists only survivors, so a value the run
                 # produced and then threw away leaves no trace anywhere else.
                 empty = p.value in (None, "", [])
-                withheld = "value_withheld_no_span" in flags
+                withheld = ("value_withheld_no_span" in flags
+                            or "value_withheld_out_of_bounds" in flags)
                 dropped = ("field_absent_from_document" in flags
                            or "span_unlocatable" in flags
                            or "element_span_unlocatable" in flags
@@ -1066,7 +1073,28 @@ def withhold_unsupported_value(fdef, value, span, flag_codes):
     """
     if fdef is None or getattr(fdef, "type", None) not in VALUE_TYPED:
         return value, None
-    if value in (None, "", []) or span is not None:
+    if value in (None, "", []):
+        return value, None
+
+    # A value the spec's own bounds reject is not saved by having a span.
+    # Measured on run #0019: with the bounds no longer stated in the prompt,
+    # estimated_value_per_1000 came back 0 on 20 of 25 filings -- and 0 HAS a
+    # span, because a zero digit appears all over a filing. So the span gate
+    # passed it and only out_of_bounds objected, while the value was stored
+    # anyway. The spec declares 900-1000; a 0 is wrong by the spec's own
+    # statement, and storing a figure we already know is wrong is the same
+    # mistake as storing one nothing points at.
+    if "out_of_bounds" in flag_codes:
+        return None, {
+            "field": fdef.name, "code": "value_withheld_out_of_bounds",
+            "severity": "warn",
+            "message": ("withheld %r: outside the range this field declares, so "
+                        "it is wrong by the spec's own statement. A span does "
+                        "not rescue it -- a bare digit locates anywhere (#163)."
+                        % (value if not isinstance(value, str) else value[:80])),
+        }
+
+    if span is not None:
         return value, None
     if "field_absent_from_document" in flag_codes:
         return None, None          # already explained, and correctly so

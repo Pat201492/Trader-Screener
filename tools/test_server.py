@@ -925,6 +925,24 @@ check("an absent value is left alone, not re-flagged",
 check("an empty string likewise",
       server.withhold_unsupported_value(_EV, "", None, []) == ("", None))
 
+# Regression, run #0019: a value the spec's own bounds reject was stored anyway,
+# because it had a span. estimated_value_per_1000 came back 0 on 20 of 25
+# filings, and a zero digit locates somewhere in every filing, so the span gate
+# passed it and only out_of_bounds objected.
+_v, _f = server.withhold_unsupported_value(_EV, 0, _SPAN, ["out_of_bounds"])
+check("a spanned figure the bounds reject is still withheld", _v is None)
+check("...and says so as its own code",
+      _f is not None and _f["code"] == "value_withheld_out_of_bounds")
+check("the reason names the value", "0" in _f["message"])
+check("an in-bounds spanned value is untouched by that rule",
+      server.withhold_unsupported_value(_EV, 983.0, _SPAN, []) == (983.0, None))
+check("out-of-bounds outranks having no span, and reports the bounds reason",
+      server.withhold_unsupported_value(_EV, 0, None, ["out_of_bounds"])[1]["code"]
+      == "value_withheld_out_of_bounds")
+check("a string field is still exempt from the bounds rule",
+      server.withhold_unsupported_value(_ISSUER, "Citigroup", _SPAN,
+                                        ["out_of_bounds"]) == ("Citigroup", None))
+
 # The types the gate covers, stated once so a spec change is visible here.
 check("the gate covers number, percent and date",
       server.VALUE_TYPED == {"number", "percent", "date"})
