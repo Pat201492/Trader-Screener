@@ -604,6 +604,30 @@ class ValidationStore:
                 source_span=span, anchor=r["anchor"], note=r["note"]))
         return out
 
+    def validated_documents(self, session_id):
+        """Every completed document in this session, in the order it was
+        validated -- the sequence a compounding read (docs 1-10 vs 11-20)
+        walks. `validated_at` is NULL for a session run without a clock, so
+        the accession is the stable tiebreak that keeps the order deterministic
+        either way."""
+        rows = self._conn.execute(
+            "SELECT accession, document, issuer, validated_at FROM validated_docs "
+            "WHERE session_id = ? ORDER BY validated_at IS NULL, validated_at, accession",
+            (session_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def session_verdict_rows(self, session_id):
+        """Every verdict in this session with its `created_at` timestamp -- the
+        raw input a run report reads for per-field accept rates and per-document
+        wall-clock. `created_at` is NULL when the session ran without a clock."""
+        rows = self._conn.execute(
+            "SELECT accession, document, field, verdict, created_at FROM verdicts "
+            "WHERE session_id = ? ORDER BY accession, document, created_at",
+            (session_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def anchor_verdicts(self, issuer, field):
         """Every (accession, anchor, span) an accept/correct verdict recorded
         for one (issuer, field), across every session -- the raw input to
