@@ -1,0 +1,17 @@
+{
+  "id": "424b2-multi-issuer-2025-pilot",
+  "note": "Issue #165 pilot. Spread across 6 issuers, not concentrated -- the store is 96/101 JPMorgan, so the first out-of-distribution test (Citigroup) scored 2/9. 424B2 templates are issuer-specific and exemplars are keyed by issuer, so a JPM-only gold set teaches nothing about Citi. Verify each CIK on efts before a real run; a wrong CIK just returns no filings for that issuer.",
+  "q": "\"contingent coupon\"",
+  "forms": ["424B2"],
+  "startdt": "2025-01-01",
+  "enddt": "2025-12-31",
+  "ciks": [
+    "0000019617",
+    "0000831001",
+    "0000886982",
+    "0000895421",
+    "0000070858",
+    "0000072971"
+  ],
+  "excludeCiks": []
+}
