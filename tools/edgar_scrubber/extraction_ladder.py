@@ -865,6 +865,14 @@ class LadderResult:
     flags: list           # of field_spec.Flag
     escalated: bool = False
     gated: bool = False
+    # The value BEFORE date normalization, i.e. the form the filing prints.
+    # A span is earned by finding the value's own text in the document, so the
+    # search has to use this and not the ISO form: the filing says
+    # "August 28, 2026" and never "2026-08-28", so locating the normalized value
+    # fails on every date in every filing. Measured on run #0019, that withheld
+    # all 25 maturity_date values -- #166's normalization and #163's span gate
+    # each worked alone and cancelled each other in sequence.
+    raw_value: object = None
 
     def to_field_value(self):
         """Bridge into output_store (#109) -- the same record the store wants."""
@@ -1158,6 +1166,7 @@ class ExtractionLadder:
         # Without this every date tripped type_mismatch and was unusable: not
         # comparable, not sortable, and invisible to the date_after cross-check
         # against pricing_date, which therefore never ran either.
+        raw_value = value
         value, date_flags = _normalize_dateish(f, value)
         flags_extra = list(flags_extra) + date_flags
         flags = self.spec.check_value(f.name, value, ex107=ex107) if value is not None else []
@@ -1171,7 +1180,8 @@ class ExtractionLadder:
         result = LadderResult(field=f.name, value=value, unit=f.unit, span=span,
                                confidence=confidence, rung=rung,
                                provenance=provenance.as_string(), flags=flags,
-                               escalated=escalated, gated=gated)
+                               escalated=escalated, gated=gated,
+                               raw_value=raw_value)
         self.log.record(LogEntry(
             accession=accession, document=document, field=f.name, rung=rung,
             value=value, unit=f.unit, span=span, confidence=confidence,

@@ -147,6 +147,10 @@ class FieldProposal:
     rung: str = None
     unit: str = None
     flags: list = _dc_field(default_factory=list)   # list of dicts (Flag.as_dict())
+    # The value as the filing prints it, before date normalization. A span is
+    # earned by locating the value's own text, so the search must use this form:
+    # the document says "August 28, 2026" and never "2026-08-28".
+    raw_value: object = None
 
 
 @dataclass
@@ -1016,7 +1020,8 @@ class LadderExtractor:
                 field=name, value=result.value, source_span=source_span,
                 provenance=result.provenance, confidence=result.confidence,
                 rung=result.rung, unit=result.unit,
-                flags=[f.as_dict() for f in result.flags]))
+                flags=[f.as_dict() for f in result.flags],
+                raw_value=result.raw_value))
         return proposals
 
 
