@@ -541,6 +541,21 @@ class EdgarClient:
             f"https://www.sec.gov/Archives/edgar/data/{cik_bare(cik)}/{acc}/index.json"
         )
 
+    def filing_index_page(self, cik, accession):
+        """The HTML index page (``{accession}-index.html``) for one accession.
+
+        Unlike ``index.json``, whose per-document ``type`` is the directory-icon
+        filename, this page's Type column carries the AUTHORITATIVE exhibit type
+        (``EX-99.1``, ``EX-99.2`` ...). It is the small fetch -- the alternative
+        authoritative source, the full submission ``.txt``, is the entire filing
+        concatenated. Used to resolve an EX-99 exhibit from its declared type
+        rather than guessing from its filename.
+        """
+        acc = accession.replace("-", "")
+        return self.get_text(
+            f"https://www.sec.gov/Archives/edgar/data/{cik_bare(cik)}/{acc}/{accession}-index.html"
+        )
+
     def archive_document(self, cik, accession, filename):
         """Fetch one document's raw bytes out of an accession's Archives folder."""
         acc = accession.replace("-", "")
