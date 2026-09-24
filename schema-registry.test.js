@@ -147,6 +147,16 @@ test('ToolManifestValidator: graduatedTo null accepted (not yet graduated)', () 
   assert(result.valid, `Expected valid with graduatedTo: null, got errors: ${result.errors.join('; ')}`);
 });
 
+test('EDGAR Scrubber tool name does not mention 424B2 population (issue #226 regression guard)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const manifestPath = path.join(__dirname, 'web-dashboard', 'tools-manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+  const edgarTool = manifest.find(t => t.id === 'edgar-scrubber');
+  assert(edgarTool, 'Expected edgar-scrubber tool in manifest');
+  assert(!edgarTool.name.includes('424B2'), `EDGAR Scrubber tool name should not mention 424B2 population. Got: "${edgarTool.name}"`);
+});
+
 // ── Research Project Tests ────────────────────────────────────────────
 
 test('ResearchProjectValidator: valid project', () => {
