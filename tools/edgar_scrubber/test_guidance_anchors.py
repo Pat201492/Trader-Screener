@@ -21,6 +21,7 @@ Run:  python tools/edgar_scrubber/test_guidance_anchors.py
 from pathlib import Path
 
 import guidance_anchors as ga
+import normalize
 
 FIX = Path(__file__).resolve().parent / "fixtures"
 
@@ -39,6 +40,12 @@ def section(title):
 
 def load(name):
     return (FIX / name).read_text(encoding="utf-8")
+
+
+def load_normalized(name):
+    """Real committed release fixtures are raw EX-99.1 HTML; `find_candidates`
+    runs on the NORMALIZED text, exactly as the live chain feeds it."""
+    return normalize.normalize_html((FIX / name).read_text(encoding="utf-8")).text
 
 
 def spans_slice_to_sentence(text, cands):
@@ -104,6 +111,93 @@ check("empty string returns zero candidates", ga.find_candidates("").count == 0)
 check("whitespace-only returns zero candidates", ga.find_candidates("   \n\n  ").count == 0)
 check("a lone number sentence with no anchor is not a candidate",
       ga.find_candidates("Net income rose to $5 million.").count == 0)
+
+# --------------------------------------------------------------------------- #
+section("#225: 'Outlook' section anchor and passive-voice sentence anchors")
+# --------------------------------------------------------------------------- #
+check("'Outlook' is a recognised section anchor",
+      ga._section_of_heading("Outlook") == "outlook")
+check("'Financial Outlook' is a recognised section anchor",
+      ga._section_of_heading("Financial Outlook") == "outlook")
+check("'Guidance' remains a recognised section anchor",
+      ga._section_of_heading("Full-Year Guidance") == "guidance_heading")
+check("passive 'is expected to be' is a recognised sentence anchor",
+      ga.SENTENCE_ANCHORS["expected_to_be"].search("Revenue is expected to be $1 billion"))
+check("passive 'are expected to be' is a recognised sentence anchor",
+      ga.SENTENCE_ANCHORS["expected_to_be"].search("margins are expected to be 74%"))
+# A passive sentence with a number, no heading in scope, is still a candidate.
+_passive = ("ACME CORP RESULTS\n\n"
+            "Revenue is expected to be between $4.10 and $4.30 for the full year.")
+check("a passive sentence alone carries a candidate with no section heading",
+      ga.find_candidates(_passive).count == 1)
+
+# --------------------------------------------------------------------------- #
+section("#225: point-estimate-with-tolerance converts to {low, high}")
+# --------------------------------------------------------------------------- #
+_tr = ga.tolerance_range("Revenue is expected to be $108.0 billion, plus or minus 2%.")
+check("'$108.0 billion plus or minus 2%' low is 105.84e9",
+      _tr is not None and abs(_tr["low"] - 105.84e9) < 1.0)
+check("'$108.0 billion plus or minus 2%' high is 110.16e9",
+      _tr is not None and abs(_tr["high"] - 110.16e9) < 1.0)
+
+_bp = ga.tolerance_range("gross margins are expected to be 74.0%, plus or minus 50 basis points.")
+check("'74.0% plus or minus 50 basis points' -> 73.5 to 74.5 (absolute pp)",
+      _bp is not None and _bp["low"] == 73.5 and _bp["high"] == 74.5)
+_pct = ga.tolerance_range("74.0%, plus or minus 50 percent")
+check("'74.0% plus or minus 50 percent' -> 37.0 to 111.0 (relative), NOT 73.5/74.5",
+      _pct is not None and _pct["low"] == 37.0 and _pct["high"] == 111.0
+      and _pct != _bp)
+check("prose with no tolerance phrasing yields None",
+      ga.tolerance_range("Revenue grew to $5 million.") is None)
+check("a tolerance sentence is a numeric candidate on its own",
+      "tolerance" in [n for n, p in ga.RANGE_PATTERNS.items()
+                      if p.search("$108.0 billion, plus or minus 2%")])
+
+# --------------------------------------------------------------------------- #
+section("#225: the three committed REAL fixtures -- CSCO / NVDA / AAPL")
+# --------------------------------------------------------------------------- #
+csco = ga.find_candidates(load_normalized("guidance_csco_20260812.txt"))
+nvda = ga.find_candidates(load_normalized("guidance_nvda_20260826.txt"))
+aapl = ga.find_candidates(load_normalized("guidance_aapl_20260730.txt"))
+
+check("CSCO fixture yields its six numeric-guidance candidates", csco.count == 6)
+check("CSCO 'Revenue: $18.0 billion - $18.2 billion' is a candidate",
+      any("$18.0 billion - $18.2 billion" in c["sentence"] for c in csco.candidates))
+check("CSCO GAAP EPS $1.08 to $1.10 is a candidate",
+      any("$1.08 to $1.10" in c["sentence"] for c in csco.candidates))
+
+check("NVDA fixture now yields at least one candidate (was zero)", nvda.count >= 1)
+check("NVDA candidate carries the $108.0 billion revenue outlook",
+      any("$108.0 billion" in c["sentence"] for c in nvda.candidates))
+check("NVDA revenue candidate converts to the 105.84e9-110.16e9 range",
+      any((tr := ga.tolerance_range(c["sentence"])) is not None
+          and abs(tr["low"] - 105.84e9) < 1.0 and abs(tr["high"] - 110.16e9) < 1.0
+          for c in nvda.candidates if "$108.0 billion" in c["sentence"]))
+
+check("AAPL fixture still yields zero (no numeric guidance)", aapl.count == 0)
+
+# Per-anchor hit counts across all three real fixtures, summed. Locked so a
+# future anchor change that silently drops coverage on real filings fails here.
+real_totals = {name: 0 for group in
+               (ga.SECTION_ANCHORS, ga.SENTENCE_ANCHORS, ga.RANGE_PATTERNS)
+               for name in group}
+for res_ in (csco, nvda, aapl):
+    for name, n in res_.anchor_hits.items():
+        real_totals[name] += n
+EXPECTED_REAL_TOTALS = {
+    "guidance_heading": 6,
+    "for_period": 2,
+    "dollar_range": 6,
+    "percent_range": 2,
+    "outlook": 2,
+    "expected_to_be": 2,
+    "tolerance": 2,
+}
+print("  per-anchor hit totals across CSCO/NVDA/AAPL:")
+for name in sorted(real_totals):
+    print(f"    {name:<22} {real_totals[name]}")
+check("per-anchor hit totals across the three real fixtures match the locked table",
+      {k: v for k, v in real_totals.items() if v} == EXPECTED_REAL_TOTALS)
 
 # --------------------------------------------------------------------------- #
 section("no model, no network")
