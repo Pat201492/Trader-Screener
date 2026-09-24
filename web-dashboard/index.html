@@ -3288,6 +3288,7 @@ function toggleAllHits(){
   renderHits();
 }
 
+let COVERAGE_TARGET=null;
 let RUN_POLL=null;
 async function extractSelected(){
   const picked=Array.from(SEARCH.selected).sort((a,b)=>a-b).map(i=>SEARCH.hits[i]);
@@ -3618,6 +3619,172 @@ function toolActions(t){
           'background:transparent;border:1px solid var(--border);color:var(--muted);cursor:not-allowed'));
   return `<div style="display:flex;gap:8px;margin-top:10px;align-items:center">${parts.join('')}</div>`;
 }
+// ------------------------------------------------------------ Tools, per tool
+// Each tool gets one tab carrying everything about THAT tool. The shared pieces
+// (manifest lookup, the badge row, the action buttons) are factored out here so
+// six tabs do not become six copies of a card.
+
+async function toolEntry(id){
+  const manifest=await loadManifest();
+  return manifest.find(t=>t.id===id)||null;
+}
+// The header every tool tab opens with: what it is, what state it is in, who
+// owns its output, and how stale its last run is.
+function toolHeader(t){
+  if(!t) return `<div class="err">This tool is not in tools-manifest.json.</div>`;
+  const lastRun=t.last_run?new Date(t.last_run).toLocaleDateString():'never';
+  return `<div class="card" style="margin-bottom:14px">
+    <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+      <div class="name" style="font-size:16px">${esc(t.name)}</div>
+      ${statusBadge(t.status)} ${ownershipBadge(t)}
+      <span style="font-size:11px;color:var(--muted)">${esc(t.source||'')}</span>
+    </div>
+    <div class="muted" style="font-size:12px;line-height:1.5;margin:8px 0">${esc(t.purpose||'')}</div>
+    <div class="muted" style="font-size:11px">Cadence: ${esc(t.refresh_cadence||'—')}
+      ${t.output_path?` · Output: <code>${esc(t.output_path)}</code>`:''}</div>
+    <div style="font-size:11px;margin-top:2px">Last run: <span class="muted">${lastRun}</span> · ${usageAge(t)}</div>
+    ${toolActions(t)}
+  </div>`;
+}
+function toolSection(title){
+  return `<div class="group-title">${esc(title)}</div>`;
+}
+
+// EDGAR Scrubber: run it, then its own stored results and its own coverage.
+// Those last two were already scrubber-specific functions living under generic
+// tab names.
+async function renderToolEdgarScrubber(){
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading the EDGAR scrubber…</div>';
+  stopPolling();
+  const t=await toolEntry('edgar-scrubber');
+  v.innerHTML=runnerBanner()+toolHeader(t)+
+    `<div id="toolPanel" style="display:none"></div>
+     <div id="tool_results"></div>
+     <div id="tool_coverage"></div>`;
+  await renderToolsResults('tool_results');
+  await renderToolsCoverage(undefined,'tool_coverage');
+}
+
+// Free Research: the two-step panel, and the briefs it has produced.
+async function renderToolFreeResearch(){
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading Free Research…</div>';
+  stopPolling();
+  const t=await toolEntry('free-research');
+  v.innerHTML=runnerBanner()+toolHeader(t)+`<div id="toolPanel" style="display:none"></div>`;
+}
+
+// A model tool is a pipeline field, not something you run: it has inputs, one
+// output field, and a validation posture. No run controls, so the tab says what
+// it is and what it depends on rather than pretending there is a button.
+async function renderToolModel(id){
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading…</div>';
+  stopPolling();
+  const t=await toolEntry(id);
+  let html=toolHeader(t);
+  if(t){
+    html+=toolSection('Inputs');
+    html+=(Array.isArray(t.inputs)&&t.inputs.length)
+      ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">`+
+        t.inputs.map(i=>`<span class="pill" style="border:1px solid var(--border)"><code>${esc(i)}</code></span>`).join('')+
+        `</div>`
+      : `<div class="muted" style="margin-bottom:12px">No inputs declared in the manifest.</div>`;
+    html+=toolSection('Output field');
+    html+=t.output_field
+      ? `<div style="margin-bottom:12px"><code>${esc(t.output_field)}</code></div>`
+      : `<div class="muted" style="margin-bottom:12px">No output field declared.</div>`;
+    html+=`<div class="muted" style="font-size:11.5px;line-height:1.5">This is a pipeline field, not a runnable tool — it is computed upstream and read here. There is nothing to start.</div>`;
+  }
+  v.innerHTML=html;
+}
+
+// Testing: pick two runs, get the per-field before/after. The numbers come from
+// compare_runs.py (#180) through /api/tools/testing/compare, so the page and the
+// CLI cannot disagree about what "spanned" means.
+async function renderToolTesting(){
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading runs…</div>';
+  stopPolling();
+  const t=await toolEntry('testing');
+  if(DEMO_ON||!RUNNER){
+    v.innerHTML=toolHeader(t)+`<div style="padding:20px"><div class="muted">Comparing runs reads the local store, which needs the tool runner: <code>python tools/server.py</code>.</div></div>`;
+    return;
+  }
+  let runs=[];
+  try{
+    const data=await (await fetch('/api/store/runs')).json();
+    runs=(data.runs||[]).slice();
+  }catch(e){
+    v.innerHTML=toolHeader(t)+`<div class="err">Could not read the run list: ${esc(e.message)}</div>`;
+    return;
+  }
+  if(runs.length<2){
+    v.innerHTML=toolHeader(t)+`<div style="padding:20px"><div class="muted">Two stored runs are needed to compare. Found ${runs.length}.</div></div>`;
+    return;
+  }
+  const inp='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:6px 9px;font-size:12.5px';
+  const opts=r=>runs.map(x=>`<option value="${esc(x.run_id||x.id)}"${(x.run_id||x.id)===r?' selected':''}>${esc(x.run_id||x.id)}</option>`).join('');
+  // Default to the two newest, which is the comparison anyone actually wants.
+  const ids=runs.map(x=>x.run_id||x.id);
+  v.innerHTML=toolHeader(t)+
+    `<div class="card" style="margin-bottom:14px">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <label style="font-size:11.5px;color:var(--muted)">Before
+          <select id="cmp_a" style="${inp};display:block;margin-top:3px;min-width:280px">${opts(ids[1])}</select></label>
+        <label style="font-size:11.5px;color:var(--muted)">After
+          <select id="cmp_b" style="${inp};display:block;margin-top:3px;min-width:280px">${opts(ids[0])}</select></label>
+        <button onclick="runComparison()" style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 13px;font-size:12px;cursor:pointer">Compare</button>
+        <span id="cmp_status" class="muted" style="font-size:11.5px"></span>
+      </div>
+    </div>
+    <div id="cmp_out"></div>`;
+  runComparison();
+}
+
+async function runComparison(){
+  const a=document.getElementById('cmp_a').value, b=document.getElementById('cmp_b').value;
+  const out=document.getElementById('cmp_out'), st=document.getElementById('cmp_status');
+  if(a===b){ out.innerHTML=`<div class="muted" style="padding:14px">Pick two different runs.</div>`; return; }
+  st.textContent='comparing…';
+  let data;
+  try{
+    const res=await fetch(`/api/tools/testing/compare?run_a=${encodeURIComponent(a)}&run_b=${encodeURIComponent(b)}`);
+    data=await res.json();
+    if(!res.ok) throw new Error(data.error||'comparison failed');
+  }catch(e){ st.textContent=''; out.innerHTML=`<div class="err">${esc(e.message)}</div>`; return; }
+  st.textContent='';
+  const cell=(s,o)=>{
+    const d=(s.spanned||0)-(o?(o.spanned||0):0);
+    const arrow=d>0?`<span style="color:var(--green)">▲${d}</span>`:d<0?`<span style="color:var(--red)">▼${-d}</span>`:'';
+    return `<td style="text-align:right">${s.present}</td>
+            <td style="text-align:right">${s.spanned} ${arrow}</td>
+            <td style="text-align:right">${s.distinct}</td>
+            <td style="text-align:right">${s.flags}</td>`;
+  };
+  let html=`<div class="muted" style="font-size:11px;margin-bottom:8px">
+      present / spanned / distinct / flags — per field. A field marked
+      <span style="color:var(--red)">const?</span> has one value covering 60% or
+      more of its rows, which is the shape of a fabricated constant, not proof of one.
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="text-align:left;color:var(--muted)">
+        <th style="padding:4px 6px">field</th>
+        <th colspan="4" style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border)">before</th>
+        <th colspan="4" style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border)">after</th>
+        <th style="padding:4px 6px"></th></tr></thead><tbody>`;
+  data.rows.forEach(r=>{
+    const flag=(r.b.dominated?`<span style="color:var(--red)" title="${esc((r.b.top&&r.b.top.value)||'')} covers ${Math.round(((r.b.top&&r.b.top.fraction)||0)*100)}% of rows">const?</span>`:'');
+    html+=`<tr style="border-bottom:1px solid #21262d">
+      <td style="padding:4px 6px"><code>${esc(r.field)}</code></td>
+      ${cell(r.a,null)}${cell(r.b,r.a)}
+      <td style="padding:4px 6px">${flag}</td></tr>`;
+  });
+  html+=`</tbody></table>`;
+  out.innerHTML=html;
+}
+
 // ---------------------------------------------------------------- Free Research
 // Two steps, one panel: pull raw filings into the local store, then fill a brief
 // template from them. They are separate calls because a pull is worth keeping
@@ -3844,8 +4011,11 @@ async function renderToolsGather(){
 // Past runs, straight out of the scrubber's local sqlite store. No model, no
 // network: this is the "what did it already extract" view, so a run's output
 // outlives the browser tab that started it.
-async function renderToolsResults(){
-  const v=document.getElementById('view');
+async function renderToolsResults(target){
+  // `target` lets a per-tool tab render this as a SECTION rather than as the
+  // whole view. Defaults to #view so any other caller is unaffected.
+  const v=document.getElementById(target||'view');
+  if(!v) return;
   v.innerHTML='<div class="loading">Reading the local tool store…</div>';
   stopPolling();
   if(DEMO_ON || !RUNNER){
@@ -3930,8 +4100,10 @@ function coverageColor(rate,n){
   if(rate>0)    return 'background:#f8514922;color:#f85149';
   return 'background:#f8514933;color:#f85149';
 }
-async function renderToolsCoverage(minDocs){
-  const v=document.getElementById('view');
+async function renderToolsCoverage(minDocs,target){
+  const v=document.getElementById(target||'view');
+  if(!v) return;
+  COVERAGE_TARGET=target||null;
   v.innerHTML='<div class="loading">Reading the local tool store…</div>';
   stopPolling(); stopPreviewPolling();
   if(DEMO_ON||!RUNNER){
@@ -3969,7 +4141,7 @@ async function renderToolsCoverage(minDocs){
     <div class="muted" style="font-size:12px;margin-bottom:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <span>Share of extractions where the value was found <strong>and</strong> located in the filing text.</span>
       <label>min filings per issuer
-        <select onchange="renderToolsCoverage(parseInt(this.value,10))"
+        <select onchange="renderToolsCoverage(parseInt(this.value,10),COVERAGE_TARGET)"
                 style="background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:3px 7px;font-size:12px;margin-left:4px">
           ${[1,2,3,5,10].map(n=>`<option value="${n}" ${n===floor?'selected':''}>${n}</option>`).join('')}
         </select></label>
@@ -4239,8 +4411,19 @@ const SECTIONS={
           tabs:[['regime','Regime',renderMacro]]},
   education:{label:'Education', icon:'🎓', desc:'Learning the business of trading — metric significance, source overlap, example signals',
           tabs:[['learn','Learn',renderEducation]]},
-  tools: {label:'Tools', icon:'🧰', desc:'Modules that gather data or analyze it',
-          tabs:[['gather','Data Gathering',renderToolsGather],['models','Analysis Models',renderToolsModels],['results','Results',renderToolsResults],['coverage','Coverage',renderToolsCoverage]]},
+  // One tab per TOOL, not one per function. A tool's results and coverage only
+  // mean anything beside that tool -- the old Data Gathering / Analysis Models /
+  // Results / Coverage tabs were horizontal slices across every tool, so reading
+  // one tool end to end meant visiting four tabs and mentally filtering three of
+  // them. Results and Coverage were EDGAR-scrubber-specific already; they just
+  // were not labelled that way.
+  tools: {label:'Tools', icon:'🧰', desc:'One tab per tool — each does something different',
+          tabs:[['edgar-scrubber','EDGAR Scrubber',renderToolEdgarScrubber],
+                ['free-research','Free Research',renderToolFreeResearch],
+                ['testing','Testing',renderToolTesting],
+                ['magic-formula','Magic Formula',()=>renderToolModel('magic-formula')],
+                ['smart-money-score','Smart Money',()=>renderToolModel('smart-money-score')],
+                ['dealer-hedging-barrier-test','Dealer Hedging',()=>renderToolModel('dealer-hedging-barrier-test')]]},
   research:{label:'Research', icon:'🔬', desc:'Hypothesis projects — prediction, evidence, verdict',
           tabs:[['projects','Projects',renderResearchProjects]]},
 };

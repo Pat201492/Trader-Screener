@@ -60,11 +60,13 @@ import re
 from dataclasses import asdict, dataclass, field as _dc_field
 
 try:  # package import: tools.edgar_scrubber.extraction_ladder
+    from .candidates import DEFAULT_LIMIT as _CANDIDATE_LIMIT
     from .candidates import candidates_for
     from .field_spec import Flag
     from .normalize import parse_date_prose as _parse_date_prose
     from .output_store import FieldValue
 except ImportError:  # standalone: python tools/edgar_scrubber/extraction_ladder.py
+    from candidates import DEFAULT_LIMIT as _CANDIDATE_LIMIT
     from candidates import candidates_for
     from field_spec import Flag
     from normalize import parse_date_prose as _parse_date_prose
@@ -1019,7 +1021,8 @@ class ExtractionLadder:
                  confidence_floor=0.35, self_consistency_samples=1,
                  prompt_version="v1", exemplar_set_version=None,
                  max_tokens=512, log=None, shadow_external=False,
-                 candidate_select=False):
+                 candidate_select=False, boilerplate=None,
+                 candidate_limit=None):
         self.spec = spec
         self.rules = rules
         self.exemplars = exemplars
@@ -1040,6 +1043,13 @@ class ExtractionLadder:
         # free-form path (#178), and a field with no candidates falls back to
         # free-form regardless, so nothing regresses when it is off.
         self.candidate_select = candidate_select
+        # `boilerplate` is a predicate on paragraph text -- pass
+        # `reduce.BoilerplateModel.is_boilerplate` for a per-issuer model. It
+        # costs nothing (learned from the corpus, no tokens) and is a stronger
+        # candidate filter than proximity: a number every filing prints
+        # identically is template text, not this filing's term.
+        self.boilerplate = boilerplate
+        self.candidate_limit = candidate_limit or _CANDIDATE_LIMIT
         self.prompt_version = prompt_version
         self.exemplar_set_version = exemplar_set_version
         self.max_tokens = max_tokens
@@ -1237,7 +1247,15 @@ class ExtractionLadder:
         # Candidate-SELECT (#178) when it is on AND the deterministic enumerator
         # found values in the text; otherwise the free-form path, byte-for-byte
         # unchanged, so a field with no candidates never regresses.
-        candidates = candidates_for(f, text) if self.candidate_select else []
+        # The two filters are what make this a SHORT list: the field's own
+        # anchors rank the candidates, and a per-issuer boilerplate predicate
+        # drops any number the whole corpus prints identically. Unfiltered, run
+        # #0020 handed the model 95-307 candidates for the percent fields and
+        # they lost most of their coverage; the three fields that improved had
+        # 2 candidates each.
+        candidates = candidates_for(
+            f, text, is_boilerplate=self.boilerplate,
+            limit=self.candidate_limit) if self.candidate_select else []
         # The candidate list is working data -- built wide so the choice can be
         # narrow, then discarded (#179). Only this count survives onto the result,
         # the run record and the store; 0 is exactly the free-form path below.
