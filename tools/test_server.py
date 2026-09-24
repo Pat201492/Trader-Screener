@@ -330,6 +330,19 @@ check("an unknown saved query is refused",
 
 check("a search with no phrase, form, or CIK is refused before any request",
       raises(lambda: server.edgar_search({}), ValueError))
+
+# Issuer resolution reuses ticker_to_cik: a bare CIK passes through, a ticker is
+# resolved before the query is built, and there is no second ticker->CIK map.
+_fake_t2c = lambda t: {"AAPL": "0000320193", "CSCO": "0000858877"}[t]
+check("a bare-CIK issuer token passes through untouched",
+      server.resolve_issuer_ciks(["0000320193"], _fake_t2c) == ["0000320193"])
+check("a ticker issuer token is resolved to a CIK via the injected ticker_to_cik",
+      server.resolve_issuer_ciks(["AAPL"], _fake_t2c) == ["0000320193"])
+check("mixed ticker + CIK tokens resolve in order, blanks dropped",
+      server.resolve_issuer_ciks(["AAPL", "", "19617", "CSCO"], _fake_t2c)
+      == ["0000320193", "19617", "0000858877"])
+check("an unknown ticker raises (surfaced as a 4xx upstream)",
+      raises(lambda: server.resolve_issuer_ciks(["NOPE"], _fake_t2c), KeyError))
 check("limit is clamped to the documented ceiling",
       server.resolve_targets({"accessions": picked * 600, "limit": 99999})[1]["limit"] == 1000)
 

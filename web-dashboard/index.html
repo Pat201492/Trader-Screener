@@ -2433,74 +2433,127 @@ function fieldsTable(fields){
 // actually returns, and only then spend model time on the filings you picked.
 let SEARCH={hits:[],selected:new Set(),fields:null,defaults:[],query:null};
 
+// The scrubber is a REGISTRY of per-form scrubbers (#209/#212), so the tool
+// opens on an INDEX of form types read from /scrubbers -- not a 424B2-hardcoded
+// form. Picking a form opens that form's scrubber, whose only operator knobs are
+// issuer and date range; the form's `q`+`forms` are fixed by the registry entry.
+let SCRUBBERS=[], SCRUBBER_QUERIES=[], SCRUBBER_FIELDS={fields:[],default:[]};
+let INDEX_SCROLL=0;
+
 async function openToolPanel(toolId){
-  // Each runnable tool owns its own panel. The scrubber's query form is not a
+  // Each runnable tool owns its own panel. The scrubber's surface is not a
   // general shape -- it is that tool's -- so dispatch rather than generalise.
   if(toolId==='free-research') return openFreeResearchPanel();
   const panel=document.getElementById('toolPanel');
   panel.style.display='block';
-  panel.innerHTML='<div class="loading">loading the query form…</div>';
-  let presets=[],fieldInfo={fields:[],default:[]};
+  panel.innerHTML='<div class="loading">loading the form-type index…</div>';
   try{
-    [presets,fieldInfo]=await Promise.all([
+    [SCRUBBERS,SCRUBBER_QUERIES,SCRUBBER_FIELDS]=await Promise.all([
+      fetch('/api/tools/edgar-scrubber/scrubbers').then(r=>r.json()),
       fetch('/api/tools/edgar-scrubber/queries').then(r=>r.json()),
       fetch('/api/tools/edgar-scrubber/fields').then(r=>r.json())]);
   }catch(e){
     panel.innerHTML=`<div class="err">Could not load the tool: ${esc(e.message)}</div>`;
     return;
   }
-  SEARCH={hits:[],selected:new Set(),fields:fieldInfo.fields,defaults:fieldInfo.default,query:null,issuerFilter:null};
+  if(SCRUBBERS && SCRUBBERS.error){
+    panel.innerHTML=`<div class="err">Scrubber registry unavailable: ${esc(SCRUBBERS.error)}</div>`;
+    return;
+  }
+  window.__PRESETS__=SCRUBBER_QUERIES;  // stored queries, kept for downstream reuse
+  INDEX_SCROLL=0;
+  renderScrubberIndex();
+}
+
+// How many stored queries belong to a form -- a saved query owns a form when its
+// `forms` filter is exactly that one form type (mirrors Scrubber.owns_query on
+// the server), so the count is read from /queries rather than a second endpoint.
+function storedQueryCount(formType){
+  return (SCRUBBER_QUERIES||[]).filter(
+    p=>Array.isArray(p.forms)&&p.forms.length===1&&p.forms[0]===formType).length;
+}
+
+// The index: every form type in the registry, its purpose, and how many stored
+// queries it has. Renders whether or not any queries exist -- a form with none
+// is shown as "available", not hidden behind an empty state (#227 AC6).
+function renderScrubberIndex(restoreScroll){
+  const panel=document.getElementById('toolPanel');
+  const rows=(SCRUBBERS||[]).map(s=>{
+    const n=storedQueryCount(s.form_type);
+    const badge=n
+      ? `<span class="pill" style="border:1px solid var(--border)">${n} stored quer${n===1?'y':'ies'}</span>`
+      : `<span class="muted" style="font-size:11.5px">available — no stored queries yet</span>`;
+    return `<div class="scrubberRow" onclick="openScrubberView('${esc(s.id)}')"
+        style="display:flex;align-items:center;gap:12px;padding:11px 12px;border:1px solid var(--border);border-radius:8px;margin-top:8px;cursor:pointer">
+        <div style="min-width:96px">
+          <div class="name" style="font-size:14px">${esc(s.form_type)}</div>
+          <div class="muted" style="font-size:10.5px">${esc(s.field_source||'')}</div>
+        </div>
+        <div style="flex:1">
+          <div style="font-size:12.5px">${esc(s.display_name||s.form_type)}</div>
+          <div class="muted" style="font-size:11.5px;line-height:1.4;margin-top:2px">${esc(s.purpose||'')}</div>
+        </div>
+        <div style="white-space:nowrap">${badge}<span class="muted" style="margin-left:10px">›</span></div>
+      </div>`;
+  }).join('');
+  panel.innerHTML=`
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+        <div class="name">EDGAR Scrubber — filing form types</div>
+        <span class="muted" style="font-size:11.5px">pick a form to open its scrubber</span>
+        <button style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer"
+                onclick="closeToolPanel()">close</button>
+      </div>
+      ${rows||'<div class="muted" style="margin-top:10px">The scrubber registry is empty.</div>'}
+    </div>`;
+  // Back from a scrubber view returns here without losing where you were (#227 AC2).
+  if(restoreScroll) requestAnimationFrame(()=>{ (document.scrollingElement||document.documentElement).scrollTop=INDEX_SCROLL; });
+}
+
+// One form's scrubber. The form type is FIXED (stated, not editable); the only
+// operator controls are issuer and date range. `q`+`forms` come from the
+// registry entry and ride along as hidden inputs so the existing run path
+// (runSearch -> /search) sees exactly the shape it already accepts.
+function openScrubberView(id){
+  const s=(SCRUBBERS||[]).find(x=>x.id===id);
+  if(!s) return;
+  INDEX_SCROLL=(document.scrollingElement||document.documentElement).scrollTop;
+  const panel=document.getElementById('toolPanel');
+  const fi=SCRUBBER_FIELDS||{fields:[],default:[]};
+  SEARCH={hits:[],selected:new Set(),fields:fi.fields,defaults:fi.default,query:null,issuerFilter:null};
   const inp='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:6px 9px;font-size:13px';
   panel.innerHTML=`
     <div class="card" style="margin-top:16px">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
-        <div class="name">EDGAR full-text search</div>
-        <span class="muted" style="font-size:11.5px">search first, then extract only what you pick</span>
+        <button onclick="renderScrubberIndex(true)" title="back to the form-type index"
+                style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:4px 10px;cursor:pointer">← forms</button>
+        <div class="name">${esc(s.display_name||s.form_type)}</div>
+        <span class="muted" style="font-size:11.5px">${esc(s.purpose||'')}</span>
         <button style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer"
                 onclick="closeToolPanel()">close</button>
       </div>
+      <div class="muted" style="font-size:12px;margin:6px 0 2px">
+        Form type <strong style="color:var(--txt)">${esc(s.form_type)}</strong> — fixed for this scrubber${s.q?` · phrase <code>${esc(s.q)}</code>`:''}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-top:10px">
-        <label style="font-size:11.5px;color:var(--muted)">Phrase (exact match in quotes)
-          <input id="sq_q" style="${inp};width:100%;margin-top:3px" placeholder='"contingent coupon"'></label>
-        <label style="font-size:11.5px;color:var(--muted)">Form types (comma separated)
-          <input id="sq_forms" value="424B2" style="${inp};width:100%;margin-top:3px" placeholder="424B2,424B5"></label>
+        <label style="font-size:11.5px;color:var(--muted)">Issuer — ticker or CIK (optional)
+          <input id="sq_ciks" style="${inp};width:100%;margin-top:3px" placeholder="AAPL or 0000320193"></label>
         <label style="font-size:11.5px;color:var(--muted)">Filed from
           <input id="sq_start" type="date" style="${inp};width:100%;margin-top:3px"></label>
         <label style="font-size:11.5px;color:var(--muted)">Filed to
           <input id="sq_end" type="date" style="${inp};width:100%;margin-top:3px"></label>
-        <label style="font-size:11.5px;color:var(--muted)">CIK(s) — optional filter
-          <input id="sq_ciks" style="${inp};width:100%;margin-top:3px" placeholder="0000019617"></label>
-        <label style="font-size:11.5px;color:var(--muted)">Max hits
-          <input id="sq_max" type="number" min="1" max="100" value="25" style="${inp};width:100%;margin-top:3px"></label>
       </div>
-      <div style="display:flex;gap:14px;align-items:center;margin-top:10px;flex-wrap:wrap;font-size:12px">
-        <label style="display:flex;gap:5px;align-items:center;cursor:pointer">
-          <input type="radio" name="sq_mode" value="flat" checked onchange="toggleMode()"> one search</label>
-        <label style="display:flex;gap:5px;align-items:center;cursor:pointer"
-               title="Sample a fixed number of filings on each day that has any, so an average over the series is an average over time rather than over filing volume.">
-          <input type="radio" name="sq_mode" value="daily" onchange="toggleMode()"> by day (time series)</label>
-        <span id="dailyOpts" style="display:none;gap:8px;align-items:center">
-          <label style="color:var(--muted)">filings per day
-            <input id="sq_perday" type="number" min="1" max="100" value="5" oninput="estimateDaily()" style="${inp};width:70px;margin-left:4px"></label>
-          <label style="color:var(--muted)">days back (with filings)
-            <input id="sq_days" type="number" min="1" max="365" value="90" oninput="estimateDaily()" style="${inp};width:80px;margin-left:4px"></label>
-          <span id="dailyEstimate" class="muted"></span>
-        </span>
-      </div>
+      <input type="hidden" id="sq_q" value="${esc(s.q||'')}">
+      <input type="hidden" id="sq_forms" value="${esc(s.form_type)}">
+      <input type="hidden" id="sq_max" value="25">
       <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap">
-        <button onclick="runSearch()" style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">Search EDGAR</button>
-        <span class="muted" style="font-size:11.5px">preset:</span>
-        <select id="sq_preset" onchange="applyPreset(this.value)" style="${inp};padding:5px 8px">
-          <option value="">—</option>
-          ${presets.map((p,i)=>`<option value="${i}">${esc(p.id)}</option>`).join('')}
-        </select>
+        <button onclick="runScrubber('${esc(s.id)}')" style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">Search filings</button>
         <span id="searchNote" class="muted" style="font-size:11.5px"></span>
       </div>
       <details style="margin-top:12px">
-        <summary class="muted" style="cursor:pointer;font-size:12px">fields to extract (<span id="fieldCount">${fieldInfo.default.length}</span> of ${fieldInfo.fields.length})</summary>
+        <summary class="muted" style="cursor:pointer;font-size:12px">fields to extract (<span id="fieldCount">${fi.default.length}</span> of ${fi.fields.length})</summary>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:4px;margin-top:8px">
-          ${fieldInfo.fields.map(f=>`<label style="font-size:12px;display:flex;gap:6px;align-items:center" title="${esc(f.description||'')}">
-            <input type="checkbox" class="fieldbox" value="${esc(f.name)}" ${fieldInfo.default.includes(f.name)?'checked':''} onchange="countFields()">
+          ${fi.fields.map(f=>`<label style="font-size:12px;display:flex;gap:6px;align-items:center" title="${esc(f.description||'')}">
+            <input type="checkbox" class="fieldbox" value="${esc(f.name)}" ${fi.default.includes(f.name)?'checked':''} onchange="countFields()">
             <span>${esc(f.name)}</span>${f.unit?`<span class="muted" style="font-size:10.5px">${esc(f.unit)}</span>`:''}</label>`).join('')}
         </div>
       </details>
@@ -2508,21 +2561,36 @@ async function openToolPanel(toolId){
     </div>
     <div id="docPanel" style="display:none"></div>
     <div id="runPanel" style="display:none"></div>`;
-  window.__PRESETS__=presets;
+}
+
+// Build the SavedQuery for this scrubber -- the exact {id,q,forms,ciks,startdt,
+// enddt} shape crawl accepts -- from the fixed template plus the two operator
+// knobs, then submit it through the EXISTING run path (runSearch -> /search).
+// No parallel submission code: runSearch reads the same hidden/visible inputs.
+function runScrubber(id){
+  const s=(SCRUBBERS||[]).find(x=>x.id===id);
+  if(!s) return;
+  const issuer=document.getElementById('sq_ciks').value.trim();
+  const ciks=issuer?issuer.split(/[\s,]+/).filter(Boolean):[];
+  const savedQuery={
+    id:`${s.id}-${Date.now()}`,
+    q:s.q||'',
+    forms:[s.form_type],
+    ciks:ciks,
+    startdt:document.getElementById('sq_start').value||null,
+    enddt:document.getElementById('sq_end').value||null,
+  };
+  window.__LAST_SAVED_QUERY__=savedQuery;
+  // Drive the existing run path with the built query. Any ticker in `ciks` is
+  // resolved to a CIK server-side via ticker_to_cik before the search runs.
+  document.getElementById('sq_ciks').value=savedQuery.ciks.join(',');
+  document.getElementById('sq_forms').value=savedQuery.forms.join(',');
+  runSearch();
 }
 function closeToolPanel(){
   stopPolling();
   const p=document.getElementById('toolPanel');
   if(p){ p.style.display='none'; p.innerHTML=''; }
-}
-function applyPreset(idx){
-  const p=(window.__PRESETS__||[])[idx];
-  if(!p) return;
-  document.getElementById('sq_q').value=p.q||'';
-  document.getElementById('sq_forms').value=(p.forms||[]).join(',');
-  document.getElementById('sq_start').value=p.startdt||'';
-  document.getElementById('sq_end').value=p.enddt||'';
-  document.getElementById('sq_ciks').value=(p.ciks||[]).join(',');
 }
 function countFields(){
   document.getElementById('fieldCount').textContent=
@@ -2531,28 +2599,9 @@ function countFields(){
 function chosenFields(){
   return Array.from(document.querySelectorAll('.fieldbox:checked')).map(b=>b.value);
 }
-function searchMode(){
-  const r=document.querySelector('input[name="sq_mode"]:checked');
-  return r?r.value:'flat';
-}
-function toggleMode(){
-  const daily=searchMode()==='daily';
-  document.getElementById('dailyOpts').style.display=daily?'inline-flex':'none';
-  if(daily) estimateDaily();
-}
-// 90 days x 5/day is 450 filings and hours of local model time. Say so before
-// the click, not after.
-function estimateDaily(){
-  const n=(parseInt(document.getElementById('sq_perday').value,10)||0)*
-          (parseInt(document.getElementById('sq_days').value,10)||0);
-  const mins=Math.round(n*40/60);
-  document.getElementById('dailyEstimate').textContent=
-    `= up to ${n} filings · ~${mins<90?mins+' min':(mins/60).toFixed(1)+' h'} to extract`;
-}
 async function runSearch(){
-  const daily=searchMode()==='daily';
   const body={
-    mode:daily?'daily':'flat',
+    mode:'flat',
     q:document.getElementById('sq_q').value.trim(),
     forms:document.getElementById('sq_forms').value.trim(),
     startdt:document.getElementById('sq_start').value||null,
@@ -2560,15 +2609,8 @@ async function runSearch(){
     ciks:document.getElementById('sq_ciks').value.trim(),
     max_results:parseInt(document.getElementById('sq_max').value,10)||25,
   };
-  if(daily){
-    body.per_day=parseInt(document.getElementById('sq_perday').value,10)||5;
-    body.days=parseInt(document.getElementById('sq_days').value,10)||90;
-    body.startdt=document.getElementById('sq_start').value||null;
-  }
   const out=document.getElementById('searchResults');
-  out.innerHTML=daily
-    ? '<div class="loading">walking back day by day — one request per day with filings…</div>'
-    : '<div class="loading">searching EDGAR…</div>';
+  out.innerHTML='<div class="loading">searching EDGAR…</div>';
   let data;
   try{
     const r=await fetch('/api/tools/edgar-scrubber/search',{
