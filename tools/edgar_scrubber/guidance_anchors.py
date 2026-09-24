@@ -70,6 +70,11 @@ SENTENCE_ANCHORS = {
     "company_expects": re.compile(
         r"\bthe\s+company\s+(?:now\s+|currently\s+|continues?\s+to\s+)?"
         r"(?:expects?|anticipates?|projects?|forecasts?|estimates?)\b", re.I),
+    # Passive voice -- "Revenue is expected to be ...", "gross margins are
+    # expected to be ...". NVIDIA and others state the outlook this way rather
+    # than in the first person, so a section-less passive line is still caught.
+    "expected_to_be": re.compile(
+        r"\b(?:is|are)\s+expected\s+to\s+be\b", re.I),
     # "reaffirms/reiterates/raises/lowers/maintains/updates ... guidance".
     "reaffirm_guidance": re.compile(
         r"\b(?:reaffirms?|reiterates?|raises?|lowers?|maintains?|updates?)\b"
@@ -102,7 +107,67 @@ RANGE_PATTERNS = {
     # "in the range of ..." -- the lead-in; a dollar_range/percent_range usually
     # follows and is counted too, but the phrase itself is a strong signal.
     "range_of": re.compile(r"\bin\s+the\s+range\s+of\b", re.I),
+    # A point estimate with a tolerance -- "$108.0 billion, plus or minus 2%",
+    # "74.0%, plus or minus 50 basis points". A tolerance is convertible to a
+    # low-high range (see `tolerance_range`), so downstream {low, high} stays one
+    # shape; the pattern is the gate, `tolerance_range` does the conversion.
+    "tolerance": re.compile(
+        r"\$?\s?\d[\d,]*(?:\.\d+)?\s*(?:billion|million|thousand|bn|mm)?%?"
+        r"\s*,?\s*plus\s+or\s+minus\s+"
+        r"\d+(?:\.\d+)?\s*(?:%|percentage\s+points?|percent|basis\s+points?|bps|bp)"
+        r"(?![A-Za-z])",
+        re.I),
 }
+
+# Scale words a dollar figure is printed with, mapped to their multiplier.
+_SCALE_WORDS = {"billion": 1e9, "bn": 1e9, "million": 1e6, "mm": 1e6,
+                "thousand": 1e3}
+
+# Capturing form of RANGE_PATTERNS["tolerance"], used by `tolerance_range` to
+# pull the base figure and the tolerance apart for conversion.
+_TOLERANCE_CAPTURE = re.compile(
+    r"(?P<base>\$?\s?\d[\d,]*(?:\.\d+)?\s*(?:billion|million|thousand|bn|mm)?%?)"
+    r"\s*,?\s*plus\s+or\s+minus\s+"
+    r"(?P<tol>\d+(?:\.\d+)?)\s*"
+    r"(?P<unit>%|percentage\s+points?|percent|basis\s+points?|bps|bp)"
+    r"(?![A-Za-z])",
+    re.I)
+
+
+def tolerance_range(text):
+    """Convert a point-estimate-with-tolerance to ``{"low", "high"}``, or return
+    ``None`` if `text` carries no tolerance phrasing.
+
+    The tolerance unit decides how the spread is applied to the base figure:
+
+      * ``%``/``percent`` -- RELATIVE to the base. "$108.0 billion, plus or minus
+        2%" -> base 108.0e9, spread 108.0e9 * 0.02 -> 105.84e9 to 110.16e9.
+      * ``basis points``/``bps`` -- ABSOLUTE, in percentage points (1 bp =
+        0.01 pp). "74.0%, plus or minus 50 basis points" -> 73.5 to 74.5, which
+        is NOT the same as "plus or minus 50 percent" (37.0 to 111.0).
+      * ``percentage point(s)`` -- ABSOLUTE, in percentage points.
+
+    The base's own scale word (billion/million/...) and any leading ``$`` are
+    honoured; a trailing ``%`` on the base does not change how the tolerance is
+    applied (it is just the unit the figure is quoted in).
+    """
+    m = _TOLERANCE_CAPTURE.search(text)
+    if not m:
+        return None
+    base_raw = m.group("base")
+    base = float(re.sub(r"[^\d.]", "", base_raw))
+    scale = re.search(r"billion|million|thousand|bn|mm", base_raw, re.I)
+    if scale:
+        base *= _SCALE_WORDS[scale.group(0).lower()]
+    tol = float(m.group("tol"))
+    unit = m.group("unit").lower()
+    if "basis" in unit or unit in ("bp", "bps"):
+        delta = tol / 100.0            # 50 bp -> 0.50 percentage points, absolute
+    elif "percentage" in unit:
+        delta = tol                    # percentage points, absolute
+    else:                              # "%" / "percent" -> relative to the base
+        delta = base * tol / 100.0
+    return {"low": base - delta, "high": base + delta}
 
 # --------------------------------------------------------------------------- #
 # Safe-harbour boilerplate detection
@@ -293,5 +358,9 @@ if __name__ == "__main__":
         print(f"  [{c['anchor']:<16}] {c['sentence'][:60]}...")
     assert find_candidates("Net income rose to $5 million.").count == 0
     assert find_candidates("").count == 0
+    # A point estimate with a tolerance converts to {low, high} (issue #225).
+    tr = tolerance_range("Revenue is expected to be $108.0 billion, plus or minus 2%.")
+    assert tr and abs(tr["low"] - 105.84e9) < 1 and abs(tr["high"] - 110.16e9) < 1, tr
+    assert tolerance_range("74.0%, plus or minus 50 basis points") == {"low": 73.5, "high": 74.5}
     print("\nanchor hits:", {k: v for k, v in result.anchor_hits.items() if v})
     print("guidance_anchors self-check: PASS")
