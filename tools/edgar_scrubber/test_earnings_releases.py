@@ -14,6 +14,12 @@ gate runs offline. Every #185 acceptance criterion is checked here:
   * an 8-K with a missing/empty `items` field comes back FLAGGED, not dropped;
   * a non-8-K, and an 8-K without Item 2.02, are excluded.
 
+Plus the #224 fix -- the EX-99 exhibit is resolved from the accession index
+page's authoritative Type column, not from the filename -- checked against
+CHECKED-IN real index-page fixtures for NVDA, CSCO and AAPL
+(`fixtures/{accession}-index.html`), whose releases (`q2fy27pr.htm`,
+`exhibit991pressrelease-q4f.htm`) the filename heuristic misses.
+
 Run:  python tools/edgar_scrubber/test_earnings_releases.py
 """
 import json
@@ -66,29 +72,63 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "earnings_submissions.j
 SUB_URL = "https://data.sec.gov/submissions/CIK0000012345.json"
 
 
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
 def index_url(accession):
     return (f"https://www.sec.gov/Archives/edgar/data/{CIK}/"
             f"{accession.replace('-', '')}/index.json")
 
 
-def manifest(*names):
-    # `type` is the directory-icon filename on every live manifest, so EX-99
-    # must be recognised from the NAME -- the fixtures reflect that.
+def index_page_url(accession):
+    return (f"https://www.sec.gov/Archives/edgar/data/{CIK}/"
+            f"{accession.replace('-', '')}/{accession}-index.html")
+
+
+def manifest(*named):
+    # `type` here is the directory-icon filename that live index.json carries --
+    # deliberately uninformative, so the EX-99 number can ONLY come from the
+    # index page's declared Type (see index_page). Each arg is (name, decl_type).
     return {"directory": {"item": [
-        {"name": n, "type": "text.gif", "size": "10000"} for n in names
+        {"name": n, "type": "text.gif", "size": "10000"} for n, _ in named
     ]}}
 
+
+def index_page(*named):
+    # A minimal accession index page: one Document-Format-Files row per document,
+    # Type declared in the Type column, exactly as EDGAR renders it. Each arg is
+    # (name, decl_type).
+    rows = "".join(
+        f'<tr><td>{i}</td><td>{t}</td>'
+        f'<td><a href="/Archives/edgar/data/{CIK}/x/{n}">{n}</a></td>'
+        f'<td>{t}</td><td>10000</td></tr>'
+        for i, (n, t) in enumerate(named, start=1)
+    )
+    html = f'<table class="tableFile" summary="Document Format Files">{rows}</table>'
+    return (200, {"content-type": "text/html"}, html.encode("utf-8"))
+
+
+# Each accession's documents as (filename, declared-type) pairs -- the declared
+# type is what the index page carries and what now resolves the EX-99 exhibit.
+A = [("d001_8k.htm", "8-K"), ("ex99-1.htm", "EX-99.1"), ("ex99-2.htm", "EX-99.2")]
+B = [("d002_8k.htm", "8-K"), ("ex99-3.htm", "EX-99.3"), ("ex99-2.htm", "EX-99.2")]
+C = [("d003_8k.htm", "8-K"), ("ex10-1.htm", "EX-10.1")]
+D = [("d004_8k.htm", "8-K"), ("ex99-1.htm", "EX-99.1")]
 
 ROUTES = {
     SUB_URL: ok_json_bytes(FIXTURE.read_bytes()),
     # A: has EX-99.1 and EX-99.2         -> release is EX-99.1
-    index_url("0000012345-26-000001"): ok_json(manifest("d001_8k.htm", "ex99-1.htm", "ex99-2.htm")),
+    index_url("0000012345-26-000001"): ok_json(manifest(*A)),
+    index_page_url("0000012345-26-000001"): index_page(*A),
     # B: no EX-99.1, has .3 and .2       -> release is the lowest, EX-99.2
-    index_url("0000012345-26-000002"): ok_json(manifest("d002_8k.htm", "ex99-3.htm", "ex99-2.htm")),
+    index_url("0000012345-26-000002"): ok_json(manifest(*B)),
+    index_page_url("0000012345-26-000002"): index_page(*B),
     # C: no EX-99 exhibit at all         -> no release document
-    index_url("0000012345-26-000003"): ok_json(manifest("d003_8k.htm", "ex10-1.htm")),
+    index_url("0000012345-26-000003"): ok_json(manifest(*C)),
+    index_page_url("0000012345-26-000003"): index_page(*C),
     # D: items missing                   -> flagged, still carries its EX-99.1
-    index_url("0000012345-26-000004"): ok_json(manifest("d004_8k.htm", "ex99-1.htm")),
+    index_url("0000012345-26-000004"): ok_json(manifest(*D)),
+    index_page_url("0000012345-26-000004"): index_page(*D),
 }
 
 
@@ -168,6 +208,56 @@ _src = Path(er.__file__).read_text(encoding="utf-8")
 check("module imports no network library of its own",
       not any(tok in _src for tok in
               ("import http", "import urllib", "import requests", "from urllib")))
+
+# --------------------------------------------------------------------------- #
+section("#224: EX-99 resolved from the index page's Type column, not the filename")
+# --------------------------------------------------------------------------- #
+
+def release_from_fixture(accession, cik):
+    """Drive the real committed index page through the same code path a live
+    run uses: parse its Type column, build the manifest from the same documents,
+    then select the release exhibit."""
+    html = (FIXTURES / f"{accession}-index.html").read_text(encoding="utf-8")
+    type_map = er.parse_index_page(html)
+    index_json = {"directory": {"item": [
+        {"name": n, "type": "text.gif", "size": "10000"} for n in type_map
+    ]}}
+    exhibits = er.exhibits_from_index(index_json, type_map)
+    return type_map, {"exhibits": exhibits}
+
+
+# NVDA -- release filename is q2fy27pr.htm, which the ex99 FILENAME regex misses;
+# only the declared type resolves it. It also carries BOTH EX-99.1 and EX-99.2.
+nvda_types, nvda = release_from_fixture("0001045810-26-000073", "1045810")
+check("NVDA: filename q2fy27pr.htm is NOT matched by the ex99 filename regex",
+      er.ex99_number("q2fy27pr.htm") is None)
+check("NVDA: index page declares q2fy27pr.htm as EX-99.1",
+      nvda_types.get("q2fy27pr.htm") == "EX-99.1")
+check("NVDA: index page declares q2fy27cfocommentary.htm as EX-99.2 (not .1)",
+      nvda_types.get("q2fy27cfocommentary.htm") == "EX-99.2")
+check("NVDA: both EX-99.1 and EX-99.2 are present as exhibits",
+      {e["name"] for e in nvda["exhibits"] if e["ex99_number"] is not None}
+      == {"q2fy27pr.htm", "q2fy27cfocommentary.htm"})
+check("NVDA: EX-99.1 (the press release) is selected over EX-99.2",
+      er.press_release_document(nvda)["name"] == "q2fy27pr.htm")
+
+# CSCO -- release filename exhibit991pressrelease-q4f.htm; `ex` not followed by 99.
+csco_types, csco = release_from_fixture("0000858877-26-000106", "858877")
+check("CSCO: filename exhibit991pressrelease-q4f.htm is NOT matched by the regex",
+      er.ex99_number("exhibit991pressrelease-q4f.htm") is None)
+check("CSCO: the press release resolves to exhibit991pressrelease-q4f.htm",
+      er.press_release_document(csco)["name"] == "exhibit991pressrelease-q4f.htm")
+
+# AAPL -- previously-working case (filename contains ex991); must not regress.
+aapl_types, aapl = release_from_fixture("0000320193-26-000018", "320193")
+check("AAPL: the previously-working case still resolves (no regression)",
+      er.press_release_document(aapl)["name"] == "a8-kex991q3202606272026.htm")
+
+# The per-row pairing guard: a naive page-wide regex would match EX-99.1 against
+# both NVDA rows. Confirm each Type is paired with its OWN row's filename only.
+check("index-page parse pairs each Type with its own row (no mis-pairing)",
+      [nvda_types["q2fy27pr.htm"], nvda_types["q2fy27cfocommentary.htm"]]
+      == ["EX-99.1", "EX-99.2"])
 
 # --------------------------------------------------------------------------- #
 if failures:

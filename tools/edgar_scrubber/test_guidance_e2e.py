@@ -99,12 +99,25 @@ class FakeEdgarClient:
         return self._submissions
 
     def filing_index(self, cik, accession):
-        # A minimal manifest carrying the primary 8-K and its EX-99.1 exhibit;
-        # `earnings_releases` recognises the release from the EX-99 filename.
+        # A minimal manifest carrying the primary 8-K and its EX-99.1 exhibit.
         return {"directory": {"item": [
             {"name": "d_8k.htm", "type": "text.gif", "size": "9000"},
             {"name": "ex99-1.htm", "type": "text.gif", "size": "12000"},
         ]}}
+
+    def filing_index_page(self, cik, accession):
+        # The accession index page whose Type column declares the release as
+        # EX-99.1 -- the authoritative source `earnings_releases` now resolves
+        # the exhibit from (#224).
+        return (
+            '<table class="tableFile" summary="Document Format Files">'
+            '<tr><td>1</td><td>8-K</td>'
+            '<td><a href="/ix?doc=/x/d_8k.htm">d_8k.htm</a></td>'
+            '<td>8-K</td><td>9000</td></tr>'
+            '<tr><td>2</td><td>EX-99.1</td>'
+            '<td><a href="/x/ex99-1.htm">ex99-1.htm</a></td>'
+            '<td>EX-99.1</td><td>12000</td></tr>'
+            '</table>')
 
     def archive_document(self, cik, accession, filename):
         return self._bodies[accession].encode("utf-8")
