@@ -1,0 +1,41 @@
+{
+  "version": "1.0.0",
+  "scrubbers": [
+    {
+      "id": "10-k",
+      "form_type": "10-K",
+      "display_name": "10-K annual report",
+      "purpose": "Annual report: audited full-year financials and business/risk disclosure.",
+      "q": "",
+      "forms": ["10-K"],
+      "field_source": "taxonomy"
+    },
+    {
+      "id": "10-q",
+      "form_type": "10-Q",
+      "display_name": "10-Q quarterly report",
+      "purpose": "Quarterly report: unaudited interim financials between annual reports.",
+      "q": "",
+      "forms": ["10-Q"],
+      "field_source": "taxonomy"
+    },
+    {
+      "id": "8-k",
+      "form_type": "8-K",
+      "display_name": "8-K current report",
+      "purpose": "Current report: material events disclosed between periodic filings.",
+      "q": "",
+      "forms": ["8-K"],
+      "field_source": "taxonomy"
+    },
+    {
+      "id": "424b2",
+      "form_type": "424B2",
+      "display_name": "424B2 structured notes",
+      "purpose": "Rule 424(b)(2) prospectus supplements: structured / market-linked notes.",
+      "q": "\"contingent coupon\"",
+      "forms": ["424B2"],
+      "field_source": "spec"
+    }
+  ]
+}
