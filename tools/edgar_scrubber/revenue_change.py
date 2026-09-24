@@ -20,8 +20,11 @@ by exception:
     2018 and label it a one-year change.
 
 Each function returns one record per period, in period order:
-``{period_end, value, prior_value, pct_change, reason}``. `reason` is None
-exactly when `pct_change` is a real number; otherwise it says why there is none.
+``{period_end, value, prior_value, pct_change, reason}`` plus the series' fiscal
+labels -- `fiscal_year` for `yoy_change`, `fiscal_year` and `fiscal_period` for
+`qoq_change` -- so a caller holding a percentage knows the period it belongs to.
+`reason` is None exactly when `pct_change` is a real number; otherwise it says
+why there is none.
 
 stdlib only. Run the self-check:  python tools/edgar_scrubber/revenue_change.py
 """
@@ -62,13 +65,18 @@ def _gap_reason(prev, cur):
             f"{prev['period_end']} and {cur['period_end']}")
 
 
-def _record(cur, prev, consecutive):
+def _record(cur, prev, consecutive, label_keys):
     """One output row for `cur` measured against `prev`.
 
     Populates `pct_change`/`prior_value` only when there is a real, comparable
     immediate prior; every other outcome sets both to None and states the
     reason, so a caller never has to distinguish "not computed" from "computed
-    zero" or catch an exception."""
+    zero" or catch an exception.
+
+    `label_keys` are copied verbatim from `cur` (the series entry this record is
+    built from) so a caller holding a percentage knows which period it belongs
+    to. They are taken from the series, never re-derived from `period_end`,
+    because the series already carries the authoritative fiscal labels."""
     value = cur.get("value")
     rec = {
         "period_end": cur["period_end"],
@@ -77,6 +85,8 @@ def _record(cur, prev, consecutive):
         "pct_change": None,
         "reason": None,
     }
+    for key in label_keys:
+        rec[key] = cur.get(key)
 
     if prev is None:
         rec["reason"] = "no prior period"
@@ -101,7 +111,7 @@ def _record(cur, prev, consecutive):
     return rec
 
 
-def _series_change(rows, consecutive_fn):
+def _series_change(rows, consecutive_fn, label_keys):
     """Difference `rows` (sorted by `period_end`) against the period before each,
     one record per row. The first row has no prior and is reported as such rather
     than dropped, so every period in the series is represented."""
@@ -110,7 +120,7 @@ def _series_change(rows, consecutive_fn):
     prev = None
     for cur in rows:
         consecutive = prev is not None and consecutive_fn(prev, cur)
-        out.append(_record(cur, prev, consecutive))
+        out.append(_record(cur, prev, consecutive, label_keys))
         prev = cur
     return out
 
@@ -120,16 +130,24 @@ def yoy_change(series):
 
     `series` is an annual series (`RevenueSeries.annual_series`, or any iterable
     of rows with `fiscal_year`, `period_end`, `value`). A fiscal-year jump of
-    more than one is a gap and is not bridged."""
-    return _series_change(list(series), _yoy_consecutive)
+    more than one is a gap and is not bridged.
+
+    Each record carries `fiscal_year`, copied from the series row it was built
+    from, so a caller holding a percentage need not map back to the series."""
+    return _series_change(list(series), _yoy_consecutive, ("fiscal_year",))
 
 
 def qoq_change(series):
     """Quarter-over-quarter percent change: each quarter against the one before
     it. `series` is a quarterly series (`RevenueSeries.quarterly_series`, or any
     iterable of rows with `period_start`, `period_end`, `value`). Consecutiveness
-    is decided by date adjacency, so a missing quarter reads as a gap."""
-    return _series_change(list(series), _qoq_consecutive)
+    is decided by date adjacency, so a missing quarter reads as a gap.
+
+    Each record carries `fiscal_year` and `fiscal_period`, copied from the series
+    row it was built from, so a caller holding a percentage knows the quarter it
+    belongs to."""
+    return _series_change(list(series), _qoq_consecutive,
+                          ("fiscal_year", "fiscal_period"))
 
 
 if __name__ == "__main__":
