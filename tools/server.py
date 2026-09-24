@@ -450,13 +450,49 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
     # is one the filing states. It was built, tested and unreachable: #178 owned
     # the rung and #179 owned the store contract, and no issue owned letting a
     # run switch it on.
+    # Learn this issuer's boilerplate before extracting anything (#101's
+    # build_boilerplate_model, which has been written and never called from a
+    # run). 424B2s from one issuer are near-identical templates with the terms
+    # swapped, so a number every filing prints identically is template text and a
+    # number that varies is a term -- the strongest candidate filter available,
+    # and it costs no tokens.
+    #
+    # The pre-pass only normalizes; EdgarClient is cache-first, so the main loop
+    # below re-reads the same documents from cache rather than refetching. Needs
+    # at least 3 filings: build_boilerplate_model returns nothing for a corpus of
+    # one, correctly, since nothing is yet "cross-filing".
+    boilerplate = None
+    if candidate_select and len(targets) >= 3:
+        try:
+            from reduce import build_boilerplate_model
+            corpus = []
+            for m in targets:
+                try:
+                    b = expand_accession(client, m["cik"], m["accession"])
+                    prim = b.primary()
+                    if prim is not None and prim.normalized is not None:
+                        corpus.append(prim.normalized)
+                except Exception:
+                    continue          # a filing we cannot read just is not in the corpus
+            if len(corpus) >= 3:
+                model = build_boilerplate_model(meta_issuer(targets), corpus)
+                boilerplate = model.is_boilerplate
+                RUNS.log(run_id, "boilerplate model: %d paragraph(s) common to >=80%% "
+                                 "of %d filing(s) will not be offered as candidates"
+                                 % (len(model.boilerplate_hashes), model.doc_count))
+        except Exception as exc:
+            RUNS.log(run_id, "boilerplate model unavailable (%s: %s) -- candidates "
+                             "fall back to anchor proximity alone"
+                             % (type(exc).__name__, exc))
+
     samples = max(1, int(self_consistency))
     ladder = ExtractionLadder(
         spec, local_client=OllamaClient(OllamaConfig.from_env({})),
         claude_client=None, claude_enabled=False, exemplars=vstore,
         self_consistency_samples=samples,
         shadow_external=bool(shadow_external),
-        candidate_select=bool(candidate_select))
+        candidate_select=bool(candidate_select),
+        boilerplate=boilerplate)
     if candidate_select:
         RUNS.log(run_id, "candidate-select ON -- the model picks from values "
                          "located in the filing rather than producing its own")
@@ -733,6 +769,63 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
     finally:
         store.close()
         vstore.close()
+
+
+# --------------------------------------------------------------------------- #
+# Testing: the run comparison, as JSON
+#
+# compare_runs.py (#180) already computes this and prints a table. The dashboard
+# needs the same numbers as data, so this wraps that module rather than
+# recomputing the stats -- two implementations of "how many values did this field
+# produce" would drift, and the CLI is the one with tests.
+# --------------------------------------------------------------------------- #
+
+def compare_runs_json(run_a, run_b, field=None):
+    """Per-field before/after for two runs. Read-only."""
+    sys.path.insert(0, str(REPO_ROOT / "tools")) if str(REPO_ROOT / "tools") not in sys.path else None
+    import compare_runs as cr
+
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    store = home / "store" / "extractions.sqlite"
+    conn = cr.open_readonly(str(store))
+    try:
+        cr.require_run(conn, run_a)
+        cr.require_run(conn, run_b)
+        a = cr.field_stats(conn, run_a)
+        b = cr.field_stats(conn, run_b)
+    finally:
+        conn.close()
+
+    fields = sorted(set(a) | set(b))
+    rows = []
+    for f in fields:
+        sa, sb = a.get(f), b.get(f)
+
+        def side(s):
+            if not s:
+                return {"n": 0, "present": 0, "spanned": 0, "distinct": 0,
+                        "flags": 0, "dominated": False, "top": None}
+            dom = cr.dominant_value(s)
+            return {
+                "n": s["n"], "present": s["present"], "spanned": s["spanned"],
+                "distinct": s["distinct"], "flags": s["flags"],
+                "dominated": bool(cr.is_dominated(s)),
+                "top": ({"value": cr._display_value(dom[0]), "count": dom[1],
+                         "fraction": round(dom[2], 3)} if dom else None),
+            }
+
+        row = {"field": f, "a": side(sa), "b": side(sb)}
+        if field and f == field:
+            row["values"] = {
+                "a": [{"value": cr._display_value(k), "count": c}
+                      for k, c in (sa or {"values": {}})["values"].most_common(25)],
+                "b": [{"value": cr._display_value(k), "count": c}
+                      for k, c in (sb or {"values": {}})["values"].most_common(25)],
+            }
+        rows.append(row)
+
+    return {"run_a": run_a, "run_b": run_b, "field": field, "rows": rows,
+            "store": str(store)}
 
 
 def resolve_targets(params):
@@ -2398,6 +2491,16 @@ class Handler(SimpleHTTPRequestHandler):
                             "ciks": list(sq.ciks or []), "startdt": sq.startdt,
                             "enddt": sq.enddt})
             return self._json(out)
+        if path == "/api/tools/testing/compare":
+            a = (qs.get("run_a") or [None])[0]
+            b = (qs.get("run_b") or [None])[0]
+            if not a or not b:
+                return self._json({"error": "run_a and run_b are both required"}, 400)
+            try:
+                return self._json(compare_runs_json(
+                    a, b, (qs.get("field") or [None])[0]))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 404)
         if path == "/api/tools/free-research/templates":
             try:
                 return self._json(fr_templates())

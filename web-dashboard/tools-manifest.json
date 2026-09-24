@@ -28,6 +28,20 @@
     "local_doc": "tools/free_research/SCHEMA.md"
   },
   {
+    "id": "testing",
+    "kind": "verify",
+    "name": "Testing (run comparison)",
+    "purpose": "Compare two extraction runs field by field -- values present, spans earned, distinct values and flag counts -- and flag any field where one value covers 60% or more of rows, which is the shape of a fabricated constant. Reads the local store only; runs no model and writes nothing (#180).",
+    "status": "working",
+    "source": "local tool store",
+    "refresh_cadence": "on-demand (read-only)",
+    "last_run": null,
+    "output_path": "none -- read-only report",
+    "graduatedTo": null,
+    "doc_link": "https://github.com/Pat201492/Trader-Screener/blob/master/tools/compare_runs.py",
+    "local_doc": "tools/compare_runs.py"
+  },
+  {
     "id": "magic-formula",
     "kind": "model",
     "name": "Magic Formula Rank",
