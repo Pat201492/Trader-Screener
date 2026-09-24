@@ -59,6 +59,31 @@ check("100 -> 120 is +20%",
 check("120 -> 90 is -25%", yoy["2020-09-26"]["pct_change"] == -25.0)
 
 # --------------------------------------------------------------------------- #
+section("records carry fiscal_year from the series, including the first (#207)")
+# --------------------------------------------------------------------------- #
+
+# Apple-shaped annual series: FY labels present, first record's pct_change None.
+apple_annual = [
+    {"fiscal_year": 2016, "period_end": "2016-09-24", "value": 215639},
+    {"fiscal_year": 2017, "period_end": "2017-09-30", "value": 229234},
+    {"fiscal_year": 2018, "period_end": "2018-09-29", "value": 265595},
+    {"fiscal_year": 2019, "period_end": "2019-09-28", "value": 260174},
+]
+apple = rc.yoy_change(apple_annual)
+check("every record carries fiscal_year, not re-derived from period_end",
+      all("fiscal_year" in r for r in apple))
+check("fiscal_year matches the series entry, in period order",
+      [r["fiscal_year"] for r in apple] == [2016, 2017, 2018, 2019])
+first = apple[0]
+check("the first record carries fiscal_year even though its pct_change is None",
+      first["fiscal_year"] == 2016 and first["pct_change"] is None)
+check("pre-existing record keys are all still present (additive change)",
+      all(_REQUIRED_KEYS <= set(r) and "reason" in r for r in apple))
+check("FY2019 -2.04% still correct alongside the new label",
+      round(by_end(apple)["2019-09-28"]["pct_change"], 2) == -2.04
+      and by_end(apple)["2019-09-28"]["fiscal_year"] == 2019)
+
+# --------------------------------------------------------------------------- #
 section("a missing intermediate fiscal year is a gap, not a bridge")
 # --------------------------------------------------------------------------- #
 
@@ -104,10 +129,13 @@ section("qoq_change over consecutive quarters, with a gap")
 # --------------------------------------------------------------------------- #
 
 quarters = [
-    {"period_start": "2018-09-30", "period_end": "2018-12-29", "value": 40},
-    {"period_start": "2018-12-30", "period_end": "2019-03-30", "value": 30},
+    {"fiscal_year": 2019, "fiscal_period": "Q1",
+     "period_start": "2018-09-30", "period_end": "2018-12-29", "value": 40},
+    {"fiscal_year": 2019, "fiscal_period": "Q2",
+     "period_start": "2018-12-30", "period_end": "2019-03-30", "value": 30},
     # Q3 (ends ~2019-06) missing -> the next quarter is a gap
-    {"period_start": "2019-06-30", "period_end": "2019-09-28", "value": 60},
+    {"fiscal_year": 2019, "fiscal_period": "Q4",
+     "period_start": "2019-06-30", "period_end": "2019-09-28", "value": 60},
 ]
 q = by_end(rc.qoq_change(quarters))
 check("consecutive quarters 40 -> 30 is -25%",
@@ -116,6 +144,12 @@ check("the quarter after a missing one is a gap, not bridged",
       q["2019-09-28"]["pct_change"] is None
       and q["2019-09-28"]["prior_value"] is None
       and "gap" in (q["2019-09-28"]["reason"] or ""))
+check("qoq records carry fiscal_year and fiscal_period from the series (#207)",
+      q["2019-03-30"]["fiscal_year"] == 2019
+      and q["2019-03-30"]["fiscal_period"] == "Q2")
+check("qoq keeps every pre-existing key (additive change)",
+      all(_REQUIRED_KEYS <= set(r) and "reason" in r
+          for r in rc.qoq_change(quarters)))
 
 # --------------------------------------------------------------------------- #
 section("consumes a real revenue_series (#184) result unchanged")
