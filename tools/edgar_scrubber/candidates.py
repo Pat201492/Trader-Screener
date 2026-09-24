@@ -123,14 +123,27 @@ def _parse_number(raw):
     return int(digits)
 
 
-#: How many candidates a prompt should ever carry. Measured: on run #0020 the
-#: unfiltered enumerator handed the model 95-307 candidates for `barrier_pct`,
-#: `coupon_barrier_pct` and `contingent_coupon_rate`, and those three lost most
-#: of their coverage. The three fields that IMPROVED -- `maturity_date`,
-#: `pricing_date`, `issue_date` -- had exactly 2 candidates each. Asking a 7B to
-#: pick index 147 of 300 is a harder question than asking it to read the number;
-#: the premise of the SELECT rung was a SHORT labelled list.
-DEFAULT_LIMIT = 8
+#: No cap by default, and the reason is measured rather than argued.
+#:
+#: The cap looked obviously right: run #0020 handed the model 95-307 candidates
+#: for the percent fields and they extracted badly, while the date fields had 2
+#: candidates each and extracted well. The inference -- shorten the lists -- was
+#: wrong, and run #0021 tested it:
+#:
+#:     field                    uncapped (#0020)   capped at 8 (#0021)
+#:     contingent_coupon_rate        21/25                6/25
+#:     barrier_pct                    6/25                2/25
+#:
+#: The right answer WAS in the long list; ranking by anchor distance put it
+#: outside the top 8 and the cap discarded it. Capping a badly-ordered list is
+#: worse than not capping it. The date fields were never winning because their
+#: lists were short -- they win because a date's LABEL is unambiguous, which is a
+#: fact about labels, not about length.
+#:
+#: So: no cap unless a caller asks for one, and the ranking below is a
+#: presentation order, not a filter. Re-earn the cap with a rank that beats
+#: document order on a real run before turning it back on.
+DEFAULT_LIMIT = None
 
 # A candidate sitting further than this from any of the field's anchors is very
 # unlikely to be the value that anchor introduces. Generous on purpose -- a term
@@ -223,9 +236,11 @@ def candidates_for(field_def, text, *, anchors=None, is_boilerplate=None,
     `anchors` -- the field's own anchor strings. A candidate near one of them
     ranks above one far away, which breaks ties within the surviving set.
 
-    `limit` caps the list, because the point of this rung is a short list.
-    Ordering is by rank, so the cap keeps the best candidates rather than the
-    first ones in the document.
+    `limit` caps the list and defaults to no cap. A cap was measured as harmful:
+    on run #0021 capping at 8 by anchor distance cut `contingent_coupon_rate`
+    from 21 values to 6, because the right answer was in the long list and the
+    rank put it outside the top 8. Pass a limit only with a rank you have shown
+    beats document order.
     """
     ftype = getattr(field_def, "type", None)
     if ftype in ("number", "percent"):
@@ -327,14 +342,19 @@ if __name__ == "__main__":
         for i in range(60))
     unfiltered = candidates_for(_F("percent"), noisy, anchors=None, limit=None)
     assert len(unfiltered) > 50, len(unfiltered)
-    capped = candidates_for(_F("percent"), noisy)
-    assert len(capped) <= DEFAULT_LIMIT, len(capped)
+    # No cap by default any more -- #0021 measured the cap as harmful.
+    assert DEFAULT_LIMIT is None
+    assert len(candidates_for(_F("percent"), noisy)) == len(unfiltered)
+    # A caller can still ask for one explicitly.
+    assert len(candidates_for(_F("percent"), noisy, limit=8)) == 8
 
     # An anchor pulls its own value to the front even in a noisy document.
-    anchored = candidates_for(_F("percent"), noisy, anchors=["Barrier:"])
+    # An anchor still RANKS its own value first -- ordering is presentation, and
+    # with an explicit limit that ordering is what decides who survives.
+    anchored = candidates_for(_F("percent"), noisy, anchors=["Barrier:"], limit=3)
     assert anchored, anchored
     assert anchored[0]["raw"] == "70.00%", anchored[0]
-    assert len(anchored) <= DEFAULT_LIMIT
+    assert len(anchored) == 3
 
     # Boilerplate: a paragraph the corpus always prints is dropped outright.
     corpus_text = ("Barrier: 70.00%\n\n"
