@@ -233,6 +233,25 @@ def edgar_search_url(q, forms, ciks, startdt, enddt):
     return "https://www.sec.gov/edgar/search/#/" + "&".join(frag)
 
 
+def resolve_issuer_ciks(tokens, resolve_ticker):
+    """Map issuer tokens -- each either a bare CIK or a ticker -- to CIKs.
+
+    A digit string is already a CIK and passes through untouched; anything else
+    is a ticker and is resolved through `resolve_ticker` (the injected
+    `EdgarClient.ticker_to_cik`), so a ticker becomes a CIK BEFORE the query is
+    built and there is no second ticker->CIK map to keep in step. Blanks are
+    dropped. An unknown ticker raises whatever `resolve_ticker` raises
+    (`EdgarLookupError`), which the caller surfaces as a 4xx naming the ticker.
+    """
+    out = []
+    for tok in tokens:
+        tok = (tok or "").strip()
+        if not tok:
+            continue
+        out.append(tok if tok.isdigit() else resolve_ticker(tok))
+    return out
+
+
 def edgar_search(params):
     """One page of EDGAR full-text search, flattened for the UI.
 
@@ -266,6 +285,12 @@ def edgar_search(params):
         )
     home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
     client = EdgarClient(user_agent=ua, cache_dir=str(home / "cache"))
+
+    # An issuer knob may carry a ticker (AAPL) or a bare CIK; resolve tickers to
+    # CIKs here, reusing the client's own ticker_to_cik, so efts (which filters
+    # only on numeric CIKs) sees CIKs regardless of what the operator typed.
+    if ciks:
+        ciks = resolve_issuer_ciks(ciks, client.ticker_to_cik)
 
     extra = {}
     if ciks:
