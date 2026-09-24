@@ -2491,6 +2491,22 @@ class Handler(SimpleHTTPRequestHandler):
                             "ciks": list(sq.ciks or []), "startdt": sq.startdt,
                             "enddt": sq.enddt})
             return self._json(out)
+        if path == "/api/tools/edgar-scrubber/scrubbers":
+            try:
+                import scrubbers as scrubbers_mod
+                scrubbers = scrubbers_mod.load_scrubbers()
+                queries = scrubbers_mod.stored_queries()
+                out = []
+                for s in scrubbers.values():
+                    has_queries = any(s.owns_query(q) for q in queries)
+                    entry = s.to_dict()
+                    entry["has_stored_queries"] = has_queries
+                    out.append(entry)
+                return self._json(out)
+            except ImportError:
+                return self._json({"error": "scrubbers registry not available"}, 503)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
         if path == "/api/tools/testing/compare":
             a = (qs.get("run_a") or [None])[0]
             b = (qs.get("run_b") or [None])[0]
