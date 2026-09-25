@@ -1046,6 +1046,43 @@ check("...and it is the enum the array used to carry",
       set(_kind_spec.enum) == {"index", "etf", "single_stock", "basket", "worst_of"})
 
 # --------------------------------------------------------------------------- #
+section("the scrubber tool names no population (#211 AC6)")
+# --------------------------------------------------------------------------- #
+# The scrubber is a REGISTRY of per-form scrubbers -- 10-K, 10-Q, 8-K and 424B2
+# at the time of writing. A display name that picks one population out and puts
+# it in the title tells a reader the tool only does that, which stopped being
+# true when the registry landed. #226 removed "424B2" and left "(structured
+# notes)" behind, which is the same claim in different words.
+
+_MANIFEST = json.loads((server.REPO_ROOT / "web-dashboard" / "tools-manifest.json")
+                       .read_text(encoding="utf-8"))
+_SCRUBBER = [t for t in _MANIFEST if t["id"] == "edgar-scrubber"][0]
+
+# Any of these in the DISPLAY NAME means a population has crept back in.
+_POPULATION_WORDS = ("424B2", "424b2", "structured note", "structured-note",
+                     "structured notes", "10-K", "10-Q", "8-K")
+_leaked = [w for w in _POPULATION_WORDS if w.lower() in _SCRUBBER["name"].lower()]
+check("the scrubber's display name names no filing population",
+      not _leaked)
+if _leaked:
+    print("      name is %r and leaks: %s" % (_SCRUBBER["name"], ", ".join(_leaked)))
+check("...and it is still a non-empty name",
+      isinstance(_SCRUBBER["name"], str) and _SCRUBBER["name"].strip())
+
+# The registry, not the title, is where form types belong -- and it has to be
+# ASSERTED, not skipped. An `if available:` guard around a check is how a test
+# reads green while verifying nothing.
+import scrubbers as _scrubbers_mod
+
+_reg = _scrubbers_mod.load_scrubbers()
+_forms = sorted(s.form_type for s in _reg.values())
+check("the registry carries the form types, and carries more than one",
+      len(_forms) > 1)
+check("...including the population the title used to claim",
+      "424B2" in _forms)
+print("      registry serves: %s" % ", ".join(_forms))
+
+# --------------------------------------------------------------------------- #
 section("charset -- declared, not sniffed")
 # --------------------------------------------------------------------------- #
 

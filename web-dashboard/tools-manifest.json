@@ -2,8 +2,8 @@
   {
     "id": "edgar-scrubber",
     "kind": "gather",
-    "name": "EDGAR Scrubber (structured notes)",
-    "purpose": "Exploratory extraction of 424B2 structured-note terms into a LOCAL tool store — never a pipeline write. A field stays local only while a Research project is exploring it; when it proves out it graduates upstream and the local extractor is retired (#95/#109).",
+    "name": "EDGAR Scrubber",
+    "purpose": "A registry of per-form scrubbers: pick a filing form type, narrow it by issuer and date range, and extract the fields that form defines into a LOCAL tool store — never a pipeline write. A field stays local only while a Research project is exploring it; when it proves out it graduates upstream and the local extractor is retired (#95/#109).",
     "status": "working",
     "source": "SEC EDGAR",
     "refresh_cadence": "on-demand (human-supervised)",
