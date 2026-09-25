@@ -853,6 +853,134 @@ def compare_runs_json(run_a, run_b, field=None):
             "store": str(store)}
 
 
+# --------------------------------------------------------------------------- #
+# Taxonomy-sourced forms
+#
+# The registry (#209/#212) lists four form types and marks each with a
+# `field_source`. 424B2 is `spec`: its terms are prose, so a hand-authored field
+# spec is the only way to name them. 10-K, 10-Q and 8-K are `taxonomy`: every
+# number in their financial statements carries an SEC-taxonomy tag, so the filing
+# itself states what each value is (#210/#218).
+#
+# Nothing read `field_source` before this. Every extraction path loaded the 424B2
+# spec from a hardcoded path, so picking 10-Q in the UI would have fetched
+# quarterly reports and then tried to find `barrier_pct` in them. That is why no
+# run of any form but 424B2 exists -- not an untested path, an absent one.
+#
+# A taxonomy run needs no model and no ladder: the facts are already structured
+# and already attributed, so there is nothing to gate and no span to earn. It
+# writes to FactsStore (#183), which is period-keyed, rather than OutputStore,
+# which is document-keyed and would need span and spec nulled out on every row.
+# --------------------------------------------------------------------------- #
+
+def scrubber_for_forms(forms):
+    """The registry entry owning these form types, or None.
+
+    None means "no scrubber claims this", which the caller treats as the 424B2
+    spec path for backward compatibility rather than as an error.
+    """
+    try:
+        import scrubbers as scrubbers_mod
+    except ImportError:
+        return None
+    reg = scrubbers_mod.load_scrubbers()
+    wanted = {str(f).strip().upper() for f in (forms or []) if str(f).strip()}
+    for s in reg.values():
+        if wanted and wanted <= {f.upper() for f in s.forms}:
+            return s
+    return None
+
+
+def taxonomy_run(run_id, targets, home):
+    """Extract a taxonomy-sourced form: XBRL facts in, FactRecords out.
+
+    Zero tokens and no model. `companyfacts` is fetched once per filer (the
+    client is cache-first, so repeated filers cost nothing) and each filing's own
+    tagged concepts are read off it -- never a concept the filing does not tag.
+    """
+    from edgar_client import EdgarClient
+    from facts_store import FactRecord, FactsStore
+    from taxonomy_fields import fields_for_filing
+
+    ua = os.environ.get("EDGAR_USER_AGENT", "").strip()
+    if not ua:
+        raise RuntimeError(
+            "EDGAR_USER_AGENT is not set. The SEC fair-access policy requires a "
+            "contactable '<name> <email>' on every request; see SETUP.md."
+        )
+    client = EdgarClient(user_agent=ua, cache_dir=str(home / "cache"))
+    RUNS.update(run_id, status="running")
+
+    facts_cache, written, skipped = {}, 0, 0
+    # Honour the caller's home. FactsStore() with no path goes to the default
+    # local root, which means a test cannot direct it anywhere and would write
+    # into the real store -- the run has a `home` for exactly this reason.
+    store = FactsStore(path=str(home / "store" / "facts.sqlite"))
+    try:
+        for meta in targets:
+            if RUNS.stop_requested(run_id):
+                RUNS.log(run_id, "stop requested -- no further filings started")
+                break
+            cik, accession = str(meta["cik"]), meta["accession"]
+            form = (meta.get("form") or meta.get("form_type") or "").upper()
+            try:
+                if cik not in facts_cache:
+                    facts_cache[cik] = client.company_facts(cik)
+                result = fields_for_filing(facts_cache[cik], form, accession)
+            except Exception as exc:
+                skipped += 1
+                RUNS.log(run_id, "%s: %s: %s" % (accession, type(exc).__name__, exc))
+                RUNS.event(run_id, "doc_done", accession=accession, written=False,
+                           reason=str(exc)[:160])
+                continue
+
+            records = []
+            skipped_occ = 0
+            for tf in result:
+                for occ in tf.occurrences:
+                    # taxonomy_fields already names these the way FactsStore does.
+                    end = occ.get("period_end")
+                    # An instant fact (a balance-sheet point) states only an end;
+                    # the store's contract is start == end for those. A fact with
+                    # no end at all has no period, so it cannot be stored
+                    # period-keyed -- count it rather than invent a date.
+                    if not end:
+                        skipped_occ += 1
+                        continue
+                    records.append(FactRecord(
+                        cik=cik, concept=tf.concept, unit=occ.get("unit") or "",
+                        period_start=occ.get("period_start") or end,
+                        period_end=end,
+                        fiscal_year=occ.get("fiscal_year"),
+                        fiscal_period=occ.get("fiscal_period") or "",
+                        form=form, accession=accession, value=occ.get("value"),
+                        source="xbrl"))
+            if skipped_occ:
+                RUNS.log(run_id, "%s: %d fact(s) carried no period end and were "
+                                 "not stored" % (accession, skipped_occ))
+            if records:
+                store.put_facts(records)
+            written += len(records)
+            RUNS.add_document(run_id, {
+                "accession": accession, "document": None,
+                "issuer": meta.get("issuer"), "filed": meta.get("file_date"),
+                "skipped": False,
+                "fields": [{"field": tf.concept, "value": len(tf.occurrences),
+                            "rung": "xbrl"} for tf in result],
+            })
+            RUNS.log(run_id, "%s: %d concept(s), %d fact(s)"
+                             % (accession, len(result), len(records)))
+            RUNS.event(run_id, "doc_done", accession=accession,
+                       fields=len(result), kept=len(records), written=True)
+
+        RUNS.update(run_id, status="done", finished_at=utcnow(),
+                    facts_written=written, filings_skipped=skipped)
+        RUNS.log(run_id, "run complete -- %d fact(s) from %d filing(s), %d skipped"
+                         % (written, len(targets) - skipped, skipped))
+    finally:
+        store.close()
+
+
 def resolve_targets(params):
     """What to extract, from any of the three ways a caller can say it:
 
@@ -945,14 +1073,32 @@ def start_scrubber_run(params):
         raise ValueError("nothing to extract -- the query returned no filings")
     samples, shadow, cands = accuracy_switches(params)
 
+    # Which path this run takes comes from the registry, not from an assumption.
+    # `spec` (424B2) goes through the prose ladder; `taxonomy` (10-K/10-Q/8-K)
+    # reads the filing's own XBRL tags and needs no model at all.
+    forms = params.get("forms") or (params.get("search") or {}).get("forms") or []
+    if isinstance(forms, str):
+        forms = [f.strip() for f in forms.split(",") if f.strip()]
+    scrubber = scrubber_for_forms(forms)
+    source = getattr(scrubber, "field_source", "spec") or "spec"
+
     run_id = RUNS.create("edgar-scrubber", {**provenance, "fields": fields,
                                              "limit": len(targets),
                                              "self_consistency": samples,
                                              "shadow_external": shadow,
-                                             "candidate_select": cands})
+                                             "candidate_select": cands,
+                                             "form_type": getattr(scrubber, "form_type", None),
+                                             "field_source": source})
+    if source == "taxonomy":
+        RUNS.log(run_id, "%s is taxonomy-sourced -- reading the filing's own XBRL "
+                         "tags, no model and no field spec"
+                         % getattr(scrubber, "form_type", "this form"))
 
     def worker():
         try:
+            if source == "taxonomy":
+                taxonomy_run(run_id, targets, home)
+                return
             scrubber_run(run_id, targets, fields, home,
                          self_consistency=samples, shadow_external=shadow,
                          candidate_select=cands)

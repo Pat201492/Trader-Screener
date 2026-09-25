@@ -1046,6 +1046,105 @@ check("...and it is the enum the array used to carry",
       set(_kind_spec.enum) == {"index", "etf", "single_stock", "basket", "worst_of"})
 
 # --------------------------------------------------------------------------- #
+section("taxonomy-sourced forms take the XBRL path, not the prose ladder")
+# --------------------------------------------------------------------------- #
+# The registry marks each form's field_source: 424B2 is `spec` (prose terms need
+# a hand-authored field spec), 10-K/10-Q/8-K are `taxonomy` (every number carries
+# an SEC tag, so the filing states its own fields).
+#
+# Nothing read field_source before this. Every extraction path loaded the 424B2
+# spec from a hardcoded path, so choosing 10-Q would have fetched quarterly
+# reports and then hunted for barrier_pct in them. That is why no run of any form
+# but 424B2 exists in the store: the path was absent, not untested.
+
+check("424B2 resolves to the spec path",
+      server.scrubber_for_forms(["424B2"]).field_source == "spec")
+for _f in ("10-K", "10-Q", "8-K"):
+    _s = server.scrubber_for_forms([_f])
+    check("%s resolves to the taxonomy path" % _f,
+          _s is not None and _s.field_source == "taxonomy")
+check("an unknown form falls back to the spec path rather than raising",
+      server.scrubber_for_forms(["NOSUCH"]) is None)
+check("no forms at all also falls back", server.scrubber_for_forms([]) is None)
+
+# Drive the whole taxonomy path offline: the committed Apple companyfacts
+# fixture through a fake client, into a temp FactsStore.
+import taxonomy_fields as _txf
+from facts_store import FactsStore as _FactsStore
+
+_FIX = (server.REPO_ROOT / "tools" / "edgar_scrubber" / "fixtures"
+        / "companyfacts_320193.json")
+_facts = json.loads(_FIX.read_text(encoding="utf-8"))
+_ACCN, _FORM = "0000320193-23-000106", "10-K"
+
+
+class _FakeFactsClient:
+    def __init__(self, payload):
+        self.payload, self.calls = payload, 0
+
+    def company_facts(self, cik):
+        self.calls += 1
+        return self.payload
+
+
+_tax_home = Path(tempfile.mkdtemp(prefix="taxrun-gate-"))
+_prev_home = os.environ.get("EDGAR_SCRUBBER_HOME")
+_prev_ua = os.environ.get("EDGAR_USER_AGENT")
+os.environ["EDGAR_SCRUBBER_HOME"] = str(_tax_home)
+os.environ["EDGAR_USER_AGENT"] = "Test Tester test@example.com"
+
+import edgar_client as _ec
+_real_client = _ec.EdgarClient
+_fake = _FakeFactsClient(_facts)
+_ec.EdgarClient = lambda **kw: _fake
+try:
+    _rid = server.RUNS.create("edgar-scrubber", {"limit": 2, "fields": []})
+    # The same filing twice, to prove the store's key is idempotent.
+    server.taxonomy_run(_rid, [
+        {"cik": "320193", "accession": _ACCN, "form": _FORM},
+        {"cik": "320193", "accession": _ACCN, "form": _FORM},
+    ], _tax_home)
+finally:
+    _ec.EdgarClient = _real_client
+
+_tax_run = server.RUNS.get(_rid)
+check("a taxonomy run completes without a model", _tax_run["status"] == "done")
+check("companyfacts is fetched once per filer, not once per filing",
+      _fake.calls == 1)
+check("facts were written", (_tax_run.get("facts_written") or 0) > 0)
+
+_fs_store = _FactsStore(path=str(_tax_home / "store" / "facts.sqlite"))
+try:
+    _rows = _fs_store.facts_for("320193")
+
+    def _g(r, k):
+        return r[k] if isinstance(r, dict) else getattr(r, k)
+
+    check("rows read back from the period-keyed store", len(_rows) > 0)
+    check("writing the same filing twice leaves one row per key",
+          len(_rows) * 2 == (_tax_run.get("facts_written") or 0))
+    check("every fact is marked source=xbrl, never 'extracted'",
+          all(_g(r, "source") == "xbrl" for r in _rows))
+    check("every fact carries a period at both ends",
+          all(_g(r, "period_start") and _g(r, "period_end") for r in _rows))
+    check("an instant fact has period_start == period_end, not a guessed start",
+          any(_g(r, "period_start") == _g(r, "period_end") for r in _rows))
+    check("a duration fact spans two different dates",
+          any(_g(r, "period_start") != _g(r, "period_end") for r in _rows))
+    check("concepts are taxonomy-qualified",
+          all(":" in str(_g(r, "concept")) for r in _rows))
+finally:
+    _fs_store.close()
+    if _prev_home is None:
+        os.environ.pop("EDGAR_SCRUBBER_HOME", None)
+    else:
+        os.environ["EDGAR_SCRUBBER_HOME"] = _prev_home
+    if _prev_ua is None:
+        os.environ.pop("EDGAR_USER_AGENT", None)
+    else:
+        os.environ["EDGAR_USER_AGENT"] = _prev_ua
+
+# --------------------------------------------------------------------------- #
 section("the scrubber tool names no population (#211 AC6)")
 # --------------------------------------------------------------------------- #
 # The scrubber is a REGISTRY of per-form scrubbers -- 10-K, 10-Q, 8-K and 424B2
