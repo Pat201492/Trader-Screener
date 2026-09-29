@@ -1,0 +1,27 @@
+{
+  "taxonomy": "us-gaap",
+  "tag": "Assets",
+  "ccp": "CY2024Q4I",
+  "uom": "USD",
+  "label": "Assets",
+  "description": "Sum of the carrying amounts as of the balance sheet date of all assets that are recognized.",
+  "pts": 2,
+  "data": [
+    {
+      "accn": "0000320193-24-000123",
+      "cik": 320193,
+      "entityName": "Apple Inc.",
+      "loc": "US-CA",
+      "end": "2024-12-28",
+      "val": 344085000000
+    },
+    {
+      "accn": "0000789019-24-000045",
+      "cik": 789019,
+      "entityName": "Microsoft Corporation",
+      "loc": "US-WA",
+      "end": "2024-12-31",
+      "val": 533898000000
+    }
+  ]
+}

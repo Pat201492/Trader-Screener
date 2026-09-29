@@ -1,0 +1,20 @@
+{
+  "taxonomy": "us-gaap",
+  "tag": "Revenues",
+  "ccp": "CY2024",
+  "uom": "USD",
+  "label": "Revenues",
+  "description": "Amount of revenue recognized from goods sold, services rendered, insurance premiums, or other activities that constitute an earning process.",
+  "pts": 1,
+  "data": [
+    {
+      "accn": "0000019617-24-000200",
+      "cik": 19617,
+      "entityName": "JPMorgan Chase & Co.",
+      "loc": "US-NY",
+      "start": "2024-01-01",
+      "end": "2024-12-31",
+      "val": 177556000000
+    }
+  ]
+}
