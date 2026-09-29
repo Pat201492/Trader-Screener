@@ -1183,6 +1183,165 @@ finally:
         os.environ["EDGAR_USER_AGENT"] = _prev_ua
 
 # --------------------------------------------------------------------------- #
+section("canonical layer: /standardized (one filer) and /compare (cross-filer)")
+# --------------------------------------------------------------------------- #
+# One temp store seeded two ways: the Apple companyfacts fixture through
+# taxonomy_run (per-filer facts that carry a `filed` date), and the frames
+# fixtures through frames_ingest (cross-filer facts that carry NONE). The
+# canonical endpoints must serve standard fields off both.
+import frames_ingest as _fi
+from facts_store import FactRecord as _FactRecord
+
+_canon_home = Path(tempfile.mkdtemp(prefix="canon-gate-"))
+_cprev_home = os.environ.get("EDGAR_SCRUBBER_HOME")
+_cprev_ua = os.environ.get("EDGAR_USER_AGENT")
+os.environ["EDGAR_SCRUBBER_HOME"] = str(_canon_home)
+os.environ["EDGAR_USER_AGENT"] = "Test Tester test@example.com"
+# filer_name memoises; earlier gates cached Apple as unknown against a different
+# store, so clear it before this store fills the `filers` directory.
+server._FILER_NAMES.clear()
+
+
+class _FakeFramesClient:
+    """Serves the committed frames fixtures by (tag, unit, period); an unseen
+    concept returns None, exactly as a frames call with no data would."""
+
+    def __init__(self, by_key):
+        self.by_key = by_key
+
+    def frames(self, taxonomy, tag, unit, period):
+        return self.by_key.get((tag, unit, period))
+
+
+_frames_dir = (server.REPO_ROOT / "tools" / "edgar_scrubber" / "fixtures" / "frames")
+_frames_by_key = {}
+for _fp in sorted(_frames_dir.glob("*.json")):
+    _parts = _fp.stem.split("_")  # us-gaap, <tag>, <unit>, <period>
+    _key = ("_".join(_parts[1:-2]), _parts[-2], _parts[-1])
+    _frames_by_key[_key] = json.loads(_fp.read_text(encoding="utf-8"))
+
+_frames_client = _FakeFramesClient(_frames_by_key)
+
+# 1) Apple's per-filer facts (filed dates present).
+import edgar_client as _ec2
+_real_client2 = _ec2.EdgarClient
+_ec2.EdgarClient = lambda **kw: _FakeFactsClient(_facts)
+try:
+    _crid = server.RUNS.create("edgar-scrubber", {"limit": 1, "fields": []})
+    server.taxonomy_run(_crid, [{"cik": "320193", "accession": _ACCN,
+                                 "form": _FORM}], _canon_home)
+finally:
+    _ec2.EdgarClient = _real_client2
+
+_canon_store = _FactsStore(path=str(_canon_home / "store" / "facts.sqlite"))
+try:
+    # 2) Cross-filer frames facts (no filed date), for two fields.
+    _fi.ingest_frames(_frames_client, "revenue", "CY2024", _canon_store)
+    _fi.ingest_frames(_frames_client, "operating_income", "CY2024", _canon_store)
+    # 3) A synthetic filer whose revenue at the frames period end was filed AFTER
+    #    the as_of the test will use -- so it must be dropped, but never counted
+    #    among the no-filed-date exclusions.
+    _canon_store.put_facts([_FactRecord(
+        cik="1750", concept="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+        unit="USD", period_start="2024-01-01", period_end="2024-12-31",
+        fiscal_year=2024, fiscal_period="FY", form="10-K",
+        accession="0000001750-25-000001", value=5_000_000_000, source="xbrl",
+        filed="2025-03-01")])
+    _canon_store.put_filers({"1750": "Synthetic Co"})
+finally:
+    _canon_store.close()
+
+# Seed the cached company_tickers.json the ticker resolver reads (cache only).
+from edgar_client import HttpCache as _HttpCache, EdgarClient as _EC
+_HttpCache(str(_canon_home / "cache")).put(
+    _EC.TICKERS_URL,
+    json.dumps({"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+                "1": {"cik_str": 12927, "ticker": "BA", "title": "Boeing Company"}})
+    .encode("utf-8"))
+
+try:
+    # -- standardized (AC1) --
+    _std = server.store_standardized(cik="320193", period="annual")
+    _std_rev = next((r for r in _std["rows"] if r["field"] == "revenue"), None)
+    check("standardized has a revenue row for the seeded filer",
+          _std_rev is not None)
+    check("standardized revenue's FY2023 value is the fixture's",
+          _std_rev is not None and _std_rev["values"].get("2023-09-30") == 383285000000)
+    check("standardized names the us-gaap concept behind the standard field",
+          _std_rev is not None
+          and _std_rev["concepts"].get("2023-09-30", "").startswith("us-gaap:"))
+    check("standardized carries the filer's name and the no-filed-date count",
+          _std.get("name") and _std.get("excluded_no_filed_date") == 0)
+
+    # -- compare, no as_of (AC2) --
+    _cmp = server.store_compare(field="revenue", period_end="2024-12-31")
+    _cmp_ciks = [r["cik"] for r in _cmp["rows"]]
+    check("compare returns the seeded frames filers for the period",
+          {"320193", "12927", "19617"} <= set(_cmp_ciks))
+    check("compare rows are sorted by value descending",
+          all(_cmp["rows"][i]["value"] >= _cmp["rows"][i + 1]["value"]
+              for i in range(len(_cmp["rows"]) - 1)))
+    check("compare's top filer is Apple at the frames value",
+          _cmp["rows"][0]["cik"] == "320193"
+          and _cmp["rows"][0]["value"] == 391035000000)
+    check("every compare row carries a name",
+          all(r.get("name") for r in _cmp["rows"]))
+    check("every compare row names the us-gaap concept it resolved through",
+          all(r["concept"].startswith("us-gaap:") for r in _cmp["rows"]))
+
+    # -- compare, tickers filter (AC3) --
+    _cmp_t = server.store_compare(field="revenue", period_end="2024-12-31",
+                                  tickers="AAPL,BA,ZZZZ")
+    check("a tickers filter keeps only the matched filers",
+          {r["cik"] for r in _cmp_t["rows"]} == {"320193", "12927"})
+    check("an unknown ticker is reported, not silently dropped",
+          "ZZZZ" in _cmp_t["unresolved"])
+
+    # -- compare, as_of (AC4) --
+    _cmp_a = server.store_compare(field="revenue", period_end="2024-12-31",
+                                  as_of="2024-06-30")
+    check("as_of excludes the frames facts (no filed date) and counts them",
+          _cmp_a["excluded_no_filed_date"] == 3)
+    check("a value filed after the as_of date is not returned",
+          "1750" not in [r["cik"] for r in _cmp_a["rows"]]
+          and _cmp_a["rows"] == [])
+
+    # -- errors over the wire (AC5) -- on a dedicated loopback server, so this
+    # store's env is what the handler reads.
+    os.environ["EDGAR_SCRUBBER_HOME"] = str(_canon_home)
+    _canon_httpd = _THS(("127.0.0.1", 0),
+                        _partial(server.Handler, directory=str(server.REPO_ROOT)))
+    threading.Thread(target=_canon_httpd.serve_forever, daemon=True).start()
+    _canon_api = "http://127.0.0.1:%d" % _canon_httpd.server_address[1]
+
+    def _cget(path):
+        try:
+            with urllib.request.urlopen(_canon_api + path, timeout=5) as r:
+                return r.status, json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode("utf-8") or "{}")
+
+    _st, _body = _cget("/api/store/compare?field=bogus&period_end=2024-12-31")
+    check("an unknown compare field is a 400 with an error message",
+          _st == 400 and _body.get("error"))
+    _st, _body = _cget("/api/store/standardized?cik=320193&as_of=notadate")
+    check("a malformed as_of is a 400 with an error message",
+          _st == 400 and _body.get("error"))
+    _st, _body = _cget("/api/store/standardized?cik=320193")
+    check("standardized is served over the wire",
+          _st == 200 and any(r["field"] == "revenue" for r in _body["rows"]))
+    _canon_httpd.shutdown()
+finally:
+    if _cprev_home is None:
+        os.environ.pop("EDGAR_SCRUBBER_HOME", None)
+    else:
+        os.environ["EDGAR_SCRUBBER_HOME"] = _cprev_home
+    if _cprev_ua is None:
+        os.environ.pop("EDGAR_USER_AGENT", None)
+    else:
+        os.environ["EDGAR_USER_AGENT"] = _cprev_ua
+
+# --------------------------------------------------------------------------- #
 section("the scrubber tool names no population (#211 AC6)")
 # --------------------------------------------------------------------------- #
 # The scrubber is a REGISTRY of per-form scrubbers -- 10-K, 10-Q, 8-K and 424B2

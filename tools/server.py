@@ -2610,6 +2610,226 @@ def store_facts(cik=None, period="annual", form=None):
 
 
 # --------------------------------------------------------------------------- #
+# Canonical layer: standardized (one filer) and compare (one field, many filers)
+# --------------------------------------------------------------------------- #
+
+def _validate_as_of(as_of):
+    """Return `as_of` unchanged (or None when blank), raising ValueError on any
+    string that is not an ISO date. Validated up front so a malformed `as_of`
+    is a 400 naming the fault, never a silent all-rows result."""
+    if as_of in (None, ""):
+        return None
+    from datetime import date
+    try:
+        date.fromisoformat(as_of)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"as_of must be an ISO date (YYYY-MM-DD), got {as_of!r}")
+    return as_of
+
+
+def _cached_ticker_map():
+    """`TICKER -> bare CIK` from the cached `company_tickers.json`, or `{}` when
+    it was never fetched. Cache-only on purpose: a read view must never reach out
+    to EDGAR, so a ticker the cache does not know resolves to nothing (and is
+    reported as unresolved) rather than triggering a network call."""
+    from edgar_client import HttpCache, EdgarClient, cik_bare
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    body = HttpCache(str(home / "cache")).get(EdgarClient.TICKERS_URL)
+    if not body:
+        return {}
+    raw = json.loads(body)
+    rows = raw.values() if isinstance(raw, dict) else raw
+    out = {}
+    for row in rows:
+        tick = (row.get("ticker") or "").strip().upper()
+        if tick:
+            try:
+                out[tick] = cik_bare(row["cik_str"])
+            except (KeyError, ValueError):
+                continue
+    return out
+
+
+def _resolve_tickers(tokens):
+    """Resolve a list of ticker tokens to bare CIKs against the cached map.
+    Returns `(ciks, unresolved)`; a token the cache cannot place is kept in
+    `unresolved` rather than dropped silently."""
+    tmap = _cached_ticker_map()
+    ciks, unresolved = [], []
+    for tok in tokens:
+        key = (tok or "").strip().upper()
+        if not key:
+            continue
+        cik = tmap.get(key)
+        if cik:
+            ciks.append(cik)
+        else:
+            unresolved.append(tok.strip())
+    return ciks, unresolved
+
+
+def _facts_ciks(store):
+    """Every CIK the facts table holds, busiest first. Uses the store's own
+    connection (read path) so it sees exactly the rows the resolvers do."""
+    return [r["cik"] for r in store._conn.execute(
+        "SELECT cik, COUNT(*) AS c FROM facts GROUP BY cik ORDER BY c DESC")]
+
+
+def _as_of_facts(store, cik, facts, as_of):
+    """Restrict a filer's facts to what was KNOWN on `as_of`. For each fact,
+    `FactsStore.as_of` supplies the version whose `filed <= as_of` (a restatement
+    filed later is not yet visible). A fact with no `filed` date (a frames row)
+    cannot be placed in time and is excluded. Returns `(kept, excluded_count)`
+    where `excluded_count` is how many were dropped for lacking a filed date."""
+    kept, excluded = [], 0
+    for f in facts:
+        if f["filed"] is None:
+            excluded += 1
+            continue
+        picked = store.as_of(cik, f["concept"], f["period_start"],
+                             f["period_end"], as_of)
+        if picked is not None:
+            kept.append(picked)
+    return kept, excluded
+
+
+def store_standardized(cik=None, period="annual", as_of=None):
+    """One filer's statements in STANDARD fields, not raw us-gaap concepts.
+
+    Each `CANONICAL` field the filer has becomes one row, its value resolved
+    per period through `canonical_concepts.resolve` (era-partitioned concepts
+    collapsed to one value each). `concepts` records which us-gaap concept
+    supplied each period's value, so a standard label never hides the tag behind
+    it. `period` bins by duration exactly as `store_facts` does. With `as_of`,
+    each value is what was known on that date; frames facts (no filed date) drop
+    out and are counted in `excluded_no_filed_date`.
+    """
+    from facts_store import FactsStore
+    import canonical_concepts as cc
+
+    if period not in _PERIOD_WINDOWS:
+        raise ValueError(f"period must be one of {sorted(_PERIOD_WINDOWS)}")
+    as_of = _validate_as_of(as_of)
+
+    p = facts_path()
+    empty = {"store": str(p), "exists": p.exists(), "cik": None, "name": None,
+             "period": period, "periods": [], "rows": [],
+             "excluded_no_filed_date": 0}
+    if not p.exists():
+        return empty
+
+    store = FactsStore(path=str(p), readonly=True)
+    try:
+        present = _facts_ciks(store)
+        if not present:
+            return {**empty, "exists": True}
+        want = None
+        if cik:
+            from edgar_client import cik_bare
+            try:
+                want = cik_bare(cik)
+            except (ValueError, TypeError):
+                want = str(cik)
+        chosen = want if want in present else present[0]
+
+        facts = store.facts_for(chosen)
+        excluded = 0
+        if as_of:
+            facts, excluded = _as_of_facts(store, chosen, facts, as_of)
+
+        lo, hi = _PERIOD_WINDOWS[period]
+
+        def in_window(e):
+            d = _days(e["period_start"], e["period_end"])
+            return d is not None and (d == 0 or lo <= d <= hi)
+
+        rows, periods = [], set()
+        for field in cc.CANONICAL:
+            entries = [e for e in cc.resolve(facts, field) if in_window(e)]
+            if not entries:
+                continue
+            values, concepts = {}, {}
+            for e in entries:
+                end = e["period_end"]
+                values[end] = e["value"]
+                concepts[end] = e["concept"]
+                periods.add(end)
+            rows.append({"field": field, "values": values, "concepts": concepts})
+
+        return {"store": str(p), "exists": True, "cik": chosen,
+                "name": filer_name(chosen), "period": period,
+                "periods": sorted(periods), "rows": rows,
+                "excluded_no_filed_date": excluded}
+    finally:
+        store.close()
+
+
+def store_compare(field=None, period_end=None, tickers=None, as_of=None):
+    """One STANDARD field ranked across filers for a single period end.
+
+    Every filer in the store (or, with `tickers`, only those it names) is
+    resolved to one value for `field` at `period_end` via
+    `canonical_concepts.resolve`, and the rows are sorted by value descending.
+    `tickers` is a comma list resolved to CIKs from the cached
+    `company_tickers.json` ONLY -- an unknown ticker lands in `unresolved`, never
+    a network call. With `as_of`, a value filed after that date is not shown, and
+    frames facts (no filed date) are excluded and counted in
+    `excluded_no_filed_date`.
+    """
+    from facts_store import FactsStore
+    import canonical_concepts as cc
+
+    if not field or field not in cc.CANONICAL:
+        raise ValueError(
+            f"unknown field {field!r}; known: {', '.join(sorted(cc.CANONICAL))}")
+    if not period_end:
+        raise ValueError("period_end is required")
+    as_of = _validate_as_of(as_of)
+
+    scope, unresolved = None, []
+    if tickers:
+        scope, unresolved = _resolve_tickers(tickers.split(","))
+
+    p = facts_path()
+    base = {"store": str(p), "exists": p.exists(), "field": field,
+            "period_end": period_end, "rows": [], "unresolved": unresolved,
+            "excluded_no_filed_date": 0}
+    if not p.exists():
+        return base
+
+    store = FactsStore(path=str(p), readonly=True)
+    try:
+        concepts = set(cc.CANONICAL[field])
+        ciks = [str(c) for c in scope] if scope is not None else _facts_ciks(store)
+
+        rows, excluded = [], 0
+        for cik in ciks:
+            relevant = [f for f in store.facts_for(cik)
+                        if f["concept"] in concepts and f["period_end"] == period_end]
+            if as_of:
+                relevant, dropped = _as_of_facts(store, cik, relevant, as_of)
+                excluded += dropped
+            if not relevant:
+                continue
+            match = [e for e in cc.resolve(relevant, field)
+                     if e["period_end"] == period_end]
+            if not match:
+                continue
+            # A filer can report the same end under two durations (a Q4 and the
+            # fiscal year); take the longest span so the annual number ranks.
+            best = max(match, key=lambda e: _days(e["period_start"],
+                                                   e["period_end"]) or 0)
+            rows.append({"cik": cik, "name": filer_name(cik),
+                         "value": best["value"], "concept": best["concept"]})
+
+        rows.sort(key=lambda r: (r["value"] is None, -(r["value"] or 0)))
+        return {**base, "rows": rows, "excluded_no_filed_date": excluded}
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- #
 # Health
 # --------------------------------------------------------------------------- #
 
@@ -2962,6 +3182,27 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(store_facts((qs.get("cik") or [None])[0],
                                               (qs.get("period") or ["annual"])[0],
                                               (qs.get("form") or [None])[0]))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/store/standardized":
+            try:
+                return self._json(store_standardized(
+                    (qs.get("cik") or [None])[0],
+                    (qs.get("period") or ["annual"])[0],
+                    (qs.get("as_of") or [None])[0]))
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/store/compare":
+            try:
+                return self._json(store_compare(
+                    (qs.get("field") or [None])[0],
+                    (qs.get("period_end") or [None])[0],
+                    (qs.get("tickers") or [None])[0],
+                    (qs.get("as_of") or [None])[0]))
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
         if path == "/api/store/extractions":
