@@ -45,6 +45,16 @@
           ]
         }
       },
+      "OperatingIncomeLoss": {
+        "label": "Operating Income (Loss)",
+        "description": "The net result for the period of deducting operating expenses from operating revenues.",
+        "units": {
+          "USD": [
+            {"start": "2021-09-26", "end": "2022-09-24", "val": 119437000000, "accn": "0000320193-22-000108", "fy": 2022, "fp": "FY", "form": "10-K", "filed": "2022-10-28"},
+            {"start": "2022-09-25", "end": "2023-09-30", "val": 114301000000, "accn": "0000320193-23-000106", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-03"}
+          ]
+        }
+      },
       "Assets": {
         "label": "Assets",
         "description": "Sum of the carrying amounts as of the balance sheet date of all assets that are recognized.",
