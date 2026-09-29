@@ -2518,6 +2518,7 @@ function openScrubberView(id){
   const s=(SCRUBBERS||[]).find(x=>x.id===id);
   if(!s) return;
   INDEX_SCROLL=(document.scrollingElement||document.documentElement).scrollTop;
+  RESULTS_FORM=s.form_type;  // the EDGAR Results tab opens on this form
   const panel=document.getElementById('toolPanel');
   const fi=SCRUBBER_FIELDS||{fields:[],default:[]};
   SEARCH={hits:[],selected:new Set(),fields:fi.fields,defaults:fi.default,query:null,issuerFilter:null};
@@ -2529,7 +2530,9 @@ function openScrubberView(id){
                 style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:4px 10px;cursor:pointer">← forms</button>
         <div class="name">${esc(s.display_name||s.form_type)}</div>
         <span class="muted" style="font-size:11.5px">${esc(s.purpose||'')}</span>
-        <button style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer"
+        <button style="margin-left:auto;background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:4px 10px;cursor:pointer"
+                onclick="goTab('edgar-results')">stored ${esc(s.form_type)} results →</button>
+        <button style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer"
                 onclick="closeToolPanel()">close</button>
       </div>
       <div class="muted" style="font-size:12px;margin:6px 0 2px">
@@ -3692,18 +3695,56 @@ function toolSection(title){
   return `<div class="group-title">${esc(title)}</div>`;
 }
 
-// EDGAR Scrubber: run it, then its own stored results and its own coverage.
-// Those last two were already scrubber-specific functions living under generic
-// tab names.
+// EDGAR Scrubber: search and run. What it already stored lives on the EDGAR
+// Results tab, scoped to one form type -- stacking every form's output under
+// the run surface meant opening the 10-K scrubber showed 424B2 notes.
 async function renderToolEdgarScrubber(){
   const v=document.getElementById('view');
   v.innerHTML='<div class="loading">Loading the EDGAR scrubber…</div>';
   stopPolling();
   const t=await toolEntry('edgar-scrubber');
   v.innerHTML=runnerBanner()+toolHeader(t)+
-    `<div id="toolPanel" style="display:none"></div>
-     <div id="tool_results"></div>
-     <div id="tool_coverage"></div>`;
+    `<div id="toolPanel" style="display:none"></div>`;
+}
+
+// EDGAR Results: stored output for ONE form type at a time. The form follows
+// the scrubber last opened, so the 10-K scrubber leads to 10-K results, and the
+// chips switch it. The two stores split by field_source: `spec` forms (424B2)
+// wrote prose extractions with spans and coverage; `taxonomy` forms (10-K,
+// 10-Q, 8-K) wrote period-keyed XBRL facts, read per form.
+let RESULTS_FORM=null;
+async function renderToolEdgarResults(form){
+  const v=document.getElementById('view');
+  stopPolling();
+  if(DEMO_ON||!RUNNER){
+    v.innerHTML='<div style="padding:26px"><div class="muted">Stored results are read from the scrubber\'s local store, which needs the tool runner: <code>python tools/server.py</code>.</div></div>';
+    return;
+  }
+  if(!(SCRUBBERS||[]).length){
+    try{ SCRUBBERS=await (await fetch('/api/tools/edgar-scrubber/scrubbers')).json(); }
+    catch(e){ SCRUBBERS=[]; }
+  }
+  const reg=Array.isArray(SCRUBBERS)?SCRUBBERS:[];
+  if(form) RESULTS_FORM=form;
+  const s=reg.find(x=>x.form_type===RESULTS_FORM)||reg[0];
+  if(!s){ v.innerHTML='<div class="err">Scrubber registry unavailable.</div>'; return; }
+  RESULTS_FORM=s.form_type;
+  const chip=on=>`background:${on?'var(--accent)':'transparent'};border:1px solid ${on?'var(--accent)':'var(--border)'};`
+    +`color:${on?'#fff':'var(--txt)'};border-radius:20px;padding:4px 12px;font-size:12px;cursor:pointer`;
+  v.innerHTML=`
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+      <span class="muted" style="font-size:12px">Form</span>
+      ${reg.map(x=>`<button onclick="renderToolEdgarResults('${esc(x.form_type)}')" title="${esc(x.display_name||'')}"
+        style="${chip(x.form_type===s.form_type)}">${esc(x.form_type)}</button>`).join('')}
+    </div>
+    <div id="tool_results"></div>
+    <div id="tool_coverage"></div>`;
+  if((s.field_source||'spec')==='taxonomy'){
+    FACTS=null; FACTS_Q=''; FACTS_ALL=false;
+    document.getElementById('tool_results').innerHTML='<div id="factsView"><div class="loading">Reading the local facts store…</div></div>';
+    await loadFacts(null,'annual',s.form_type);
+    return;
+  }
   await renderToolsResults('tool_results');
   await renderToolsCoverage(undefined,'tool_coverage');
 }
@@ -4067,7 +4108,7 @@ async function renderToolsResults(target){
   try{
     const data=await (await fetch('/api/store/extractions')).json();
     if(!data.exists||!data.documents.length){
-      v.innerHTML=`<div style="padding:26px"><div class="muted">Nothing extracted yet — run the EDGAR scrubber from the Data Gathering tab.</div>
+      v.innerHTML=`<div style="padding:26px"><div class="muted">Nothing extracted yet — run the 424B2 scrubber from the EDGAR Scrubber tab.</div>
         <div class="muted" style="font-size:11px;margin-top:6px">store: <code>${esc(data.store)}</code></div></div>`;
       return;
     }
@@ -4083,6 +4124,91 @@ async function renderToolsResults(target){
   }catch(e){
     v.innerHTML=`<div class="err">Failed to read the store: ${esc(e.message)}</div>`;
   }
+}
+
+// ── reported facts: what 10-K/10-Q/8-K runs wrote (#233) ─────
+// Statement grid, concept rows x fiscal period-end columns, latest version of
+// each period. The filer's own XBRL tags, so there is no span or confidence to
+// show -- a restated period is flagged instead, since that is the one thing
+// about a filer-reported number worth a second look.
+let FACTS=null, FACTS_Q='', FACTS_ALL=false;
+function fmtFact(v,unit){
+  if(v==null) return '–';
+  if(typeof v!=='number') return esc(String(v));
+  if(unit==='USD'&&Math.abs(v)>=1e6){
+    const a=Math.abs(v), s=a>=1e9?[1e9,'B']:[1e6,'M'];
+    return (v<0?'−':'')+(a/s[0]).toLocaleString(undefined,{maximumFractionDigits:a>=1e9?2:1})+s[1];
+  }
+  if(unit==='shares'&&Math.abs(v)>=1e6) return (v/1e6).toLocaleString(undefined,{maximumFractionDigits:1})+'M';
+  return v.toLocaleString(undefined,{maximumFractionDigits:4});
+}
+async function loadFacts(cik,period,form){
+  const qs=new URLSearchParams();
+  if(cik) qs.set('cik',cik);
+  if(period) qs.set('period',period);
+  form=form||(FACTS&&FACTS.form);
+  if(form) qs.set('form',form);
+  try{ renderFacts(await (await fetch('/api/store/facts?'+qs)).json()); }
+  catch(e){ const b=document.getElementById('factsView'); if(b) b.innerHTML=`<div class="err">${esc(e.message)}</div>`; }
+}
+function filterFacts(q){ FACTS_Q=q; renderFacts(FACTS,true); }
+function toggleAllFacts(){ FACTS_ALL=!FACTS_ALL; renderFacts(FACTS); }
+function renderFacts(data,keepFocus){
+  const box=document.getElementById('factsView');
+  if(!box||!data) return;
+  FACTS=data;
+  if(data.error){ box.innerHTML=`<div class="err">${esc(data.error)}</div>`; return; }
+  if(!data.exists||!(data.filers||[]).length){
+    box.innerHTML=`<div style="padding:26px"><div class="muted">No ${esc(data.form||'')} results yet — open the ${esc(data.form||'')} scrubber in the EDGAR Scrubber tab, search, and extract.</div>
+      <div class="muted" style="font-size:11px;margin-top:6px">store: <code>${esc(data.store||'')}</code></div></div>`;
+    return;
+  }
+  const sel='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:4px 8px;font-size:12px';
+  const periods=data.periods||[];
+  const q=FACTS_Q.trim().toLowerCase();
+  const head=new Set(data.headline||[]);
+  // Headline statement lines by default; the long tail (200+ tags on a 10-K)
+  // behind a toggle or a search, so the grid opens on something readable.
+  const rows=(data.rows||[]).filter(r=>q?r.concept.toLowerCase().includes(q):(FACTS_ALL||head.has(r.concept)||!head.size));
+  const other=(data.rows||[]).filter(r=>Object.keys(r.other||{}).length&&(!q||r.concept.toLowerCase().includes(q)));
+  const label=f=>`${f.name||'CIK '+f.cik} · ${f.facts} facts · ${f.filings} filing(s)`;
+  box.innerHTML=`
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <div class="name">${esc(data.form||'')} reported facts (XBRL)</div>
+        <select onchange="loadFacts(this.value,FACTS.period)" style="${sel}">
+          ${data.filers.map(f=>`<option value="${esc(f.cik)}" ${f.cik===data.cik?'selected':''}>${esc(label(f))}</option>`).join('')}
+        </select>
+        <select onchange="loadFacts(FACTS.cik,this.value)" style="${sel}">
+          ${['annual','quarterly'].map(p=>`<option value="${p}" ${p===data.period?'selected':''}>${p}</option>`).join('')}
+        </select>
+        <input id="factsSearch" placeholder="filter concepts…" value="${esc(FACTS_Q)}" oninput="filterFacts(this.value)" style="${sel};min-width:160px">
+        ${head.size&&!q?`<button onclick="toggleAllFacts()" style="${sel};cursor:pointer">${FACTS_ALL?'headline only':`all ${data.rows.length} concepts`}</button>`:''}
+        <span class="muted" style="font-size:11px;margin-left:auto">filer-tagged, zero tokens · store <code>${esc(data.store)}</code></span>
+      </div>
+      ${rows.length&&periods.length?`<div class="scroll" style="border:1px solid var(--border);border-radius:6px;max-height:520px;margin-top:10px">
+        <table style="font-size:12px">
+          <tr><th style="position:sticky;left:0;background:var(--bg);z-index:2">Concept</th>
+            ${periods.map(p=>`<th class="num" style="white-space:nowrap">${esc(p)}</th>`).join('')}</tr>
+          ${rows.map(r=>`<tr>
+            <td style="position:sticky;left:0;background:var(--bg);white-space:nowrap;max-width:320px;overflow:hidden;text-overflow:ellipsis"
+                title="${esc(`${r.concept}\n${r.unit||''} · ${r.kind}`)}">${esc(r.concept.replace(/^us-gaap:/,''))}
+              <span class="muted" style="font-size:10px">${esc(r.unit||'')}</span></td>
+            ${periods.map(p=>{
+              const v=r.values[p], re=(r.restated||[]).includes(p);
+              return `<td class="num" title="${esc(v==null?'':`${v} ${r.unit||''}\n${r.accessions[p]||''}${re?'\nrestated: an earlier filing reported a different value':''}`)}"
+                ${re?'style="color:#e3b341"':''}>${fmtFact(v,r.unit)}${re?'<sup>r</sup>':''}</td>`;
+            }).join('')}
+          </tr>`).join('')}
+        </table></div>`:`<div class="muted" style="font-size:12px;margin-top:10px">No ${esc(data.period||'')} facts${q?' match that filter':''}.</div>`}
+      ${other.length?`<details style="margin-top:8px"><summary class="muted" style="cursor:pointer;font-size:12px">${other.length} point-in-time fact(s) off the period ends (cover page, share counts)</summary>
+        <div class="scroll" style="max-height:220px;margin-top:6px"><table style="font-size:12px">
+        <tr><th>Concept</th><th>Date</th><th class="num">Value</th></tr>
+        ${other.flatMap(r=>Object.entries(r.other).map(([d,v])=>`<tr><td>${esc(r.concept)}</td><td>${esc(d)}</td><td class="num">${fmtFact(v,r.unit)}</td></tr>`)).join('')}
+        </table></div></details>`:''}
+      <div class="muted" style="font-size:11px;margin-top:6px">Latest version of each period. <span style="color:#e3b341">r</span> = restated by a later filing. Hover a cell for the raw value and accession.</div>
+    </div>`;
+  if(keepFocus){ const s=document.getElementById('factsSearch'); if(s){ s.focus(); s.setSelectionRange(s.value.length,s.value.length); } }
 }
 
 // What came down, grouped by WHO filed it. 424B2 templates are issuer-specific,
@@ -4461,6 +4587,7 @@ const SECTIONS={
   // were not labelled that way.
   tools: {label:'Tools', icon:'🧰', desc:'One tab per tool — each does something different',
           tabs:[['edgar-scrubber','EDGAR Scrubber',renderToolEdgarScrubber],
+                ['edgar-results','EDGAR Results',()=>renderToolEdgarResults()],
                 ['free-research','Free Research',renderToolFreeResearch],
                 ['testing','Testing',renderToolTesting],
                 ['magic-formula','Magic Formula',()=>renderToolModel('magic-formula')],
