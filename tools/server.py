@@ -2442,14 +2442,41 @@ _PERIOD_WINDOWS = {"annual": (350, 380), "quarterly": (80, 100)}
 _FILER_NAMES = {}
 
 
-def filer_name(cik):
-    """The filer's name, from the companyfacts body the run already cached.
+def _filer_name_from_store(cik):
+    """The filer's name from the facts store's `filers` directory, or None. A
+    read-only, missing-store-safe lookup: no store, no `filers` table, or no row
+    for this CIK all return None rather than raise."""
+    p = facts_path()
+    if not p.exists():
+        return None
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT name FROM filers WHERE cik = ?", (str(cik),)).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
 
-    Cache-only on purpose: this is a read view, and a read must never reach
-    out to EDGAR. A filer whose companyfacts is not cached shows its CIK.
+
+def filer_name(cik):
+    """The filer's name, from the facts store's `filers` directory (#238) or,
+    failing that, the companyfacts body a per-filer run already cached.
+
+    The `filers` table is checked FIRST: cross-filer frames ingest fills it and
+    carries no companyfacts, so it is the only name source for a frames-only
+    filer. Cache-only on purpose otherwise: this is a read view, and a read must
+    never reach out to EDGAR. A filer known to neither shows its CIK.
     """
     if cik in _FILER_NAMES:
         return _FILER_NAMES[cik]
+    name = _filer_name_from_store(cik)
+    if name:
+        _FILER_NAMES[cik] = name
+        return name
     name = None
     try:
         from edgar_client import HttpCache, cik10

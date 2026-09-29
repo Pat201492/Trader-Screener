@@ -170,6 +170,11 @@ CREATE TABLE IF NOT EXISTS guidance (
     UNIQUE (cik, metric, period_label, accession, document, span_start, span_end)
 );
 
+CREATE TABLE IF NOT EXISTS filers (
+    cik   TEXT PRIMARY KEY,
+    name  TEXT
+);
+
 CREATE INDEX IF NOT EXISTS ix_facts_period
     ON facts(cik, concept, period_start, period_end);
 CREATE INDEX IF NOT EXISTS ix_facts_cik      ON facts(cik);
@@ -340,6 +345,36 @@ class FactsStore:
             "source": r["source"],
             "filed": r["filed"],
         }
+
+    # -- filer directory ---------------------------------------------------
+
+    def put_filers(self, filers):
+        """Record ``cik -> name`` for one or more filers. ``filers`` is a mapping
+        or an iterable of ``(cik, name)`` pairs. Idempotent on ``cik`` (the
+        primary key): the same filer seen again updates its name in place rather
+        than adding a row. A ``None``/empty name is skipped, never stored over a
+        known one, so a nameless frames row cannot blank an existing entry.
+
+        Cross-filer ingest (#238) fills this from each frames row's
+        ``entityName`` so a read view can name a filer without a companyfacts
+        fetch."""
+        self._guard_writable()
+        items = filers.items() if isinstance(filers, dict) else filers
+        for cik, name in items:
+            if not name:
+                continue
+            self._conn.execute(
+                "INSERT INTO filers (cik, name) VALUES (?, ?) "
+                "ON CONFLICT(cik) DO UPDATE SET name = excluded.name",
+                (str(cik), name),
+            )
+        self._conn.commit()
+
+    def filer_names(self):
+        """The ``cik -> name`` directory as a dict — every filer whose name has
+        been recorded (see ``put_filers``)."""
+        rows = self._conn.execute("SELECT cik, name FROM filers").fetchall()
+        return {r["cik"]: r["name"] for r in rows}
 
     # -- prose guidance ----------------------------------------------------
 

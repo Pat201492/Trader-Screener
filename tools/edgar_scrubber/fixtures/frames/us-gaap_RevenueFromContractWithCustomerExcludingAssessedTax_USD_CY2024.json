@@ -1,0 +1,29 @@
+{
+  "taxonomy": "us-gaap",
+  "tag": "RevenueFromContractWithCustomerExcludingAssessedTax",
+  "ccp": "CY2024",
+  "uom": "USD",
+  "label": "Revenue from Contract with Customer, Excluding Assessed Tax",
+  "description": "Amount, excluding tax collected from customer, of revenue from satisfaction of performance obligation by transferring promised good or service to customer.",
+  "pts": 2,
+  "data": [
+    {
+      "accn": "0000320193-24-000123",
+      "cik": 320193,
+      "entityName": "Apple Inc.",
+      "loc": "US-CA",
+      "start": "2024-01-01",
+      "end": "2024-12-31",
+      "val": 391035000000
+    },
+    {
+      "accn": "0000012927-24-000030",
+      "cik": 12927,
+      "entityName": "Boeing Company",
+      "loc": "US-VA",
+      "start": "2024-01-01",
+      "end": "2024-12-31",
+      "val": 66517000000
+    }
+  ]
+}
