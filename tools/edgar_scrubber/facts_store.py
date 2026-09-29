@@ -76,6 +76,9 @@ class FactRecord:
     * ``form`` — the filing that carried it: "10-Q", "10-K", ...
     * ``value`` — numeric; stored as JSON so an int stays an int.
     * ``source`` — "xbrl" (structured) or "extracted" (pulled from prose).
+    * ``filed`` — ISO YYYY-MM-DD the value became public (the companyfacts
+      entry's ``filed``). None when unknown; ``as_of`` never returns such a row,
+      because a number with no filed date cannot be placed in time.
     """
 
     cik: str
@@ -89,6 +92,7 @@ class FactRecord:
     accession: str
     value: object
     source: str = "xbrl"
+    filed: str = None
 
     def __post_init__(self):
         if self.source not in ("xbrl", "extracted"):
@@ -145,6 +149,7 @@ CREATE TABLE IF NOT EXISTS facts (
     value_json    TEXT,
     value_num     REAL,
     source        TEXT NOT NULL,
+    filed         TEXT,
     UNIQUE (cik, concept, period_start, period_end, accession)
 );
 
@@ -192,8 +197,21 @@ class FactsStore:
         self._conn.row_factory = sqlite3.Row
         if not readonly:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
         self.readonly = readonly
+
+    def _migrate(self):
+        """Additive migration for a store opened from before #236. The nullable
+        `filed` column is added only when the CREATE TABLE IF NOT EXISTS above
+        found a pre-existing `facts` table without it, so no row is rebuilt --
+        exactly the pattern OutputStore uses for `candidate_count`. Old rows read
+        back `filed = NULL`, and `as_of` never returns a NULL-filed row, because a
+        number with no known publication date cannot be placed in time."""
+        cols = {r["name"] for r in
+                self._conn.execute("PRAGMA table_info(facts)").fetchall()}
+        if "filed" not in cols:
+            self._conn.execute("ALTER TABLE facts ADD COLUMN filed TEXT")
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -229,11 +247,12 @@ class FactsStore:
             self._conn.execute(
                 "INSERT OR REPLACE INTO facts "
                 "(cik, concept, unit, period_start, period_end, fiscal_year, "
-                " fiscal_period, form, accession, value_json, value_num, source) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " fiscal_period, form, accession, value_json, value_num, source, "
+                " filed) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (r.cik, r.concept, r.unit, r.period_start, r.period_end,
                  r.fiscal_year, r.fiscal_period, r.form, r.accession,
-                 json.dumps(r.value), value_num, r.source),
+                 json.dumps(r.value), value_num, r.source, r.filed),
             )
         self._conn.commit()
 
@@ -247,6 +266,27 @@ class FactsStore:
             "WHERE cik = ? AND concept = ? AND period_start = ? AND period_end = ? "
             "ORDER BY accession DESC, ingested_seq DESC LIMIT 1",
             (cik, concept, period_start, period_end),
+        ).fetchone()
+        return self._row_to_fact(row) if row else None
+
+    def as_of(self, cik, concept, period_start, period_end, as_of_date):
+        """The record for one ``(cik, concept, period)`` as it was KNOWN on
+        ``as_of_date`` -- the latest version whose ``filed <= as_of_date``. This
+        is the point-in-time guard a backtest needs (Project.md #42): a restated
+        number becomes visible only after its restating filing was public, so a
+        date between the original and the restatement returns the original value
+        and a date after both returns the restated one.
+
+        Ordered exactly as ``latest`` orders (accession DESC, ingestion order as a
+        tiebreak). Rows with ``filed IS NULL`` are never returned -- a number with
+        no known publication date cannot be placed in time. Returns a dict, or
+        None when nothing was filed on or before ``as_of_date``."""
+        row = self._conn.execute(
+            "SELECT * FROM facts "
+            "WHERE cik = ? AND concept = ? AND period_start = ? AND period_end = ? "
+            "  AND filed IS NOT NULL AND filed <= ? "
+            "ORDER BY accession DESC, ingested_seq DESC LIMIT 1",
+            (cik, concept, period_start, period_end, as_of_date),
         ).fetchone()
         return self._row_to_fact(row) if row else None
 
@@ -298,6 +338,7 @@ class FactsStore:
             "value": json.loads(r["value_json"]) if r["value_json"] is not None else None,
             "value_num": r["value_num"],
             "source": r["source"],
+            "filed": r["filed"],
         }
 
     # -- prose guidance ----------------------------------------------------
@@ -362,6 +403,7 @@ if __name__ == "__main__":
         period_start="2025-07-01", period_end="2025-09-30",
         fiscal_year=2025, fiscal_period="Q3", form="10-Q",
         accession="0000019617-25-000123", value=9_100_000_000, source="xbrl",
+        filed="2025-10-31",
     )
     store.put_facts([q3])
     store.put_facts([q3])  # idempotent
@@ -374,12 +416,18 @@ if __name__ == "__main__":
         period_start="2025-07-01", period_end="2025-09-30",
         fiscal_year=2025, fiscal_period="Q3", form="10-K",
         accession="0000019617-26-000045", value=9_050_000_000, source="xbrl",
+        filed="2026-01-30",
     )
     store.put_facts([restated])
     latest = store.latest("0000019617", "us-gaap:Revenues",
                           "2025-07-01", "2025-09-30")
     print(f"latest value -> {latest['value']} from {latest['form']}")
     print(f"history spans -> {[h['accession'] for h in store.history(*['0000019617', 'us-gaap:Revenues', '2025-07-01', '2025-09-30'])]}")
+
+    key = ("0000019617", "us-gaap:Revenues", "2025-07-01", "2025-09-30")
+    print(f"as_of before any filing -> {store.as_of(*key, '2025-10-01')}")
+    print(f"as_of between filings -> {store.as_of(*key, '2025-12-01')['value']}")
+    print(f"as_of after both -> {store.as_of(*key, '2026-02-01')['value']}")
 
     store.put_guidance([GuidanceRecord(
         cik="0000019617", metric="revenue", period_label="FY2026",

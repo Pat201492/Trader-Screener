@@ -1133,6 +1133,10 @@ try:
           any(_g(r, "period_start") != _g(r, "period_end") for r in _rows))
     check("concepts are taxonomy-qualified",
           all(":" in str(_g(r, "concept")) for r in _rows))
+    # #236: a backtest must only see a number after it was public, so every
+    # written fact carries the companyfacts entry's `filed` date.
+    check("every written fact carries a non-empty ISO filed date",
+          all(isinstance(_g(r, "filed"), str) and _g(r, "filed") for r in _rows))
 
     # The Results tab reads this. Before it existed a taxonomy run completed and
     # then showed nothing anywhere in the dashboard.
