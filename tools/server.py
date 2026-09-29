@@ -2405,6 +2405,183 @@ def store_extractions(run_id=None):
     return {"store": str(p), "exists": True, "documents": out, "issuers": issuers}
 
 
+# The taxonomy path (#233) writes to facts.sqlite, not extractions.sqlite -- a
+# period is not a document (#183). Without a reader for it, a 10-K/10-Q/8-K run
+# completes and then shows nothing anywhere in the dashboard.
+
+def facts_path():
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    return home / "store" / "facts.sqlite"
+
+
+# Statement headliners first, so the top of the grid is the income statement a
+# reader expects rather than whatever sorts first alphabetically. Anything else
+# the filing tags follows, alphabetically.
+HEADLINE_CONCEPTS = [
+    "us-gaap:Revenues",
+    "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+    "us-gaap:CostOfGoodsAndServicesSold",
+    "us-gaap:GrossProfit",
+    "us-gaap:OperatingExpenses",
+    "us-gaap:OperatingIncomeLoss",
+    "us-gaap:NetIncomeLoss",
+    "us-gaap:EarningsPerShareBasic",
+    "us-gaap:EarningsPerShareDiluted",
+    "us-gaap:Assets",
+    "us-gaap:Liabilities",
+    "us-gaap:StockholdersEquity",
+    "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+    "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+]
+
+# Period windows, in days. A 10-K tags quarterly and year-to-date durations as
+# well as the fiscal year, and they share a period end with it; binning by
+# length keeps a Q4 number from landing in a fiscal-year column.
+_PERIOD_WINDOWS = {"annual": (350, 380), "quarterly": (80, 100)}
+
+_FILER_NAMES = {}
+
+
+def filer_name(cik):
+    """The filer's name, from the companyfacts body the run already cached.
+
+    Cache-only on purpose: this is a read view, and a read must never reach
+    out to EDGAR. A filer whose companyfacts is not cached shows its CIK.
+    """
+    if cik in _FILER_NAMES:
+        return _FILER_NAMES[cik]
+    name = None
+    try:
+        from edgar_client import HttpCache, cik10
+        home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+        body = HttpCache(str(home / "cache")).get(
+            f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik10(cik)}.json")
+        if body:
+            name = json.loads(body).get("entityName")
+    except Exception:
+        name = None
+    _FILER_NAMES[cik] = name
+    return name
+
+
+def _days(start, end):
+    from datetime import date
+    try:
+        return (date.fromisoformat(end) - date.fromisoformat(start)).days
+    except (TypeError, ValueError):
+        return None
+
+
+def store_facts(cik=None, period="annual", form=None):
+    """Reported XBRL facts as a statement grid: concept rows x period columns.
+
+    Latest version per period (supersession collapsed, as `facts_for` does), so
+    a restated number shows its current value -- with the period flagged, since
+    a restatement is worth seeing rather than silently absorbing. Instants
+    (balance-sheet points) sit alongside durations in the same column by their
+    end date.
+
+    `form` scopes everything to the filings of one form type, so the 10-K view
+    shows what 10-Ks said and never a 10-Q's number for the same period. The
+    filter applies BEFORE supersession is collapsed, for the same reason.
+    """
+    import json as _json
+    import sqlite3
+    p = facts_path()
+    if not p.exists():
+        return {"store": str(p), "exists": False, "filers": [], "rows": [],
+                "form": form}
+    if period not in _PERIOD_WINDOWS:
+        raise ValueError(f"period must be one of {sorted(_PERIOD_WINDOWS)}")
+    form = (form or "").strip().upper() or None
+    fwhere, fargs = ("form = ?", [form]) if form else ("1 = 1", [])
+
+    conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        filers = [dict(r) for r in conn.execute(
+            "SELECT cik, COUNT(*) AS facts, COUNT(DISTINCT accession) AS filings, "
+            "       GROUP_CONCAT(DISTINCT form) AS forms, "
+            "       MIN(period_end) AS first, MAX(period_end) AS last "
+            f"FROM facts WHERE {fwhere} GROUP BY cik ORDER BY COUNT(*) DESC", fargs)]
+        known = {f["cik"] for f in filers}
+        chosen = cik if cik in known else (filers[0]["cik"] if filers else None)
+        restated = {(r["concept"], r["period_start"], r["period_end"])
+                    for r in conn.execute(
+                        "SELECT concept, period_start, period_end FROM facts "
+                        f"WHERE cik = ? AND {fwhere} "
+                        "GROUP BY concept, period_start, period_end "
+                        "HAVING COUNT(DISTINCT value_json) > 1", [chosen, *fargs])}
+        # Latest version per (concept, period), the same ordering facts_for uses.
+        raw = conn.execute(
+            f"SELECT * FROM facts WHERE cik = ? AND {fwhere} "
+            "ORDER BY concept, period_end, accession DESC, ingested_seq DESC",
+            [chosen, *fargs]).fetchall()
+    except sqlite3.Error as exc:
+        return {"store": str(p), "exists": True, "filers": [], "rows": [],
+                "form": form, "error": str(exc)}
+    finally:
+        conn.close()
+    for f in filers:
+        f["name"] = filer_name(f["cik"])
+    if not chosen:
+        return {"store": str(p), "exists": True, "filers": [], "rows": [],
+                "form": form}
+
+    facts, seen = [], set()
+    for r in raw:
+        key = (r["concept"], r["period_start"], r["period_end"])
+        if key in seen:
+            continue
+        seen.add(key)
+        facts.append({"concept": r["concept"], "unit": r["unit"],
+                      "period_start": r["period_start"], "period_end": r["period_end"],
+                      "accession": r["accession"],
+                      "value": _json.loads(r["value_json"])
+                      if r["value_json"] is not None else None})
+
+    lo, hi = _PERIOD_WINDOWS[period]
+    rows, periods = {}, set()
+    for f in facts:
+        d = _days(f["period_start"], f["period_end"])
+        if d is None or not (d == 0 or lo <= d <= hi):
+            continue
+        end = f["period_end"]
+        row = rows.setdefault((f["concept"], f["unit"]), {
+            "concept": f["concept"], "unit": f["unit"],
+            "kind": "instant" if d == 0 else "duration",
+            "values": {}, "accessions": {}, "restated": []})
+        # Two windows of the same length can share an end (a 52- and a
+        # 53-week year, say). The later filing wins, as it does in facts_for.
+        if end in row["accessions"] and row["accessions"][end] > f["accession"]:
+            continue
+        row["values"][end] = f["value"]
+        row["accessions"][end] = f["accession"]
+        if (f["concept"], f["period_start"], end) in restated:
+            row["restated"].append(end)
+        if d:
+            periods.add(end)
+
+    # Columns are the fiscal period ends the durations define. An instant dated
+    # anywhere else (cover-page share count, public float at mid-year) would
+    # otherwise add a column of its own that is empty for every other row, so
+    # those points ride along as `other` instead of widening the grid.
+    if not periods:
+        periods = {e for r in rows.values() for e in r["values"]}
+    for r in rows.values():
+        r["other"] = {e: v for e, v in r["values"].items() if e not in periods}
+        r["values"] = {e: v for e, v in r["values"].items() if e in periods}
+
+    rank = {c: i for i, c in enumerate(HEADLINE_CONCEPTS)}
+    ordered = sorted(rows.values(), key=lambda r: (
+        rank.get(r["concept"], len(rank)), r["concept"], r["unit"] or ""))
+    return {"store": str(p), "exists": True, "filers": filers, "cik": chosen,
+            "name": filer_name(chosen), "period": period, "form": form,
+            "periods": sorted(periods), "rows": ordered,
+            "headline": [c for c in HEADLINE_CONCEPTS
+                         if any(r["concept"] == c for r in ordered)]}
+
+
 # --------------------------------------------------------------------------- #
 # Health
 # --------------------------------------------------------------------------- #
@@ -2753,6 +2930,13 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/store/daily":
             return self._json(store_daily((qs.get("field") or [None])[0],
                                            (qs.get("run_id") or [None])[0]))
+        if path == "/api/store/facts":
+            try:
+                return self._json(store_facts((qs.get("cik") or [None])[0],
+                                              (qs.get("period") or ["annual"])[0],
+                                              (qs.get("form") or [None])[0]))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
         if path == "/api/store/extractions":
             return self._json(store_extractions((qs.get("run_id") or [None])[0]))
         if path == "/api/docs":

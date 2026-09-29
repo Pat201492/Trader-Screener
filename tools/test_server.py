@@ -1133,6 +1133,40 @@ try:
           any(_g(r, "period_start") != _g(r, "period_end") for r in _rows))
     check("concepts are taxonomy-qualified",
           all(":" in str(_g(r, "concept")) for r in _rows))
+
+    # The Results tab reads this. Before it existed a taxonomy run completed and
+    # then showed nothing anywhere in the dashboard.
+    _grid = server.store_facts()
+    check("the facts view finds the filer the run wrote",
+          [f["cik"] for f in _grid["filers"]] == ["320193"])
+    check("annual columns are fiscal period ends, not cover-page dates",
+          "2023-09-30" in _grid["periods"])
+    _by = {(r["concept"], r["unit"]): r for r in _grid["rows"]}
+    _assets = _by.get(("us-gaap:Assets", "USD"))
+    check("an instant fact lands in its period-end column",
+          _assets is not None and _assets["values"].get("2023-09-30") == 352583000000)
+    _ni = _by.get(("us-gaap:NetIncomeLoss", "USD"))
+    check("an annual duration lands in its period-end column",
+          _ni is not None and _ni["values"].get("2023-09-30") == 96995000000)
+    check("headline statement lines sort first",
+          _grid["rows"][0]["concept"] in server.HEADLINE_CONCEPTS)
+    check("every column is an end some duration defines",
+          all(any(r["kind"] == "duration" and p in r["values"] for r in _grid["rows"])
+              for p in _grid["periods"]))
+    # The Results tab is per form: the 10-K view must not show another form's
+    # filings, and a form with nothing stored is empty rather than a fallback.
+    _k = server.store_facts(form=_FORM.lower())
+    check("a form filter keeps that form's filings",
+          _k["form"] == _FORM.upper() and len(_k["rows"]) == len(_grid["rows"]))
+    _other = "8-K" if _FORM.upper() != "8-K" else "10-Q"
+    _none = server.store_facts(form=_other)
+    check("a form with no stored filings shows nothing, not another form's data",
+          _none["filers"] == [] and _none["rows"] == [])
+    try:
+        server.store_facts(period="weekly")
+        check("an unknown period is refused", False)
+    except ValueError:
+        check("an unknown period is refused", True)
 finally:
     _fs_store.close()
     if _prev_home is None:
