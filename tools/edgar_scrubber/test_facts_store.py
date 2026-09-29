@@ -15,6 +15,10 @@ Every acceptance criterion in #183 is checked here:
 
 Run:  python tools/edgar_scrubber/test_facts_store.py
 """
+import os
+import sqlite3
+import tempfile
+
 from facts_store import (
     FactsStore, FactRecord, GuidanceRecord, FactsStoreError,
 )
@@ -48,12 +52,13 @@ CONCEPT = "us-gaap:Revenues"
 PS, PE = "2025-07-01", "2025-09-30"
 
 
-def q3_10q(value=9_100_000_000, accession="0000019617-25-000123", source="xbrl"):
+def q3_10q(value=9_100_000_000, accession="0000019617-25-000123", source="xbrl",
+           filed=None):
     return FactRecord(
         cik=CIK, concept=CONCEPT, unit="USD",
         period_start=PS, period_end=PE,
         fiscal_year=2025, fiscal_period="Q3", form="10-Q",
-        accession=accession, value=value, source=source,
+        accession=accession, value=value, source=source, filed=filed,
     )
 
 
@@ -75,6 +80,11 @@ def run_checks():
     check("accession round-trips", latest["accession"] == "0000019617-25-000123")
     check("value round-trips (int preserved)", latest["value"] == 9_100_000_000)
     check("source 'xbrl' round-trips", latest["source"] == "xbrl")
+    check("filed defaults to None when unstated", latest["filed"] is None)
+    store_f = FactsStore(":memory:")
+    store_f.put_facts([q3_10q(filed="2025-10-31")])
+    check("filed round-trips when set",
+          store_f.latest(CIK, CONCEPT, PS, PE)["filed"] == "2025-10-31")
     check("source 'extracted' is accepted",
           FactRecord(cik=CIK, concept=CONCEPT, unit="USD", period_start=PS,
                      period_end=PE, fiscal_year=2025, fiscal_period="Q3",
@@ -153,6 +163,90 @@ def run_checks():
     check("span offsets round-trip", g["span"] == (1044, 1120))
     check("provenance round-trips", g["provenance"] == "model:qwen2.5-7b")
     check("confidence round-trips", g["confidence"] == 0.82)
+
+    # ── AC (#236): opening a pre-`filed` db adds the column, keeps every row ──
+    section("AC: an old-schema facts.sqlite gains `filed` on open, losing no row")
+    tmpdir = tempfile.mkdtemp(prefix="facts-migrate-")
+    old_db = os.path.join(tmpdir, "facts.sqlite")
+    # Build a store exactly as it looked BEFORE #236: no `filed` column.
+    old_conn = sqlite3.connect(old_db)
+    old_conn.execute(
+        "CREATE TABLE facts ("
+        " ingested_seq INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " cik TEXT NOT NULL, concept TEXT NOT NULL, unit TEXT,"
+        " period_start TEXT NOT NULL, period_end TEXT NOT NULL,"
+        " fiscal_year INTEGER, fiscal_period TEXT, form TEXT,"
+        " accession TEXT NOT NULL, value_json TEXT, value_num REAL,"
+        " source TEXT NOT NULL,"
+        " UNIQUE (cik, concept, period_start, period_end, accession))")
+    old_conn.executemany(
+        "INSERT INTO facts (cik, concept, unit, period_start, period_end,"
+        " fiscal_year, fiscal_period, form, accession, value_json, value_num,"
+        " source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [(CIK, CONCEPT, "USD", PS, PE, 2025, "Q3", "10-Q",
+          "0000019617-25-00000%d" % i, "1", 1.0, "xbrl") for i in range(3)])
+    old_conn.commit()
+    before = old_conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+    has_filed_before = any(
+        r[1] == "filed" for r in
+        old_conn.execute("PRAGMA table_info(facts)").fetchall())
+    old_conn.close()
+    check("the old db has no `filed` column before the migration",
+          not has_filed_before)
+
+    migrated = FactsStore(old_db)  # open == migrate
+    try:
+        after = migrated._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+        has_filed_after = any(
+            r["name"] == "filed" for r in
+            migrated._conn.execute("PRAGMA table_info(facts)").fetchall())
+        check("the migration adds the `filed` column", has_filed_after)
+        check("no row is lost by the migration", before == after == 3)
+        check("existing rows read back filed = NULL",
+              all(f["filed"] is None for f in migrated.facts_for(CIK)))
+        # And it is idempotent: opening again does not fail or re-add.
+        migrated.put_facts([q3_10q(accession="0000019617-25-000999",
+                                   filed="2025-10-31")])
+        check("a new write on the migrated db can carry a filed date",
+              migrated.latest(CIK, CONCEPT, PS, PE) is not None)
+    finally:
+        migrated.close()
+
+    # ── AC (#236): as_of returns the value KNOWN on a date ──
+    section("AC: as_of returns the version known on a date; NULL filed never returned")
+    aso = FactsStore(":memory:")
+    # Original 10-Q filed 2025-10-31; restatement 10-K filed 2026-01-30.
+    orig = q3_10q(value=9_100_000_000, accession="0000019617-25-000123",
+                  filed="2025-10-31")
+    restated = FactRecord(
+        cik=CIK, concept=CONCEPT, unit="USD", period_start=PS, period_end=PE,
+        fiscal_year=2025, fiscal_period="Q3", form="10-K",
+        accession="0000019617-26-000045", value=9_050_000_000, source="xbrl",
+        filed="2026-01-30")
+    aso.put_facts([restated])
+    aso.put_facts([orig])
+    key = (CIK, CONCEPT, PS, PE)
+    check("as_of before the first filing returns None",
+          aso.as_of(*key, "2025-10-01") is None)
+    mid = aso.as_of(*key, "2025-12-01")
+    check("as_of between the two filings returns the pre-restatement value",
+          mid is not None and mid["value"] == 9_100_000_000
+          and mid["accession"] == "0000019617-25-000123")
+    after_both = aso.as_of(*key, "2026-02-01")
+    check("as_of after both filings returns the restated value",
+          after_both is not None and after_both["value"] == 9_050_000_000
+          and after_both["accession"] == "0000019617-26-000045")
+    check("as_of on the filing date itself sees that filing (<=, inclusive)",
+          aso.as_of(*key, "2025-10-31") is not None
+          and aso.as_of(*key, "2025-10-31")["value"] == 9_100_000_000)
+
+    # A row with filed IS NULL is never returned by as_of, even for a late date.
+    aso_null = FactsStore(":memory:")
+    aso_null.put_facts([q3_10q(filed=None)])
+    check("as_of never returns a row whose filed is NULL",
+          aso_null.as_of(*key, "2099-01-01") is None)
+    check("...but latest() still sees the NULL-filed row",
+          aso_null.latest(*key) is not None)
 
     # ── AC: non-local destination refused with the SAME guard ──
     section("AC: a non-local destination path is refused (output_store's guard)")

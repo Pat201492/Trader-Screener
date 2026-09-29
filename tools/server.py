@@ -954,7 +954,7 @@ def taxonomy_run(run_id, targets, home):
                         fiscal_year=occ.get("fiscal_year"),
                         fiscal_period=occ.get("fiscal_period") or "",
                         form=form, accession=accession, value=occ.get("value"),
-                        source="xbrl"))
+                        source="xbrl", filed=occ.get("filed")))
             if skipped_occ:
                 RUNS.log(run_id, "%s: %d fact(s) carried no period end and were "
                                  "not stored" % (accession, skipped_occ))

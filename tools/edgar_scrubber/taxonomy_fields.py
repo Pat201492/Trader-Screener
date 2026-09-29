@@ -237,6 +237,7 @@ def fields_for_filing(company_facts, form, accession):
             "value": entry.get("val"),
             "fiscal_year": entry.get("fy"),
             "fiscal_period": entry.get("fp"),
+            "filed": entry.get("filed"),
         })
 
     groups = _group(by_concept.values())
@@ -284,6 +285,7 @@ def fields_for_form(company_facts, form):
             "value": entry.get("val"),
             "fiscal_year": entry.get("fy"),
             "fiscal_period": entry.get("fp"),
+            "filed": entry.get("filed"),
         })
         if entry.get("accn"):
             accns[concept].add(entry["accn"])

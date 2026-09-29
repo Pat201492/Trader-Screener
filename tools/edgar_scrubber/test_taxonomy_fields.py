@@ -85,6 +85,25 @@ assets = next(f for f in filing if f.concept == "us-gaap:Assets")
 check("an instant (balance-sheet) fact has period_start None",
       assets.periods == [(None, "2023-09-30")])
 
+# ── #236: every occurrence carries the companyfacts entry's `filed` date ──
+# The point-in-time guard needs to know when each number became public. Compare
+# against the raw fixture entry so the date is the filing's own, not invented.
+def _fixture_entry(concept, unit, form, accn):
+    tax, _, bare = concept.partition(":")
+    for entry in company_facts["facts"][tax][bare]["units"][unit]:
+        if entry.get("form") == form and entry.get("accn") == accn:
+            return entry
+    raise AssertionError(f"no fixture entry for {concept} {accn}")
+
+_rev_occ = rev_field.occurrences[0]
+_rev_raw = _fixture_entry(REVENUE, "USD", "10-K", FY23_10K)
+check("an occurrence carries a non-empty ISO filed date",
+      isinstance(_rev_occ.get("filed"), str) and _rev_occ["filed"])
+check("the occurrence's filed date equals the fixture entry's filed value",
+      _rev_occ["filed"] == _rev_raw["filed"])
+check("every occurrence across the filing carries a filed date",
+      all(o.get("filed") for f in filing for o in f.occurrences))
+
 check("a concept tagged only in a DIFFERENT filing is not returned",
       "us-gaap:GrossProfit" in concepts)  # GrossProfit is in the FY23 10-K
 check("fields_for_filing never raises on an unknown accession",
@@ -130,6 +149,8 @@ check("a one-off line item (GrossProfit, only the FY23 10-K) has filing_count 1"
       by_name["us-gaap:GrossProfit"].filing_count == 1)
 check("a rare tag is distinguishable from a standing one by count",
       by_name["us-gaap:GrossProfit"].filing_count < by_name[REVENUE].filing_count)
+check("fields_for_form occurrences carry a filed date too (#236)",
+      all(o.get("filed") for o in by_name[REVENUE].occurrences))
 check("the 10-Q-only concept is NOT in the 10-K union",
       all(f.filing_count >= 1 for f in form))
 q_form = tf.fields_for_form(company_facts, "10-Q")
