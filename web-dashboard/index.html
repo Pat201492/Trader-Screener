@@ -3741,6 +3741,7 @@ async function renderToolEdgarResults(form){
     <div id="tool_coverage"></div>`;
   if((s.field_source||'spec')==='taxonomy'){
     FACTS=null; FACTS_Q=''; FACTS_ALL=false;
+    FACTS_MODE='reported'; STD=null; CMP=null; CMP_FIELD=null; CMP_PERIOD=null;
     document.getElementById('tool_results').innerHTML='<div id="factsView"><div class="loading">Reading the local facts store…</div></div>';
     await loadFacts(null,'annual',s.form_type);
     return;
@@ -4132,6 +4133,13 @@ async function renderToolsResults(target){
 // show -- a restated period is flagged instead, since that is the one thing
 // about a filer-reported number worth a second look.
 let FACTS=null, FACTS_Q='', FACTS_ALL=false;
+// The Results grid has three views over the same taxonomy store: the raw XBRL
+// facts (`reported`), the same filer read through the canonical layer
+// (`standardized`, #240), and a cross-filer ranking on one canonical field
+// (`compare`). The toggle switches between them client-side; the filer and
+// period selected in one carry into the next.
+let FACTS_MODE='reported', STD=null;
+let CMP=null, CMP_FIELD=null, CMP_PERIOD=null, CMP_TICKERS='', CMP_ASOF='';
 function fmtFact(v,unit){
   if(v==null) return '–';
   if(typeof v!=='number') return esc(String(v));
@@ -4157,9 +4165,9 @@ function renderFacts(data,keepFocus){
   const box=document.getElementById('factsView');
   if(!box||!data) return;
   FACTS=data;
-  if(data.error){ box.innerHTML=`<div class="err">${esc(data.error)}</div>`; return; }
+  if(data.error){ box.innerHTML=factsModeToggle()+`<div class="err">${esc(data.error)}</div>`; return; }
   if(!data.exists||!(data.filers||[]).length){
-    box.innerHTML=`<div style="padding:26px"><div class="muted">No ${esc(data.form||'')} results yet — open the ${esc(data.form||'')} scrubber in the EDGAR Scrubber tab, search, and extract.</div>
+    box.innerHTML=factsModeToggle()+`<div style="padding:26px"><div class="muted">No ${esc(data.form||'')} results yet — open the ${esc(data.form||'')} scrubber in the EDGAR Scrubber tab, search, and extract.</div>
       <div class="muted" style="font-size:11px;margin-top:6px">store: <code>${esc(data.store||'')}</code></div></div>`;
     return;
   }
@@ -4172,7 +4180,7 @@ function renderFacts(data,keepFocus){
   const rows=(data.rows||[]).filter(r=>q?r.concept.toLowerCase().includes(q):(FACTS_ALL||head.has(r.concept)||!head.size));
   const other=(data.rows||[]).filter(r=>Object.keys(r.other||{}).length&&(!q||r.concept.toLowerCase().includes(q)));
   const label=f=>`${f.name||'CIK '+f.cik} · ${f.facts} facts · ${f.filings} filing(s)`;
-  box.innerHTML=`
+  box.innerHTML=factsModeToggle()+`
     <div class="card" style="margin-bottom:14px">
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <div class="name">${esc(data.form||'')} reported facts (XBRL)</div>
@@ -4209,6 +4217,177 @@ function renderFacts(data,keepFocus){
       <div class="muted" style="font-size:11px;margin-top:6px">Latest version of each period. <span style="color:#e3b341">r</span> = restated by a later filing. Hover a cell for the raw value and accession.</div>
     </div>`;
   if(keepFocus){ const s=document.getElementById('factsSearch'); if(s){ s.focus(); s.setSelectionRange(s.value.length,s.value.length); } }
+}
+
+// ── standardized + compare views over the canonical layer (#240) ─────
+// The toggle above the grid. `reported` and `standardized` are the same filer
+// under two lenses; `compare` ranks one field across filers. Switching keeps the
+// current filer and period, so a reader can flip a single number between its raw
+// tag and its standard label without losing their place.
+function factsModeToggle(){
+  const chip=on=>`background:${on?'var(--accent)':'transparent'};border:1px solid ${on?'var(--accent)':'var(--border)'};`
+    +`color:${on?'#fff':'var(--txt)'};border-radius:20px;padding:4px 12px;font-size:12px;cursor:pointer`;
+  const b=(m,lbl)=>`<button onclick="setFactsMode('${m}')" style="${chip(FACTS_MODE===m)}">${lbl}</button>`;
+  return `<div style="display:flex;gap:6px;align-items:center;margin-bottom:12px">
+    <span class="muted" style="font-size:12px">View</span>
+    ${b('reported','as reported')}${b('standardized','standardized')}${b('compare','compare')}
+  </div>`;
+}
+function setFactsMode(m){
+  if(FACTS_MODE===m) return;
+  FACTS_MODE=m;
+  const cik=(STD&&STD.cik)||(FACTS&&FACTS.cik)||null;
+  const period=(STD&&STD.period)||(FACTS&&FACTS.period)||'annual';
+  if(m==='reported') loadFacts(cik,period);
+  else if(m==='standardized') loadStandardized(cik,period);
+  else loadCompare();
+}
+// The filer/period selects route to whichever loader the current mode uses, so
+// one pair of controls drives both the reported and the standardized grid.
+function factsSelectFiler(cik){
+  FACTS_MODE==='standardized'?loadStandardized(cik,(STD&&STD.period)||'annual')
+                             :loadFacts(cik,(FACTS&&FACTS.period)||'annual');
+}
+function factsSelectPeriod(p){
+  FACTS_MODE==='standardized'?loadStandardized((STD&&STD.cik)||null,p)
+                             :loadFacts((FACTS&&FACTS.cik)||null,p);
+}
+function factsFilerControls(cik,period){
+  const sel='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:4px 8px;font-size:12px';
+  const filers=(FACTS&&FACTS.filers)||[];
+  const label=f=>`${f.name||'CIK '+f.cik} · ${f.facts} facts · ${f.filings} filing(s)`;
+  return `<select onchange="factsSelectFiler(this.value)" style="${sel}">
+      ${filers.map(f=>`<option value="${esc(f.cik)}" ${f.cik===cik?'selected':''}>${esc(label(f))}</option>`).join('')}
+    </select>
+    <select onchange="factsSelectPeriod(this.value)" style="${sel}">
+      ${['annual','quarterly'].map(p=>`<option value="${p}" ${p===period?'selected':''}>${p}</option>`).join('')}
+    </select>`;
+}
+async function loadStandardized(cik,period){
+  const qs=new URLSearchParams();
+  if(cik) qs.set('cik',cik);
+  if(period) qs.set('period',period);
+  try{ renderStandardized(await (await fetch('/api/store/standardized?'+qs)).json()); }
+  catch(e){ const b=document.getElementById('factsView'); if(b) b.innerHTML=factsModeToggle()+`<div class="err">${esc(e.message)}</div>`; }
+}
+function renderStandardized(data){
+  const box=document.getElementById('factsView');
+  if(!box||!data) return;
+  STD=data;
+  if(data.error){ box.innerHTML=factsModeToggle()+`<div class="err">${esc(data.error)}</div>`; return; }
+  const periods=data.periods||[], rows=data.rows||[];
+  if(!rows.length){
+    box.innerHTML=factsModeToggle()+`<div style="padding:26px"><div class="muted">No standardized data — run a 10-K or frames ingest first.</div>
+      <div class="muted" style="font-size:11px;margin-top:6px">store: <code>${esc(data.store||'')}</code></div></div>`;
+    return;
+  }
+  box.innerHTML=factsModeToggle()+`
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <div class="name">Standardized fundamentals</div>
+        ${factsFilerControls(data.cik,data.period)}
+        ${data.excluded_no_filed_date?`<span class="muted" style="font-size:11px">${data.excluded_no_filed_date} fact(s) hidden (no filed date)</span>`:''}
+        <span class="muted" style="font-size:11px;margin-left:auto">canonical layer · hover a cell for its us-gaap concept</span>
+      </div>
+      <div class="scroll" style="border:1px solid var(--border);border-radius:6px;max-height:520px;margin-top:10px">
+        <table style="font-size:12px">
+          <tr><th style="position:sticky;left:0;background:var(--bg);z-index:2">Field</th>
+            ${periods.map(p=>`<th class="num" style="white-space:nowrap">${esc(p)}</th>`).join('')}</tr>
+          ${rows.map(r=>`<tr>
+            <td style="position:sticky;left:0;background:var(--bg);white-space:nowrap">${esc(r.field)}</td>
+            ${periods.map(p=>{
+              const v=(r.values||{})[p], c=(r.concepts||{})[p];
+              return `<td class="num" title="${esc(v==null?'':`${c||''}\n${v}`)}">${fmtFact(v,'USD')}</td>`;
+            }).join('')}
+          </tr>`).join('')}
+        </table></div>
+      <div class="muted" style="font-size:11px;margin-top:6px">Standard fields resolved from the filer's own us-gaap tags. Hover a cell for the source concept.</div>
+    </div>`;
+}
+// Compare: one canonical field ranked across filers for a single period end. The
+// field and period-end option lists come from the currently loaded standardized
+// payload (STD); if none is loaded yet, fetch it first so the selects have data.
+async function loadCompare(){
+  const box=document.getElementById('factsView');
+  if(box) box.innerHTML=factsModeToggle()+'<div class="loading">Reading the canonical layer…</div>';
+  if(!STD||!(STD.rows||[]).length){
+    const cik=(FACTS&&FACTS.cik)||null;
+    try{ STD=await (await fetch('/api/store/standardized?'+new URLSearchParams(cik?{cik}:{}))).json(); }
+    catch(e){ STD=null; }
+  }
+  renderCompare();
+  runCompare();
+}
+function cmpSetField(v){ CMP_FIELD=v; runCompare(); }
+function cmpSetPeriod(v){ CMP_PERIOD=v; runCompare(); }
+function cmpSetTickers(v){ CMP_TICKERS=v; }
+function cmpSetAsOf(v){ CMP_ASOF=v; }
+function renderCompare(){
+  const box=document.getElementById('factsView');
+  if(!box) return;
+  const sel='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:4px 8px;font-size:12px';
+  const fields=[...new Set(((STD&&STD.rows)||[]).map(r=>r.field))];
+  const periods=(STD&&STD.periods)||[];
+  if(CMP_FIELD===null) CMP_FIELD=fields[0]||null;
+  if(CMP_PERIOD===null) CMP_PERIOD=periods[periods.length-1]||null;
+  if(!fields.length){
+    box.innerHTML=factsModeToggle()+`<div style="padding:26px"><div class="muted">No standardized data to compare — run a 10-K or frames ingest first.</div></div>`;
+    return;
+  }
+  box.innerHTML=factsModeToggle()+`
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <div class="name">Compare filers</div>
+        <select onchange="cmpSetField(this.value)" style="${sel}">
+          ${fields.map(f=>`<option value="${esc(f)}" ${f===CMP_FIELD?'selected':''}>${esc(f)}</option>`).join('')}
+        </select>
+        <select onchange="cmpSetPeriod(this.value)" style="${sel}">
+          ${periods.map(p=>`<option value="${esc(p)}" ${p===CMP_PERIOD?'selected':''}>${esc(p)}</option>`).join('')}
+        </select>
+        <input placeholder="tickers, comma separated (blank = all)" value="${esc(CMP_TICKERS)}"
+          oninput="cmpSetTickers(this.value)" onchange="runCompare()" style="${sel};min-width:220px">
+        <input type="date" title="as-of date (optional)" value="${esc(CMP_ASOF)}"
+          onchange="cmpSetAsOf(this.value);runCompare()" style="${sel}">
+      </div>
+      <div id="cmpResults" style="margin-top:12px"><div class="loading">Ranking…</div></div>
+      <div class="muted" style="font-size:11px;margin-top:6px">One standard field ranked across filers for a single period end. Bars scale to the largest value.</div>
+    </div>`;
+}
+async function runCompare(){
+  const out=document.getElementById('cmpResults');
+  if(!out) return;
+  if(!CMP_FIELD||!CMP_PERIOD){ out.innerHTML='<div class="muted" style="font-size:12px">Pick a field and period end.</div>'; return; }
+  const qs=new URLSearchParams({field:CMP_FIELD,period_end:CMP_PERIOD});
+  if(CMP_TICKERS.trim()) qs.set('tickers',CMP_TICKERS.trim());
+  if(CMP_ASOF) qs.set('as_of',CMP_ASOF);
+  try{ CMP=await (await fetch('/api/store/compare?'+qs)).json(); }
+  catch(e){ out.innerHTML=`<div class="err">${esc(e.message)}</div>`; return; }
+  renderCompareResults();
+}
+function renderCompareResults(){
+  const out=document.getElementById('cmpResults');
+  if(!out||!CMP) return;
+  if(CMP.error){ out.innerHTML=`<div class="err">${esc(CMP.error)}</div>`; return; }
+  const rows=CMP.rows||[], unres=CMP.unresolved||[];
+  const unresHtml=unres.length?`<div class="muted" style="font-size:12px;margin-bottom:8px">Unresolved tickers: ${unres.map(esc).join(', ')}</div>`:'';
+  if(!rows.length){
+    out.innerHTML=unresHtml+`<div style="padding:20px"><div class="muted">No filers to compare for this field and period end — widen the tickers or pick another period.</div></div>`;
+    return;
+  }
+  const max=Math.max(...rows.map(r=>Math.abs(r.value||0)),1);
+  out.innerHTML=unresHtml+`
+    ${CMP.excluded_no_filed_date?`<div class="muted" style="font-size:11px;margin-bottom:6px">${CMP.excluded_no_filed_date} value(s) hidden (no filed date)</div>`:''}
+    <table style="font-size:12px;width:100%">
+      <tr><th style="text-align:left">Filer</th><th class="num">Value</th><th style="width:45%"></th></tr>
+      ${rows.map(r=>{
+        const w=Math.max(0,Math.round(Math.abs(r.value||0)/max*100));
+        return `<tr>
+          <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc((r.name||('CIK '+r.cik))+(r.concept?'\n'+r.concept:''))}">${esc(r.name||('CIK '+r.cik))}</td>
+          <td class="num" style="white-space:nowrap">${fmtFact(r.value,'USD')}</td>
+          <td><div style="background:var(--accent);height:12px;width:${w}%;min-width:2px;border-radius:3px"></div></td>
+        </tr>`;
+      }).join('')}
+    </table>`;
 }
 
 // What came down, grouped by WHO filed it. 424B2 templates are issuer-specific,
