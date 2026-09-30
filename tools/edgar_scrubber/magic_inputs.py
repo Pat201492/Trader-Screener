@@ -2,8 +2,8 @@
 Magic Formula inputs from standardized XBRL, compared against the pipeline
 (issue #237).
 
-The screener ranks on `roic` and `ebit_ev_yield`, and Stock-Data-Pipeline is the
-ONLY writer of those (ARCHITECTURE.md, #109). Before any XBRL-derived field is
+The screener's Magic Formula ranks on `roc_greenblatt` and `ebit_ev_yield`
+(#248), and Stock-Data-Pipeline is the ONLY writer of those (ARCHITECTURE.md, #109). Before any XBRL-derived field is
 allowed to graduate into the pipeline, we need to know how far a filer-tagged
 computation drifts from the pipeline's own numbers. This module is that
 measurement: it recomputes Greenblatt's two Magic Formula metrics locally from
@@ -22,8 +22,11 @@ Greenblatt's definitions, exactly as `compute` implements them:
     earnings_yield = EBIT / EV
 
 Both ratios are expressed in PERCENT, to match the pipeline contract in
-`pipeline-mock/sample_data.py` (its `roic` and `ebit_ev_yield` are percentages,
-e.g. 24.3). A missing input yields `None` for the affected metric -- never a
+`pipeline-mock/sample_data.py` (its `roc_greenblatt` and `ebit_ev_yield` are
+percentages, e.g. 24.3). ROC is compared against the pipeline's
+`roc_greenblatt`, NOT its `roic`: the pipeline's `roic` is NOPAT / invested
+capital, a different formula, so a delta against it would measure the
+definition gap rather than XBRL reliability (#248). A missing input yields `None` for the affected metric -- never a
 zero substituted for a number the filer did not report -- and every missing
 input is named in `missing`.
 
@@ -67,9 +70,10 @@ def compute(facts_by_field, mkt_cap):
 
     ``facts_by_field`` maps canonical field names (``operating_income``,
     ``ppe_net``, ...) to numeric values; ``mkt_cap`` is the market cap in the same
-    units as the fact values. Returns ``{roic, ebit_ev_yield, inputs, missing}``:
+    units as the fact values. Returns
+    ``{roc_greenblatt, ebit_ev_yield, inputs, missing}``:
 
-    * ``roic`` / ``ebit_ev_yield`` -- percentages, or ``None`` when any input the
+    * ``roc_greenblatt`` / ``ebit_ev_yield`` -- percentages, or ``None`` when any input the
       metric needs is missing (or its denominator is zero). Never a zero
       substituted for a missing number.
     * ``inputs`` -- the exact values used, ``mkt_cap`` included, for provenance.
@@ -88,12 +92,12 @@ def compute(facts_by_field, mkt_cap):
     missing = sorted(name for name, v in inputs.items() if v is None)
 
     # ROC = EBIT / ((assets_current - liabilities_current) + ppe_net)
-    roic = None
+    roc_greenblatt = None
     if all(inputs[f] is not None for f in _ROC_FIELDS):
         invested_capital = ((inputs["assets_current"] - inputs["liabilities_current"])
                             + inputs["ppe_net"])
         if invested_capital != 0:
-            roic = ebit / invested_capital * 100
+            roc_greenblatt = ebit / invested_capital * 100
 
     # EV = mkt_cap + long_term_debt + short_term_debt - cash;  yield = EBIT / EV
     ebit_ev_yield = None
@@ -104,7 +108,7 @@ def compute(facts_by_field, mkt_cap):
             ebit_ev_yield = ebit / ev * 100
 
     return {
-        "roic": roic,
+        "roc_greenblatt": roc_greenblatt,
         "ebit_ev_yield": ebit_ev_yield,
         "inputs": inputs,
         "missing": missing,
@@ -179,14 +183,14 @@ def compare(store, ticker, cik, pipeline_row):
     own numbers, return the two plus their deltas."""
     mkt_cap = pipeline_row.get("mkt_cap") if pipeline_row else None
     local = (compute(facts_by_field_for(store, cik), mkt_cap) if cik
-             else {"roic": None, "ebit_ev_yield": None, "inputs": {}, "missing": ["cik"]})
-    p_roic = pipeline_row.get("roic") if pipeline_row else None
+             else {"roc_greenblatt": None, "ebit_ev_yield": None, "inputs": {}, "missing": ["cik"]})
+    p_roc = pipeline_row.get("roc_greenblatt") if pipeline_row else None
     p_yield = pipeline_row.get("ebit_ev_yield") if pipeline_row else None
     return {
         "ticker": ticker,
-        "local_roic": local["roic"],
-        "pipeline_roic": p_roic,
-        "delta_roic": _delta(local["roic"], p_roic),
+        "local_roc_greenblatt": local["roc_greenblatt"],
+        "pipeline_roc_greenblatt": p_roc,
+        "delta_roc_greenblatt": _delta(local["roc_greenblatt"], p_roc),
         "local_ebit_ev_yield": local["ebit_ev_yield"],
         "pipeline_ebit_ev_yield": p_yield,
         "delta_ebit_ev_yield": _delta(local["ebit_ev_yield"], p_yield),
@@ -197,12 +201,13 @@ def compare(store, ticker, cik, pipeline_row):
 def format_report(rows):
     """One line per ticker: local, pipeline and delta % for both metrics."""
     lines = [
-        "ticker    roic(local/pipe/delta%)          ebit_ev_yield(local/pipe/delta%)   missing",
+        "ticker    roc_greenblatt(local/pipe/delta%) ebit_ev_yield(local/pipe/delta%)   missing",
     ]
     for r in rows:
         lines.append(
             f"{r['ticker']:<8}  "
-            f"{_fmt(r['local_roic'])} {_fmt(r['pipeline_roic'])} {_fmt(r['delta_roic'])}   "
+            f"{_fmt(r['local_roc_greenblatt'])} {_fmt(r['pipeline_roc_greenblatt'])} "
+            f"{_fmt(r['delta_roc_greenblatt'])}   "
             f"{_fmt(r['local_ebit_ev_yield'])} {_fmt(r['pipeline_ebit_ev_yield'])} "
             f"{_fmt(r['delta_ebit_ev_yield'])}   "
             f"{','.join(r['missing']) if r['missing'] else '-'}"
@@ -257,14 +262,14 @@ def _self_check():
     res = compute(demo, mkt_cap=2_800_000_000_000)
     assert res["missing"] == []
     # ROC = 114301 / ((143566 - 145308) + 43715) = 114301 / 41973 (millions)
-    assert round(res["roic"], 4) == round(114301000000 / 41973000000 * 100, 4)
+    assert round(res["roc_greenblatt"], 4) == round(114301000000 / 41973000000 * 100, 4)
     assert round(res["ebit_ev_yield"], 4) == round(
         114301000000 / (2_800_000_000_000 + 95281000000 + 15807000000 - 29965000000)
         * 100, 4)
 
     gone = compute({k: v for k, v in demo.items() if k != "ppe_net"},
                    mkt_cap=2_800_000_000_000)
-    assert gone["roic"] is None and "ppe_net" in gone["missing"]
+    assert gone["roc_greenblatt"] is None and "ppe_net" in gone["missing"]
     assert gone["ebit_ev_yield"] is not None
     print("magic_inputs self-check: PASS")
 

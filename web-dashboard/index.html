@@ -182,15 +182,16 @@ function dqBadge(r){
   if(r.etf_dq_flag==null) return '<span class="muted">–</span>';
   return r.etf_dq_flag ? '<span class="neg" title="Persistent NAV premium/discount or tracking-difference drift">⚠ flag</span>' : '<span class="pos">ok</span>';
 }
-// Magic-Formula composite (Greenblatt): rank(ROIC desc) + rank(EBIT/EV desc), ascending = best.
+// Magic-Formula composite (Greenblatt): rank(ROC desc) + rank(EBIT/EV desc), ascending = best.
+// ROC is `roc_greenblatt` = EBIT / (NWC + net PP&E), not the pipeline's NOPAT-based `roic` (#248).
 // Summed ordinal ranks, not blended raw values — sidesteps the % vs yield unit mismatch. 2 params (<=5).
 // ETFs and rows missing either factor are excluded from ranking (accounting doesn't fit the EBIT/tangible-capital math).
 function computeMagicRanks(rows){
-  const elig=rows.filter(r=>!isETF(r)&&r.roic!=null&&r.ebit_ev_yield!=null);
+  const elig=rows.filter(r=>!isETF(r)&&r.roc_greenblatt!=null&&r.ebit_ev_yield!=null);
   const eligSet=new Set(elig);
-  const roicRank=new Map([...elig].sort((a,b)=>b.roic-a.roic).map((r,i)=>[r,i+1]));
+  const rocRank=new Map([...elig].sort((a,b)=>b.roc_greenblatt-a.roc_greenblatt).map((r,i)=>[r,i+1]));
   const yieldRank=new Map([...elig].sort((a,b)=>b.ebit_ev_yield-a.ebit_ev_yield).map((r,i)=>[r,i+1]));
-  rows.forEach(r=>{ r.magic_rank=eligSet.has(r)?roicRank.get(r)+yieldRank.get(r):null; });
+  rows.forEach(r=>{ r.magic_rank=eligSet.has(r)?rocRank.get(r)+yieldRank.get(r):null; });
 }
 // ── Smart-money moat (issue #41) — the differentiator ─────
 // Harris: congress trades, insider (EDGAR), committee-conflict, and news sentiment are the

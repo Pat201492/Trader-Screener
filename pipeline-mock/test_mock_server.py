@@ -75,7 +75,7 @@ def run_checks():
         "adv", "dollar_volume",
         "return_1m", "return_3m", "return_6m", "return_12m", "mom_factor",
         "atr", "atr_pct", "realized_vol", "max_drawdown",
-        "ebit_ev_yield", "roic", "mkt_cap",
+        "ebit_ev_yield", "roic", "roc_greenblatt", "mkt_cap",
     ]
     for field in STOCKS_ROW_FIELDS:
         present = any(r.get(field) is not None for r in rows if not r.get("is_etf") or field in ("mkt_cap",))
