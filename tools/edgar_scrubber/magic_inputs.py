@@ -53,6 +53,16 @@ except ImportError:  # flat import (script / pytest via conftest)
 _ROC_FIELDS = ("operating_income", "assets_current", "liabilities_current", "ppe_net")
 _EV_FIELDS = ("operating_income", "long_term_debt", "short_term_debt", "cash")
 
+# Concepts the two provable-derivation rules (#257, decided on #241) read
+# directly, below the canonical-field layer. Each rule fires ONLY when the
+# filer's own tags prove the value -- never a guessed zero.
+_LONG_TERM_DEBT = "us-gaap:LongTermDebt"
+_LONG_TERM_DEBT_NONCURRENT = "us-gaap:LongTermDebtNoncurrent"
+_PRETAX_INCOME = (
+    "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxes"
+    "ExtraordinaryItemsNoncontrollingInterest")
+_INTEREST_NONOPERATING = "us-gaap:InterestExpenseNonoperating"
+
 # Ticker -> CIK for the CLI's local computation. A stub roster (this is an
 # exploratory tool); unknown tickers simply resolve to no local facts. Kept tiny
 # and obvious rather than pulling in a full ticker map the tool does not need.
@@ -70,8 +80,9 @@ def compute(facts_by_field, mkt_cap):
 
     ``facts_by_field`` maps canonical field names (``operating_income``,
     ``ppe_net``, ...) to numeric values; ``mkt_cap`` is the market cap in the same
-    units as the fact values. Returns
-    ``{roc_greenblatt, ebit_ev_yield, inputs, missing}``:
+    units as the fact values. A ``"derived"`` key (a list of rule names), if
+    present, is carried through unchanged. Returns
+    ``{roc_greenblatt, ebit_ev_yield, inputs, missing, derived}``:
 
     * ``roc_greenblatt`` / ``ebit_ev_yield`` -- percentages, or ``None`` when any input the
       metric needs is missing (or its denominator is zero). Never a zero
@@ -79,11 +90,14 @@ def compute(facts_by_field, mkt_cap):
     * ``inputs`` -- the exact values used, ``mkt_cap`` included, for provenance.
     * ``missing`` -- the names of every input that was absent, sorted; a caller
       can see *why* a metric is ``None``.
+    * ``derived`` -- the provable-derivation rules (#257) that supplied an input
+      the filer did not tag directly; empty when none fired.
     """
     def val(name):
         v = facts_by_field.get(name)
         return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
+    derived = list(facts_by_field.get("derived") or [])
     ebit = val("operating_income")
     inputs = {name: val(name) for name in set(_ROC_FIELDS) | set(_EV_FIELDS)}
     inputs["mkt_cap"] = (mkt_cap if isinstance(mkt_cap, (int, float))
@@ -112,6 +126,7 @@ def compute(facts_by_field, mkt_cap):
         "ebit_ev_yield": ebit_ev_yield,
         "inputs": inputs,
         "missing": missing,
+        "derived": derived,
     }
 
 
@@ -137,9 +152,71 @@ def _pick_latest(entries):
     return max(pool, key=lambda e: e["period_end"])["value"]
 
 
+def _latest_instant(entries):
+    """The most recent entry in a raw concept list, by ``period_end``. ``None``
+    for an empty list."""
+    return max(entries, key=lambda e: e["period_end"]) if entries else None
+
+
+def _latest_annual(entries):
+    """The most recent annual-duration entry (an income / cash-flow line),
+    ``None`` when the concept has no annual period."""
+    annual = [e for e in entries if 300 <= _period_days(e) <= 380]
+    return max(annual, key=lambda e: e["period_end"]) if annual else None
+
+
+def _concept_entries(all_facts, concept):
+    return [f for f in all_facts if f.get("concept") == concept]
+
+
+def apply_derivations(all_facts, out):
+    """Apply the two provable-derivation rules (#257) to the resolved field map
+    ``out``, in place, and return the list of rule names that fired.
+
+    Each rule fires ONLY when the filer's own tags prove the value -- never a
+    guessed zero:
+
+    * ``short_term_debt=0`` -- when ``short_term_debt`` resolved to nothing and
+      the filer's latest ``LongTermDebt`` equals its ``LongTermDebtNoncurrent``
+      at the same ``period_end`` (so total debt is entirely noncurrent, i.e. the
+      current portion is a provable zero).
+    * ``ebit=pretax+interest`` -- when ``operating_income`` resolved to nothing,
+      reconstruct EBIT as pre-tax income + nonoperating interest expense for the
+      same annual period. Both inputs must be present, or the rule does not fire.
+    """
+    derived = []
+
+    # Zero current debt: total == noncurrent at the same period_end -> current 0.
+    if out.get("short_term_debt") is None:
+        ltd = _latest_instant(_concept_entries(all_facts, _LONG_TERM_DEBT))
+        if ltd is not None:
+            noncur = next(
+                (e for e in _concept_entries(all_facts, _LONG_TERM_DEBT_NONCURRENT)
+                 if e["period_end"] == ltd["period_end"]), None)
+            if noncur is not None and noncur["value"] == ltd["value"]:
+                out["short_term_debt"] = 0
+                derived.append("short_term_debt=0")
+
+    # EBIT fallback: pre-tax income + nonoperating interest, same annual period.
+    if out.get("operating_income") is None:
+        pretax = _latest_annual(_concept_entries(all_facts, _PRETAX_INCOME))
+        if pretax is not None:
+            interest = next(
+                (e for e in _concept_entries(all_facts, _INTEREST_NONOPERATING)
+                 if e["period_end"] == pretax["period_end"]
+                 and 300 <= _period_days(e) <= 380), None)
+            if interest is not None:
+                out["operating_income"] = pretax["value"] + interest["value"]
+                derived.append("ebit=pretax+interest")
+
+    return derived
+
+
 def facts_by_field_for(store, cik):
     """Resolve every canonical field for one CIK to a single latest value, the
-    shape ``compute`` wants. Read-only against the local facts store."""
+    shape ``compute`` wants, then apply the provable-derivation rules (#257).
+    Read-only against the local facts store. The returned dict carries a
+    ``"derived"`` list naming each rule that fired."""
     import sqlite3
     try:
         all_facts = store.facts_for(cik)
@@ -150,6 +227,7 @@ def facts_by_field_for(store, cik):
     out = {}
     for field in cc.CANONICAL:
         out[field] = _pick_latest(cc.resolve(all_facts, field))
+    out["derived"] = apply_derivations(all_facts, out)
     return out
 
 
@@ -183,7 +261,8 @@ def compare(store, ticker, cik, pipeline_row):
     own numbers, return the two plus their deltas."""
     mkt_cap = pipeline_row.get("mkt_cap") if pipeline_row else None
     local = (compute(facts_by_field_for(store, cik), mkt_cap) if cik
-             else {"roc_greenblatt": None, "ebit_ev_yield": None, "inputs": {}, "missing": ["cik"]})
+             else {"roc_greenblatt": None, "ebit_ev_yield": None, "inputs": {},
+                   "missing": ["cik"], "derived": []})
     p_roc = pipeline_row.get("roc_greenblatt") if pipeline_row else None
     p_yield = pipeline_row.get("ebit_ev_yield") if pipeline_row else None
     return {
@@ -195,22 +274,28 @@ def compare(store, ticker, cik, pipeline_row):
         "pipeline_ebit_ev_yield": p_yield,
         "delta_ebit_ev_yield": _delta(local["ebit_ev_yield"], p_yield),
         "missing": local["missing"],
+        "derived": local.get("derived", []),
     }
 
 
 def format_report(rows):
-    """One line per ticker: local, pipeline and delta % for both metrics."""
+    """One line per ticker: local, pipeline and delta % for both metrics. The
+    last column is the provable-derivation rules (#257) that fired when any did,
+    otherwise the missing inputs."""
     lines = [
-        "ticker    roc_greenblatt(local/pipe/delta%) ebit_ev_yield(local/pipe/delta%)   missing",
+        "ticker    roc_greenblatt(local/pipe/delta%) ebit_ev_yield(local/pipe/delta%)   missing/derived",
     ]
     for r in rows:
+        derived = r.get("derived") or []
+        last = (",".join(derived) if derived
+                else (",".join(r["missing"]) if r["missing"] else "-"))
         lines.append(
             f"{r['ticker']:<8}  "
             f"{_fmt(r['local_roc_greenblatt'])} {_fmt(r['pipeline_roc_greenblatt'])} "
             f"{_fmt(r['delta_roc_greenblatt'])}   "
             f"{_fmt(r['local_ebit_ev_yield'])} {_fmt(r['pipeline_ebit_ev_yield'])} "
             f"{_fmt(r['delta_ebit_ev_yield'])}   "
-            f"{','.join(r['missing']) if r['missing'] else '-'}"
+            f"{last}"
         )
     return "\n".join(lines)
 
@@ -261,6 +346,7 @@ def _self_check():
     }
     res = compute(demo, mkt_cap=2_800_000_000_000)
     assert res["missing"] == []
+    assert res["derived"] == []  # nothing derived when every field is tagged
     # ROC = 114301 / ((143566 - 145308) + 43715) = 114301 / 41973 (millions)
     assert round(res["roc_greenblatt"], 4) == round(114301000000 / 41973000000 * 100, 4)
     assert round(res["ebit_ev_yield"], 4) == round(
