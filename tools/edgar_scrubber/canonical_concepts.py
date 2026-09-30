@@ -98,15 +98,18 @@ CANONICAL = {
     ),
     "ppe_net": (
         _q("PropertyPlantAndEquipmentNet"),
+        _q("PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization"),
     ),
     "long_term_debt": (
         _q("LongTermDebtNoncurrent"),
         _q("LongTermDebt"),
+        _q("LongTermDebtAndCapitalLeaseObligations"),
     ),
     "short_term_debt": (
         _q("LongTermDebtCurrent"),
         _q("ShortTermBorrowings"),
         _q("DebtCurrent"),
+        _q("LongTermDebtAndCapitalLeaseObligationsCurrent"),
     ),
     # Cash flow.
     "operating_cash_flow": (
