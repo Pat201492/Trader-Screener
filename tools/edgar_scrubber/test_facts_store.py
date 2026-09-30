@@ -266,6 +266,107 @@ def run_checks():
     check("...but latest() still sees the NULL-filed row",
           aso_null.latest(*key) is not None)
 
+    # ── AC (#252): one canonical CIK form — a filer is not split across keys ──
+    section("AC (#252): CIK is normalised to the 10-digit form on write and read")
+    AAPL_BARE, AAPL_PAD = "320193", "0000320193"
+    norm = FactsStore(":memory:")
+    # The 10-K path writes the padded form; the frames path writes the bare one.
+    norm.put_facts([FactRecord(
+        cik=AAPL_BARE, concept="us-gaap:Revenues", unit="USD",
+        period_start="2025-07-01", period_end="2025-09-30", fiscal_year=2025,
+        fiscal_period="Q4", form="10-K", accession="0000320193-25-000100",
+        value=94_000_000_000, source="xbrl")])
+    norm.put_facts([FactRecord(
+        cik=AAPL_PAD, concept="us-gaap:Revenues", unit="USD",
+        period_start="2025-07-01", period_end="2025-09-30", fiscal_year=2025,
+        fiscal_period="Q4", form="10-K", accession="0000320193-25-000100",
+        value=94_000_000_000, source="xbrl")])
+    n_rows = norm._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+    check("writing the same fact under both CIK forms leaves exactly one row",
+          n_rows == 1)
+    stored_cik = norm._conn.execute("SELECT cik FROM facts").fetchone()[0]
+    check("the surviving row is stored padded (0000320193)",
+          stored_cik == AAPL_PAD)
+    check("facts_for(bare) and facts_for(padded) return identical rows",
+          norm.facts_for(AAPL_BARE) == norm.facts_for(AAPL_PAD))
+    check("latest() takes either CIK form",
+          norm.latest(AAPL_BARE, "us-gaap:Revenues",
+                      "2025-07-01", "2025-09-30") ==
+          norm.latest(AAPL_PAD, "us-gaap:Revenues",
+                      "2025-07-01", "2025-09-30"))
+
+    # ── AC (#252): opening a mixed store (writable) collapses the split ──
+    section("AC (#252): a store split across both CIK forms migrates to one padded "
+            "key, dropping duplicate rows")
+    mdir = tempfile.mkdtemp(prefix="facts-cik-")
+    mixed_db = os.path.join(mdir, "facts.sqlite")
+    mc = sqlite3.connect(mixed_db)
+    mc.execute(
+        "CREATE TABLE facts ("
+        " ingested_seq INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " cik TEXT NOT NULL, concept TEXT NOT NULL, unit TEXT,"
+        " period_start TEXT NOT NULL, period_end TEXT NOT NULL,"
+        " fiscal_year INTEGER, fiscal_period TEXT, form TEXT,"
+        " accession TEXT NOT NULL, value_json TEXT, value_num REAL,"
+        " source TEXT NOT NULL, filed TEXT,"
+        " UNIQUE (cik, concept, period_start, period_end, accession))")
+    mc.execute("CREATE TABLE filers (cik TEXT PRIMARY KEY, name TEXT)")
+    # Same (concept, period, accession) under both forms — a genuine split. Plus a
+    # bare-only period that has no padded twin, to prove it survives (re-keyed).
+    mixed_rows = [
+        (AAPL_PAD, "us-gaap:Revenues", "USD", "2025-07-01", "2025-09-30",
+         2025, "Q4", "10-K", "0000320193-25-000100", "94", 94.0, "xbrl", None),
+        (AAPL_BARE, "us-gaap:Revenues", "USD", "2025-07-01", "2025-09-30",
+         2025, "Q4", "10-K", "0000320193-25-000100", "94", 94.0, "xbrl", None),
+        (AAPL_BARE, "us-gaap:Assets", "USD", "2025-09-30", "2025-09-30",
+         2025, "Q4", "10-K", "0000320193-25-000100", "300", 300.0, "xbrl", None),
+    ]
+    mc.executemany(
+        "INSERT INTO facts (cik, concept, unit, period_start, period_end,"
+        " fiscal_year, fiscal_period, form, accession, value_json, value_num,"
+        " source, filed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        mixed_rows)
+    mc.executemany("INSERT INTO filers (cik, name) VALUES (?, ?)",
+                   [(AAPL_PAD, "Apple Inc."), (AAPL_BARE, "Apple Inc.")])
+    mc.commit()
+    before_mixed = mc.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+    check("the mixed store starts with a duplicate split row (3 rows)",
+          before_mixed == 3)
+    mc.close()
+
+    # A READ-ONLY open must not migrate, and must not raise (#250 / #252).
+    ro_mixed = FactsStore(mixed_db, readonly=True)
+    try:
+        ro_mixed.facts_for(AAPL_BARE)   # does not raise
+        still_mixed = {r["cik"] for r in
+                       ro_mixed._conn.execute("SELECT DISTINCT cik FROM facts")}
+        check("a read-only open of a mixed store reads without raising and does "
+              "NOT rewrite it", still_mixed == {AAPL_PAD, AAPL_BARE})
+    finally:
+        ro_mixed.close()
+
+    mg = FactsStore(mixed_db)   # writable open == migrate
+    try:
+        after_mixed = mg._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+        check("the migration drops the duplicate split row (3 -> 2)",
+              before_mixed == 3 and after_mixed == 2)
+        ciks = {r["cik"] for r in
+                mg._conn.execute("SELECT DISTINCT cik FROM facts")}
+        check("every facts row now sits under the one padded CIK",
+              ciks == {AAPL_PAD})
+        dups = mg._conn.execute(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM facts GROUP BY concept, "
+            "period_start, period_end, accession HAVING COUNT(*) > 1)").fetchone()[0]
+        check("no duplicate (concept, period_start, period_end, accession) remains",
+              dups == 0)
+        check("the bare-only period survived the re-key",
+              len(mg.facts_for(AAPL_PAD, concept="us-gaap:Assets")) == 1)
+        fciks = {r["cik"] for r in
+                 mg._conn.execute("SELECT DISTINCT cik FROM filers")}
+        check("filers too collapse onto the one padded CIK", fciks == {AAPL_PAD})
+    finally:
+        mg.close()
+
     # ── AC: non-local destination refused with the SAME guard ──
     section("AC: a non-local destination path is refused (output_store's guard)")
     check("store under a Stock-Data-Pipeline tree is refused",

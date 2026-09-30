@@ -44,17 +44,31 @@ try:  # package import (from .facts_store import ...)
         OutputStoreError, OwnershipError, _assert_local_destination,
         LOCAL_STORE_ROOT,
     )
+    from .edgar_client import cik10
 except ImportError:  # flat import (import facts_store)
     from output_store import (
         OutputStoreError, OwnershipError, _assert_local_destination,
         LOCAL_STORE_ROOT,
     )
+    from edgar_client import cik10
 
 DEFAULT_STORE_PATH = LOCAL_STORE_ROOT / "facts.sqlite"
 
 
 class FactsStoreError(OutputStoreError):
     """Base error for the period-keyed facts store."""
+
+
+def _norm_cik(cik):
+    """Canonicalise a CIK to the 10-digit zero-padded form (``edgar_client.cik10``)
+    so one filer cannot land under two keys: the 10-K path writes ``0000320193``
+    and the frames path writes the bare ``320193`` (#252). A value with no digits
+    (never a real CIK) is left untouched rather than raising, so a malformed key
+    never crashes a write or a read."""
+    try:
+        return cik10(cik)
+    except (ValueError, TypeError):
+        return str(cik) if cik is not None else cik
 
 
 # ── Records ──────────────────────────────────────────────────────────────────
@@ -226,6 +240,30 @@ class FactsStore:
                 self._conn.execute("PRAGMA table_info(facts)").fetchall()}
         if "filed" not in cols:
             self._conn.execute("ALTER TABLE facts ADD COLUMN filed TEXT")
+        self._migrate_ciks()
+
+    def _migrate_ciks(self):
+        """One-time, additive: rewrite any non-padded ``cik`` to the 10-digit
+        canonical form (#252), so a filer the 10-K path stored as ``0000320193``
+        and the frames path stored as bare ``320193`` collapses onto one key.
+        ``UPDATE OR IGNORE`` moves each row to the padded key but skips one whose
+        padded key already exists (the table's UNIQUE/PRIMARY key); the DELETE then
+        drops those leftovers, so a filer split across two forms ends as one padded
+        CIK with no duplicate rows. Only reached on a writable open (see
+        ``__init__``), never read-only -- matching #250."""
+        for table in ("facts", "filers", "guidance"):
+            rows = self._conn.execute(
+                f"SELECT DISTINCT cik FROM {table}").fetchall()
+            for r in rows:
+                raw = r["cik"]
+                padded = _norm_cik(raw)
+                if padded == raw:
+                    continue
+                self._conn.execute(
+                    f"UPDATE OR IGNORE {table} SET cik = ? WHERE cik = ?",
+                    (padded, raw))
+                self._conn.execute(
+                    f"DELETE FROM {table} WHERE cik = ?", (raw,))
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -264,9 +302,10 @@ class FactsStore:
                 " fiscal_period, form, accession, value_json, value_num, source, "
                 " filed) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (r.cik, r.concept, r.unit, r.period_start, r.period_end,
-                 r.fiscal_year, r.fiscal_period, r.form, r.accession,
-                 json.dumps(r.value), value_num, r.source, r.filed),
+                (_norm_cik(r.cik), r.concept, r.unit, r.period_start,
+                 r.period_end, r.fiscal_year, r.fiscal_period, r.form,
+                 r.accession, json.dumps(r.value), value_num, r.source,
+                 r.filed),
             )
         self._conn.commit()
 
@@ -279,7 +318,7 @@ class FactsStore:
             "SELECT * FROM facts "
             "WHERE cik = ? AND concept = ? AND period_start = ? AND period_end = ? "
             "ORDER BY accession DESC, ingested_seq DESC LIMIT 1",
-            (cik, concept, period_start, period_end),
+            (_norm_cik(cik), concept, period_start, period_end),
         ).fetchone()
         return self._row_to_fact(row) if row else None
 
@@ -302,7 +341,7 @@ class FactsStore:
             "WHERE cik = ? AND concept = ? AND period_start = ? AND period_end = ? "
             "  AND filed IS NOT NULL AND filed <= ? "
             "ORDER BY accession DESC, ingested_seq DESC LIMIT 1",
-            (cik, concept, period_start, period_end, as_of_date),
+            (_norm_cik(cik), concept, period_start, period_end, as_of_date),
         ).fetchone()
         return self._row_to_fact(row) if row else None
 
@@ -314,7 +353,7 @@ class FactsStore:
             "SELECT * FROM facts "
             "WHERE cik = ? AND concept = ? AND period_start = ? AND period_end = ? "
             "ORDER BY accession ASC, ingested_seq ASC",
-            (cik, concept, period_start, period_end),
+            (_norm_cik(cik), concept, period_start, period_end),
         ).fetchall()
         return [self._row_to_fact(r) for r in rows]
 
@@ -322,7 +361,7 @@ class FactsStore:
         """All latest-per-period facts for a CIK, optionally one concept — the
         shape a period-series reader wants. Collapses supersession to the current
         version of each period."""
-        where, params = ["cik = ?"], [cik]
+        where, params = ["cik = ?"], [_norm_cik(cik)]
         if concept:
             where.append("concept = ?"); params.append(concept)
         rows = self._conn.execute(
@@ -377,7 +416,7 @@ class FactsStore:
             self._conn.execute(
                 "INSERT INTO filers (cik, name) VALUES (?, ?) "
                 "ON CONFLICT(cik) DO UPDATE SET name = excluded.name",
-                (str(cik), name),
+                (_norm_cik(cik), name),
             )
         self._conn.commit()
 
@@ -405,7 +444,7 @@ class FactsStore:
                 "(cik, metric, period_label, low_json, high_json, basis, "
                 " accession, document, span_start, span_end, provenance, confidence) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (r.cik, r.metric, r.period_label, json.dumps(r.low),
+                (_norm_cik(r.cik), r.metric, r.period_label, json.dumps(r.low),
                  json.dumps(r.high), r.basis, r.accession, r.document,
                  span_start, span_end, r.provenance, r.confidence),
             )
@@ -413,7 +452,7 @@ class FactsStore:
 
     def guidance_for(self, cik, *, metric=None):
         """Guidance records for a CIK, optionally one metric."""
-        where, params = ["cik = ?"], [cik]
+        where, params = ["cik = ?"], [_norm_cik(cik)]
         if metric:
             where.append("metric = ?"); params.append(metric)
         rows = self._conn.execute(
