@@ -194,6 +194,24 @@ def run_checks():
     check("the old db has no `filed` column before the migration",
           not has_filed_before)
 
+    # A READ-ONLY open never migrates -- and read-only is how the dashboard
+    # opens the real store. It must read the old store as the migration would
+    # leave it, not raise on the missing column / table.
+    ro = FactsStore(old_db, readonly=True)
+    try:
+        ro_rows = ro.facts_for(CIK)
+        check("a read-only open of an un-migrated store reads its rows",
+              len(ro_rows) == 1 and ro_rows[0]["filed"] is None)
+        check("...as_of on it returns None rather than raising",
+              ro.as_of(CIK, CONCEPT, PS, PE, "2030-01-01") is None)
+        check("...and its filer directory is empty rather than missing",
+              ro.filer_names() == {})
+        check("...and the read-only open did not migrate it", not any(
+            r["name"] == "filed" for r in
+            ro._conn.execute("PRAGMA table_info(facts)").fetchall()))
+    finally:
+        ro.close()
+
     migrated = FactsStore(old_db)  # open == migrate
     try:
         after = migrated._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
