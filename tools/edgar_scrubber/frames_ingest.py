@@ -105,11 +105,23 @@ def ingest_frames(client, field, period, store, *, unit=None):
     requests = 0
     records = []
     filers = {}
+    no_frame = []
     for concept in concepts:
         taxonomy, tag = _split_concept(concept)
-        payload = client.frames(taxonomy, tag, unit, period)
         requests += 1
+        try:
+            payload = client.frames(taxonomy, tag, unit, period)
+        except Exception as exc:
+            # SEC answers 404 when no filer tagged this concept for this period
+            # -- routine for an era's tag outside its era (`SalesRevenueNet`
+            # ended with ASC 606, so it has no CY2024 frame). That is "no data
+            # for this concept", not a failed ingest; any other error is.
+            if getattr(exc, "status", None) != 404:
+                raise
+            no_frame.append(concept)
+            continue
         if not payload:
+            no_frame.append(concept)
             continue
         row_unit = payload.get("uom") or unit
         for row in payload.get("data") or []:
@@ -141,6 +153,7 @@ def ingest_frames(client, field, period, store, *, unit=None):
         "requests": requests,
         "written": len(records),
         "filers": len(filers),
+        "no_frame": no_frame,
     }
 
 
@@ -196,7 +209,9 @@ def main(argv=None):
             summary = ingest_frames(client, field, args.period, store)
             print(f"{field}: {summary['requests']} request(s), "
                   f"{summary['written']} fact(s) written, "
-                  f"{summary['filers']} distinct filer(s)")
+                  f"{summary['filers']} distinct filer(s)"
+                  + (f", no frame for {', '.join(summary['no_frame'])}"
+                     if summary["no_frame"] else ""))
     finally:
         store.close()
 

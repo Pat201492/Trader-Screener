@@ -26,6 +26,7 @@ from pathlib import Path
 
 import frames_ingest
 from facts_store import FactsStore
+from edgar_client import EdgarHTTPError
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "frames"
 
@@ -44,8 +45,9 @@ def section(title):
 
 class FakeFramesClient:
     """Resolves frames(taxonomy, tag, unit, period) from a fixture file named
-    `{taxonomy}_{tag}_{unit}_{period}.json`. A concept with no fixture returns
-    None (a real frames call with no data 404s / is empty) -- still one call.
+    `{taxonomy}_{tag}_{unit}_{period}.json`. A concept with no fixture raises
+    HTTP 404 exactly as the real EdgarClient does for a frame nobody tagged --
+    returning None here once hid that the ingest aborted on the real 404.
     Records every call so the "one request per concept" and "zero calls on a bad
     period" criteria can be asserted."""
 
@@ -56,7 +58,7 @@ class FakeFramesClient:
         self.calls.append((taxonomy, tag, unit, period))
         path = FIXTURES / f"{taxonomy}_{tag}_{unit}_{period}.json"
         if not path.exists():
-            return None
+            raise EdgarHTTPError(404, f"frames/{taxonomy}/{tag}/{unit}/{period}")
         return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -105,6 +107,18 @@ def run_checks():
           rev["written"] == 3)
     check("a concept whose frame is empty contributes no fact but still one call",
           ("us-gaap", "SalesRevenueNet", "USD", "CY2024") in client2.calls)
+    check("a 404 for one concept does not abort the ingest; it is reported",
+          rev["no_frame"] == ["us-gaap:SalesRevenueNet"])
+
+    class BrokenClient(FakeFramesClient):
+        def frames(self, taxonomy, tag, unit, period):
+            raise EdgarHTTPError(503, "frames")
+    raised = False
+    try:
+        frames_ingest.ingest_frames(BrokenClient(), "revenue", "CY2024", FactsStore(":memory:"))
+    except EdgarHTTPError:
+        raised = True
+    check("any error other than 404 still fails the ingest", raised)
 
     # ── AC: instant period -> period_start == period_end ──
     section("AC: an instant period (...I) stores period_start == period_end")
