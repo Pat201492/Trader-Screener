@@ -131,6 +131,10 @@ def build_universe():
         max_drawdown = round(rnd.uniform(8, 42), 1)
         roic = None if is_etf else round(rnd.uniform(4, 35), 1)
         ebit_ev_yield = None if is_etf else round(rnd.uniform(2, 14), 1)
+        # Greenblatt ROC = EBIT / (NWC + net PP&E), the Magic Formula quality leg
+        # (#248). Distinct from `roic` (NOPAT / invested capital). Derived, not
+        # drawn from rnd, so the seeded sequence for every other field is unchanged.
+        roc_greenblatt = None if is_etf else round(roic * 1.4, 1)
         score = round(rnd.uniform(35, 95))
 
         row = {
@@ -138,7 +142,7 @@ def build_universe():
             "cap_size": cap_size, "is_etf": is_etf, "rank": len(stocks) + 1,
             "price": price, "mkt_cap": round(rnd.uniform(0.3, 3200), 1),
             "pe": None if is_etf else round(rnd.uniform(9, 45), 1),
-            "roic": roic, "ebit_ev_yield": ebit_ev_yield,
+            "roic": roic, "roc_greenblatt": roc_greenblatt, "ebit_ev_yield": ebit_ev_yield,
             "score": score, "score_composite": score,
             "score_label": "Attractive" if score >= 70 else ("Fair" if score >= 45 else "Unattractive"),
             "score_stars": round(score / 20, 1),

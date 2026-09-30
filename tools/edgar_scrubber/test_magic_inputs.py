@@ -67,14 +67,14 @@ def test_compute_follows_greenblatt_formulas_to_4dp():
     }
     res = mi.compute(facts, mkt_cap=1000.0)
     # ROC = 100 / ((300 - 100) + 50) = 100 / 250 = 40%
-    assert round(res["roic"], 4) == 40.0000
+    assert round(res["roc_greenblatt"], 4) == 40.0000
     # EV = 1000 + 200 + 50 - 100 = 1150 ; yield = 100 / 1150 = 8.695652...%
     assert round(res["ebit_ev_yield"], 4) == round(100 / 1150 * 100, 4)
     assert round(res["ebit_ev_yield"], 4) == 8.6957
     assert res["missing"] == []
 
 
-def test_missing_ppe_nulls_roic_only_yield_survives():
+def test_missing_ppe_nulls_roc_only_yield_survives():
     facts = {
         "operating_income": 100.0,
         "assets_current": 300.0,
@@ -85,7 +85,7 @@ def test_missing_ppe_nulls_roic_only_yield_survives():
         "cash": 100.0,
     }
     res = mi.compute(facts, mkt_cap=1000.0)
-    assert res["roic"] is None
+    assert res["roc_greenblatt"] is None
     assert "ppe_net" in res["missing"]
     assert res["ebit_ev_yield"] is not None  # its inputs are all present
 
@@ -96,7 +96,7 @@ def test_never_substitutes_zero_for_missing():
     res = mi.compute({"assets_current": 300.0, "liabilities_current": 100.0,
                       "ppe_net": 50.0, "long_term_debt": 200.0,
                       "short_term_debt": 50.0, "cash": 100.0}, mkt_cap=1000.0)
-    assert res["roic"] is None and res["ebit_ev_yield"] is None
+    assert res["roc_greenblatt"] is None and res["ebit_ev_yield"] is None
     assert "operating_income" in res["missing"]
 
 
@@ -107,7 +107,7 @@ def test_missing_mkt_cap_nulls_only_yield():
         "long_term_debt": 200.0, "short_term_debt": 50.0, "cash": 100.0,
     }
     res = mi.compute(facts, mkt_cap=None)
-    assert res["roic"] is not None
+    assert res["roc_greenblatt"] is not None
     assert res["ebit_ev_yield"] is None
     assert "mkt_cap" in res["missing"]
 
@@ -118,8 +118,8 @@ def test_missing_mkt_cap_nulls_only_yield():
 
 def _write_pipeline_json(dirpath):
     payload = {"stocks": [
-        {"ticker": "AAPL", "mkt_cap": 2800.0, "roic": 55.5, "ebit_ev_yield": 6.1},
-        {"ticker": "MSFT", "mkt_cap": 3100.0, "roic": 30.2, "ebit_ev_yield": 4.4},
+        {"ticker": "AAPL", "mkt_cap": 2800.0, "roic": 41.0, "roc_greenblatt": 55.5, "ebit_ev_yield": 6.1},
+        {"ticker": "MSFT", "mkt_cap": 3100.0, "roic": 22.0, "roc_greenblatt": 30.2, "ebit_ev_yield": 4.4},
     ], "total": 2}
     p = Path(dirpath) / "stocks.json"
     p.write_text(json.dumps(payload), encoding="utf-8")
@@ -143,11 +143,14 @@ def test_cli_reads_local_json_and_prints_per_ticker():
 
     aapl = next(r for r in rows if r["ticker"] == "AAPL")
     # Pipeline values are read straight from the JSON row.
-    assert aapl["pipeline_roic"] == 55.5
+    assert aapl["pipeline_roc_greenblatt"] == 55.5
+    # ROC compares against the pipeline's roc_greenblatt, never its NOPAT-based
+    # roic (41.0), which is a different formula (#248).
+    assert "pipeline_roic" not in aapl
     assert aapl["pipeline_ebit_ev_yield"] == 6.1
-    # The Apple fixture lacks the balance-sheet inputs, so local roic is None and
+    # The Apple fixture lacks the balance-sheet inputs, so local ROC is None and
     # the missing fields are named -- never a fabricated zero.
-    assert aapl["local_roic"] is None
+    assert aapl["local_roc_greenblatt"] is None
     assert "ppe_net" in aapl["missing"]
 
 

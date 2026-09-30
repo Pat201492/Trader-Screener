@@ -59,12 +59,15 @@
     // smart-money legs — only a subset of names have informed-flow data
     const hasCongress = chance(R, 0.35), hasInsider = chance(R, 0.4), hasNews = chance(R, 0.6);
 
+    let roicV = null;  // captured so roc_greenblatt derives from it without an extra R draw
     return {
       ticker, name, sector,
       price,
       mkt_cap: Math.round(between(R, 3e9, 3.2e12, 0)),
       pe: isEtf ? null : between(R, 8, 55, 1),
-      roic: isEtf ? null : between(R, 0.03, 0.42, 3),
+      roic: isEtf ? null : (roicV = between(R, 0.03, 0.42, 3)),
+      // Greenblatt ROC (EBIT / (NWC + net PP&E)), the Magic Formula quality leg (#248)
+      roc_greenblatt: roicV == null ? null : +(roicV * 1.4).toFixed(3),
       ebit_ev_yield: isEtf ? null : between(R, 0.02, 0.16, 3),
       score: between(R, -20, 60, 1),                 // valuation-model output
       upside: between(R, -25, 65, 1),
@@ -174,7 +177,7 @@
         id: 'magic-formula',
         kind: 'model',
         name: 'Magic Formula Rank',
-        purpose: 'Greenblatt composite: rank(ROIC) + rank(EBIT/EV)',
+        purpose: 'Greenblatt composite: rank(ROC) + rank(EBIT/EV)',
         status: 'working',
         inputs: ['fundamentals', 'valuation'],
         output_field: 'magic_rank',
