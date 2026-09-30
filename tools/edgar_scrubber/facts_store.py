@@ -205,6 +205,15 @@ class FactsStore:
             self._migrate()
             self._conn.commit()
         self.readonly = readonly
+        # A READ-ONLY open never migrates, so a store written before #236 has no
+        # `filed` column and no `filers` table. Read it as the migration would
+        # have left it -- every `filed` NULL, an empty filer directory -- rather
+        # than failing: the dashboard only ever opens the real store read-only.
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(facts)")}
+        tables = {r["name"] for r in self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        self._has_filed = "filed" in cols
+        self._has_filers = "filers" in tables
 
     def _migrate(self):
         """Additive migration for a store opened from before #236. The nullable
@@ -286,6 +295,8 @@ class FactsStore:
         tiebreak). Rows with ``filed IS NULL`` are never returned -- a number with
         no known publication date cannot be placed in time. Returns a dict, or
         None when nothing was filed on or before ``as_of_date``."""
+        if not self._has_filed:
+            return None     # a pre-#236 store: every row is filed = NULL
         row = self._conn.execute(
             "SELECT * FROM facts "
             "WHERE cik = ? AND concept = ? AND period_start = ? AND period_end = ? "
@@ -343,7 +354,7 @@ class FactsStore:
             "value": json.loads(r["value_json"]) if r["value_json"] is not None else None,
             "value_num": r["value_num"],
             "source": r["source"],
-            "filed": r["filed"],
+            "filed": r["filed"] if "filed" in r.keys() else None,
         }
 
     # -- filer directory ---------------------------------------------------
@@ -373,6 +384,8 @@ class FactsStore:
     def filer_names(self):
         """The ``cik -> name`` directory as a dict — every filer whose name has
         been recorded (see ``put_filers``)."""
+        if not self._has_filers:
+            return {}
         rows = self._conn.execute("SELECT cik, name FROM filers").fetchall()
         return {r["cik"]: r["name"] for r in rows}
 
