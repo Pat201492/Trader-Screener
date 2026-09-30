@@ -2450,11 +2450,16 @@ def _filer_name_from_store(cik):
     if not p.exists():
         return None
     import sqlite3
+    from edgar_client import cik10
+    try:
+        key = cik10(cik)
+    except (ValueError, TypeError):
+        key = str(cik)
     try:
         conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
         try:
             row = conn.execute(
-                "SELECT name FROM filers WHERE cik = ?", (str(cik),)).fetchone()
+                "SELECT name FROM filers WHERE cik = ?", (key,)).fetchone()
         finally:
             conn.close()
     except sqlite3.Error:
@@ -2531,8 +2536,15 @@ def store_facts(cik=None, period="annual", form=None):
             "       GROUP_CONCAT(DISTINCT form) AS forms, "
             "       MIN(period_end) AS first, MAX(period_end) AS last "
             f"FROM facts WHERE {fwhere} GROUP BY cik ORDER BY COUNT(*) DESC", fargs)]
+        # CIKs are stored in the one canonical 10-digit form (#252). Match a
+        # caller's CIK (either form) against that, and display bare.
+        from edgar_client import cik10
         known = {f["cik"] for f in filers}
-        chosen = cik if cik in known else (filers[0]["cik"] if filers else None)
+        try:
+            want = cik10(cik) if cik else None
+        except (ValueError, TypeError):
+            want = str(cik)
+        chosen = want if want in known else (filers[0]["cik"] if filers else None)
         restated = {(r["concept"], r["period_start"], r["period_end"])
                     for r in conn.execute(
                         "SELECT concept, period_start, period_end FROM facts "
@@ -2549,8 +2561,10 @@ def store_facts(cik=None, period="annual", form=None):
                 "form": form, "error": str(exc)}
     finally:
         conn.close()
+    from edgar_client import cik_bare
     for f in filers:
         f["name"] = filer_name(f["cik"])
+        f["cik"] = cik_bare(f["cik"])
     if not chosen:
         return {"store": str(p), "exists": True, "filers": [], "rows": [],
                 "form": form}
@@ -2602,8 +2616,9 @@ def store_facts(cik=None, period="annual", form=None):
     rank = {c: i for i, c in enumerate(HEADLINE_CONCEPTS)}
     ordered = sorted(rows.values(), key=lambda r: (
         rank.get(r["concept"], len(rank)), r["concept"], r["unit"] or ""))
-    return {"store": str(p), "exists": True, "filers": filers, "cik": chosen,
-            "name": filer_name(chosen), "period": period, "form": form,
+    return {"store": str(p), "exists": True, "filers": filers,
+            "cik": cik_bare(chosen), "name": filer_name(chosen),
+            "period": period, "form": form,
             "periods": sorted(periods), "rows": ordered,
             "headline": [c for c in HEADLINE_CONCEPTS
                          if any(r["concept"] == c for r in ordered)]}
@@ -2726,9 +2741,9 @@ def store_standardized(cik=None, period="annual", as_of=None):
             return {**empty, "exists": True}
         want = None
         if cik:
-            from edgar_client import cik_bare
+            from edgar_client import cik10
             try:
-                want = cik_bare(cik)
+                want = cik10(cik)
             except (ValueError, TypeError):
                 want = str(cik)
         chosen = want if want in present else present[0]
@@ -2757,7 +2772,8 @@ def store_standardized(cik=None, period="annual", as_of=None):
                 periods.add(end)
             rows.append({"field": field, "values": values, "concepts": concepts})
 
-        return {"store": str(p), "exists": True, "cik": chosen,
+        from edgar_client import cik_bare
+        return {"store": str(p), "exists": True, "cik": cik_bare(chosen),
                 "name": filer_name(chosen), "period": period,
                 "periods": sorted(periods), "rows": rows,
                 "excluded_no_filed_date": excluded}
@@ -2800,6 +2816,7 @@ def store_compare(field=None, period_end=None, tickers=None, as_of=None):
 
     store = FactsStore(path=str(p), readonly=True)
     try:
+        from edgar_client import cik_bare
         concepts = set(cc.CANONICAL[field])
         ciks = [str(c) for c in scope] if scope is not None else _facts_ciks(store)
 
@@ -2820,7 +2837,7 @@ def store_compare(field=None, period_end=None, tickers=None, as_of=None):
             # fiscal year); take the longest span so the annual number ranks.
             best = max(match, key=lambda e: _days(e["period_start"],
                                                    e["period_end"]) or 0)
-            rows.append({"cik": cik, "name": filer_name(cik),
+            rows.append({"cik": cik_bare(cik), "name": filer_name(cik),
                          "value": best["value"], "concept": best["concept"]})
 
         rows.sort(key=lambda r: (r["value"] is None, -(r["value"] or 0)))
