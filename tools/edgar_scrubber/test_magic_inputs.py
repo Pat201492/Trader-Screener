@@ -113,6 +113,143 @@ def test_missing_mkt_cap_nulls_only_yield():
 
 
 # --------------------------------------------------------------------------- #
+# Provable-derivation rules (#257): zero current debt, and an EBIT fallback.
+# Synthetic facts ingested into an in-memory store, then resolved through
+# facts_by_field_for -- the same path the CLI takes.
+# --------------------------------------------------------------------------- #
+
+DERIV_CIK = "0000111111"
+
+
+def _store_from(records):
+    store = FactsStore(":memory:")
+    store.put_facts(records)
+    return store
+
+
+def _rec(concept, start, end, value, accn="d1"):
+    return FactRecord(
+        cik=DERIV_CIK, concept=concept, unit="USD",
+        period_start=start, period_end=end,
+        fiscal_year=None, fiscal_period=None, form="10-K",
+        accession=accn, value=value, source="xbrl",
+    )
+
+
+def _instant(concept, end, value, accn="d1"):
+    # Balance-sheet instant: the store's convention is period_start == period_end.
+    return _rec(concept, end, end, value, accn)
+
+
+def test_zero_current_debt_when_total_equals_noncurrent():
+    # No current-debt concept tagged, and LongTermDebt == LongTermDebtNoncurrent
+    # at the same period_end -> the current portion is a provable 0.
+    store = _store_from([
+        _instant("us-gaap:LongTermDebt", "2023-12-31", 38000),
+        _instant("us-gaap:LongTermDebtNoncurrent", "2023-12-31", 38000),
+    ])
+    out = mi.facts_by_field_for(store, DERIV_CIK)
+    store.close()
+    assert out["short_term_debt"] == 0
+    assert "short_term_debt=0" in out["derived"]
+
+
+def test_no_zero_current_debt_when_total_differs_from_noncurrent():
+    # Total exceeds noncurrent -> a current portion exists but is not tagged; we
+    # must NOT fabricate a zero.
+    store = _store_from([
+        _instant("us-gaap:LongTermDebt", "2023-12-31", 40000),
+        _instant("us-gaap:LongTermDebtNoncurrent", "2023-12-31", 38000),
+    ])
+    out = mi.facts_by_field_for(store, DERIV_CIK)
+    store.close()
+    assert out["short_term_debt"] is None
+    assert out["derived"] == []
+
+
+def test_no_zero_current_debt_when_long_term_debt_absent():
+    # Without a LongTermDebt total, the equality cannot be proved -> stays missing.
+    store = _store_from([
+        _instant("us-gaap:LongTermDebtNoncurrent", "2023-12-31", 38000),
+    ])
+    out = mi.facts_by_field_for(store, DERIV_CIK)
+    store.close()
+    assert out["short_term_debt"] is None
+    assert out["derived"] == []
+
+
+def test_ebit_fallback_pretax_plus_interest():
+    # No OperatingIncomeLoss; pretax 32.58e9 + nonoperating interest 0.97e9 for
+    # the same annual period -> EBIT 33.55e9.
+    store = _store_from([
+        _rec("us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxes"
+             "ExtraordinaryItemsNoncontrollingInterest",
+             "2023-01-01", "2023-12-31", 32.58e9),
+        _rec("us-gaap:InterestExpenseNonoperating",
+             "2023-01-01", "2023-12-31", 0.97e9),
+    ])
+    out = mi.facts_by_field_for(store, DERIV_CIK)
+    store.close()
+    assert out["operating_income"] == pytest.approx(33.55e9)
+    assert "ebit=pretax+interest" in out["derived"]
+
+
+def test_ebit_fallback_not_used_when_operating_income_tagged():
+    # OperatingIncomeLoss present -> the fallback never fires, even with pretax
+    # and interest both available.
+    store = _store_from([
+        _rec("us-gaap:OperatingIncomeLoss", "2023-01-01", "2023-12-31", 30.0e9),
+        _rec("us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxes"
+             "ExtraordinaryItemsNoncontrollingInterest",
+             "2023-01-01", "2023-12-31", 32.58e9),
+        _rec("us-gaap:InterestExpenseNonoperating",
+             "2023-01-01", "2023-12-31", 0.97e9),
+    ])
+    out = mi.facts_by_field_for(store, DERIV_CIK)
+    store.close()
+    assert out["operating_income"] == 30.0e9
+    assert out["derived"] == []
+
+
+def test_ebit_fallback_needs_both_inputs():
+    # Pretax present but interest absent -> operating_income stays missing.
+    store = _store_from([
+        _rec("us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxes"
+             "ExtraordinaryItemsNoncontrollingInterest",
+             "2023-01-01", "2023-12-31", 32.58e9),
+    ])
+    out = mi.facts_by_field_for(store, DERIV_CIK)
+    store.close()
+    assert out["operating_income"] is None
+    assert out["derived"] == []
+
+
+def test_derived_survives_into_compute_result():
+    store = _store_from([
+        _instant("us-gaap:LongTermDebt", "2023-12-31", 38000),
+        _instant("us-gaap:LongTermDebtNoncurrent", "2023-12-31", 38000),
+    ])
+    out = mi.facts_by_field_for(store, DERIV_CIK)
+    store.close()
+    res = mi.compute(out, mkt_cap=1000.0)
+    assert "short_term_debt=0" in res["derived"]
+    assert "short_term_debt" not in res["missing"]  # now a provable 0, not missing
+
+
+def test_report_prints_derived_in_place_of_missing():
+    rows = [{
+        "ticker": "META", "local_roc_greenblatt": None,
+        "pipeline_roc_greenblatt": None, "delta_roc_greenblatt": None,
+        "local_ebit_ev_yield": None, "pipeline_ebit_ev_yield": None,
+        "delta_ebit_ev_yield": None, "missing": ["cash"],
+        "derived": ["short_term_debt=0"],
+    }]
+    text = mi.format_report(rows)
+    assert "short_term_debt=0" in text
+    assert "cash" not in text  # the derived column replaces missing when non-empty
+
+
+# --------------------------------------------------------------------------- #
 # CLI: reads /api/stocks-shaped local JSON, prints local/pipeline/delta
 # --------------------------------------------------------------------------- #
 
