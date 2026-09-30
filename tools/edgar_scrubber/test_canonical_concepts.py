@@ -150,6 +150,68 @@ def test_resolve_known_but_untagged_field_returns_empty_not_error():
 
 
 # --------------------------------------------------------------------------- #
+# resolve(): the large-filer aliases (issue #256, from the #241 comparison)
+# --------------------------------------------------------------------------- #
+# GOOGL/META/HD tag PP&E under the finance-lease concept, and KO/HD tag debt
+# under the capital-lease concepts -- neither was in the map, so the fields did
+# not resolve. Synthetic facts shaped like `FactsStore.facts_for` rows.
+
+_PPE_FL = ("us-gaap:PropertyPlantAndEquipmentAndFinanceLeaseRightOfUse"
+           "AssetAfterAccumulatedDepreciationAndAmortization")
+_LTD_CL = "us-gaap:LongTermDebtAndCapitalLeaseObligations"
+_STD_CL = "us-gaap:LongTermDebtAndCapitalLeaseObligationsCurrent"
+
+
+def test_resolve_ppe_net_finance_lease_alias():
+    # A filer tagging ONLY the finance-lease PP&E concept resolves, and `concept`
+    # names it.
+    facts = [
+        {"concept": _PPE_FL, "period_start": "2023-12-31",
+         "period_end": "2023-12-31", "value": 134345, "accession": "g1"},
+    ]
+    out = cc.resolve(facts, "ppe_net")
+    assert len(out) == 1
+    assert out[0]["value"] == 134345
+    assert out[0]["concept"] == _PPE_FL
+
+
+def test_resolve_capital_lease_debt_aliases():
+    # A filer tagging ONLY the capital-lease debt concepts resolves for both the
+    # long-term and short-term fields.
+    facts = [
+        {"concept": _LTD_CL, "period_start": "2023-12-31",
+         "period_end": "2023-12-31", "value": 38000, "accession": "k1"},
+        {"concept": _STD_CL, "period_start": "2023-12-31",
+         "period_end": "2023-12-31", "value": 1200, "accession": "k1"},
+    ]
+    ltd = cc.resolve(facts, "long_term_debt")
+    assert len(ltd) == 1
+    assert ltd[0]["value"] == 38000
+    assert ltd[0]["concept"] == _LTD_CL
+
+    std = cc.resolve(facts, "short_term_debt")
+    assert len(std) == 1
+    assert std[0]["value"] == 1200
+    assert std[0]["concept"] == _STD_CL
+
+
+def test_resolve_ppe_net_prefers_plain_concept_over_finance_lease():
+    # A filer tagging BOTH PropertyPlantAndEquipmentNet and the finance-lease
+    # concept for one period still resolves to the plain (earlier-listed) one.
+    facts = [
+        {"concept": _PPE_FL, "period_start": "2023-12-31",
+         "period_end": "2023-12-31", "value": 999, "accession": "h2"},
+        {"concept": "us-gaap:PropertyPlantAndEquipmentNet",
+         "period_start": "2023-12-31", "period_end": "2023-12-31",
+         "value": 42000, "accession": "h1"},
+    ]
+    out = cc.resolve(facts, "ppe_net")
+    assert len(out) == 1
+    assert out[0]["value"] == 42000
+    assert out[0]["concept"] == "us-gaap:PropertyPlantAndEquipmentNet"
+
+
+# --------------------------------------------------------------------------- #
 # resolve() against the real Apple fixture -- FY ending 2023-09-30
 # --------------------------------------------------------------------------- #
 
