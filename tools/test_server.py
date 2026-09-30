@@ -1248,6 +1248,30 @@ try:
         accession="0000001750-25-000001", value=5_000_000_000, source="xbrl",
         filed="2025-03-01")])
     _canon_store.put_filers({"1750": "Synthetic Co"})
+
+    # #253: four filers whose FY2024 ends land in Jun, Sep, Dec and Jan -- the
+    # spread that an exact-date compare drops. All carry a filed date so the
+    # as_of test above still counts exactly the three frames (no-filed) rows.
+    _REV = "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+    _fy_filers = [
+        ("501", "Jun Filer", "2023-07-01", "2024-06-30", 600),
+        ("502", "Sep Filer", "2023-09-30", "2024-09-28", 900),
+        ("503", "Dec Filer", "2024-01-01", "2024-12-31", 1200),
+        ("504", "Jan Filer", "2024-01-28", "2025-01-26", 300),
+    ]
+    _canon_store.put_facts([_FactRecord(
+        cik=c, concept=_REV, unit="USD", period_start=ps, period_end=pe,
+        fiscal_year=2024, fiscal_period="FY", form="10-K",
+        accession="%010d-25-000001" % int(c), value=v, source="xbrl",
+        filed="2025-03-01") for c, _n, ps, pe, v in _fy_filers])
+    # The Dec filer also reports a Q4 (quarterly duration) at the SAME end date,
+    # with a larger value -- it must never be ranked as the annual figure (AC3).
+    _canon_store.put_facts([_FactRecord(
+        cik="503", concept=_REV, unit="USD", period_start="2024-10-01",
+        period_end="2024-12-31", fiscal_year=2024, fiscal_period="Q4",
+        form="10-Q", accession="0000000503-25-000002", value=9_999,
+        source="xbrl", filed="2025-03-01")])
+    _canon_store.put_filers({c: n for c, n, _ps, _pe, _v in _fy_filers})
 finally:
     _canon_store.close()
 
@@ -1306,6 +1330,34 @@ try:
           "1750" not in [r["cik"] for r in _cmp_a["rows"]]
           and _cmp_a["rows"] == [])
 
+    # -- compare by fiscal year (#253) --
+    _cmp_fy = server.store_compare(field="revenue", fy=2024)
+    _fy_by_cik = {r["cik"]: r for r in _cmp_fy["rows"]}
+    check("compare fy=2024 ranks filers whose FY ends span Jun/Sep/Dec/Jan",
+          {"501", "502", "503", "504"} <= set(_fy_by_cik))
+    check("each fy filer appears exactly once",
+          [r["cik"] for r in _cmp_fy["rows"]].count("503") == 1)
+    check("each fy row carries its own period_end",
+          _fy_by_cik["501"]["period_end"] == "2024-06-30"
+          and _fy_by_cik["502"]["period_end"] == "2024-09-28"
+          and _fy_by_cik["503"]["period_end"] == "2024-12-31"
+          and _fy_by_cik["504"]["period_end"] == "2025-01-26")
+    check("a Jan-ending FY (2025-01-26) is aligned to FY2024",
+          "504" in _fy_by_cik)
+    _fy_seq = [r["cik"] for r in _cmp_fy["rows"] if r["cik"] in
+               {"501", "502", "503", "504"}]
+    check("fy rows are sorted by value descending",
+          _fy_seq == ["503", "502", "501", "504"])
+    check("a quarterly fact at a matching end is not ranked as the annual figure",
+          _fy_by_cik["503"]["value"] == 1200)
+
+    # Exactly one of fy / period_end (AC4).
+    check("neither fy nor period_end is a ValueError",
+          raises(lambda: server.store_compare(field="revenue"), ValueError))
+    check("both fy and period_end is a ValueError",
+          raises(lambda: server.store_compare(field="revenue", fy=2024,
+                                              period_end="2024-12-31"), ValueError))
+
     # -- errors over the wire (AC5) -- on a dedicated loopback server, so this
     # store's env is what the handler reads.
     os.environ["EDGAR_SCRUBBER_HOME"] = str(_canon_home)
@@ -1324,6 +1376,16 @@ try:
     _st, _body = _cget("/api/store/compare?field=bogus&period_end=2024-12-31")
     check("an unknown compare field is a 400 with an error message",
           _st == 400 and _body.get("error"))
+    _st, _body = _cget("/api/store/compare?field=revenue")
+    check("compare with neither fy nor period_end is a 400 over the wire",
+          _st == 400 and _body.get("error"))
+    _st, _body = _cget(
+        "/api/store/compare?field=revenue&fy=2024&period_end=2024-12-31")
+    check("compare with both fy and period_end is a 400 over the wire",
+          _st == 400 and _body.get("error"))
+    _st, _body = _cget("/api/store/compare?field=revenue&fy=2024")
+    check("compare fy over the wire returns ranked rows with their period ends",
+          _st == 200 and all(r.get("period_end") for r in _body["rows"]))
     _st, _body = _cget("/api/store/standardized?cik=320193&as_of=notadate")
     check("a malformed as_of is a 400 with an error message",
           _st == 400 and _body.get("error"))
