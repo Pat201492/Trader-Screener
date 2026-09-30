@@ -3742,7 +3742,7 @@ async function renderToolEdgarResults(form){
     <div id="tool_coverage"></div>`;
   if((s.field_source||'spec')==='taxonomy'){
     FACTS=null; FACTS_Q=''; FACTS_ALL=false;
-    FACTS_MODE='reported'; STD=null; CMP=null; CMP_FIELD=null; CMP_PERIOD=null;
+    FACTS_MODE='reported'; STD=null; CMP=null; CMP_FIELD=null; CMP_FY=null;
     document.getElementById('tool_results').innerHTML='<div id="factsView"><div class="loading">Reading the local facts store…</div></div>';
     await loadFacts(null,'annual',s.form_type);
     return;
@@ -4140,7 +4140,10 @@ let FACTS=null, FACTS_Q='', FACTS_ALL=false;
 // (`compare`). The toggle switches between them client-side; the filer and
 // period selected in one carry into the next.
 let FACTS_MODE='reported', STD=null;
-let CMP=null, CMP_FIELD=null, CMP_PERIOD=null, CMP_TICKERS='', CMP_ASOF='';
+let CMP=null, CMP_FIELD=null, CMP_FY=null, CMP_TICKERS='', CMP_ASOF='';
+// The fiscal year a period end belongs to, on SEC's frames alignment: an end in
+// [Y-02-01, (Y+1)-02-01) is FY Y, so a Jan end (e.g. 2025-01-26) is FY2024.
+function cmpFyOf(pe){ const y=+pe.slice(0,4), m=+pe.slice(5,7); return m>=2?y:y-1; }
 function fmtFact(v,unit){
   if(v==null) return '–';
   if(typeof v!=='number') return esc(String(v));
@@ -4305,9 +4308,10 @@ function renderStandardized(data){
       <div class="muted" style="font-size:11px;margin-top:6px">Standard fields resolved from the filer's own us-gaap tags. Hover a cell for the source concept.</div>
     </div>`;
 }
-// Compare: one canonical field ranked across filers for a single period end. The
-// field and period-end option lists come from the currently loaded standardized
-// payload (STD); if none is loaded yet, fetch it first so the selects have data.
+// Compare: one canonical field ranked across filers for a fiscal year (#253), so
+// a filer whose year ends on any day still ranks. The field and fiscal-year
+// option lists come from the currently loaded standardized payload (STD); if none
+// is loaded yet, fetch it first so the selects have data.
 async function loadCompare(){
   const box=document.getElementById('factsView');
   if(box) box.innerHTML=factsModeToggle()+'<div class="loading">Reading the canonical layer…</div>';
@@ -4320,7 +4324,7 @@ async function loadCompare(){
   runCompare();
 }
 function cmpSetField(v){ CMP_FIELD=v; runCompare(); }
-function cmpSetPeriod(v){ CMP_PERIOD=v; runCompare(); }
+function cmpSetFy(v){ CMP_FY=v; runCompare(); }
 function cmpSetTickers(v){ CMP_TICKERS=v; }
 function cmpSetAsOf(v){ CMP_ASOF=v; }
 function renderCompare(){
@@ -4329,8 +4333,11 @@ function renderCompare(){
   const sel='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:4px 8px;font-size:12px';
   const fields=[...new Set(((STD&&STD.rows)||[]).map(r=>r.field))];
   const periods=(STD&&STD.periods)||[];
+  // Compare ranks by fiscal year, not an exact date, so a filer whose year ends
+  // on any day still ranks. Offer the fiscal years the loaded periods span.
+  const fys=[...new Set(periods.map(cmpFyOf))].sort((a,b)=>b-a);
   if(CMP_FIELD===null) CMP_FIELD=fields[0]||null;
-  if(CMP_PERIOD===null) CMP_PERIOD=periods[periods.length-1]||null;
+  if(CMP_FY===null) CMP_FY=fys.length?String(fys[0]):null;
   if(!fields.length){
     box.innerHTML=factsModeToggle()+`<div style="padding:26px"><div class="muted">No standardized data to compare — run a 10-K or frames ingest first.</div></div>`;
     return;
@@ -4342,8 +4349,8 @@ function renderCompare(){
         <select onchange="cmpSetField(this.value)" style="${sel}">
           ${fields.map(f=>`<option value="${esc(f)}" ${f===CMP_FIELD?'selected':''}>${esc(f)}</option>`).join('')}
         </select>
-        <select onchange="cmpSetPeriod(this.value)" style="${sel}">
-          ${periods.map(p=>`<option value="${esc(p)}" ${p===CMP_PERIOD?'selected':''}>${esc(p)}</option>`).join('')}
+        <select onchange="cmpSetFy(this.value)" style="${sel}">
+          ${fys.map(y=>`<option value="${y}" ${String(y)===CMP_FY?'selected':''}>FY${y}</option>`).join('')}
         </select>
         <input placeholder="tickers, comma separated (blank = all)" value="${esc(CMP_TICKERS)}"
           oninput="cmpSetTickers(this.value)" onchange="runCompare()" style="${sel};min-width:220px">
@@ -4351,14 +4358,14 @@ function renderCompare(){
           onchange="cmpSetAsOf(this.value);runCompare()" style="${sel}">
       </div>
       <div id="cmpResults" style="margin-top:12px"><div class="loading">Ranking…</div></div>
-      <div class="muted" style="font-size:11px;margin-top:6px">One standard field ranked across filers for a single period end. Bars scale to the largest value.</div>
+      <div class="muted" style="font-size:11px;margin-top:6px">One standard field ranked across filers for a fiscal year; each filer's own period end is shown. Bars scale to the largest value.</div>
     </div>`;
 }
 async function runCompare(){
   const out=document.getElementById('cmpResults');
   if(!out) return;
-  if(!CMP_FIELD||!CMP_PERIOD){ out.innerHTML='<div class="muted" style="font-size:12px">Pick a field and period end.</div>'; return; }
-  const qs=new URLSearchParams({field:CMP_FIELD,period_end:CMP_PERIOD});
+  if(!CMP_FIELD||!CMP_FY){ out.innerHTML='<div class="muted" style="font-size:12px">Pick a field and fiscal year.</div>'; return; }
+  const qs=new URLSearchParams({field:CMP_FIELD,fy:CMP_FY});
   if(CMP_TICKERS.trim()) qs.set('tickers',CMP_TICKERS.trim());
   if(CMP_ASOF) qs.set('as_of',CMP_ASOF);
   try{ CMP=await (await fetch('/api/store/compare?'+qs)).json(); }
@@ -4372,18 +4379,19 @@ function renderCompareResults(){
   const rows=CMP.rows||[], unres=CMP.unresolved||[];
   const unresHtml=unres.length?`<div class="muted" style="font-size:12px;margin-bottom:8px">Unresolved tickers: ${unres.map(esc).join(', ')}</div>`:'';
   if(!rows.length){
-    out.innerHTML=unresHtml+`<div style="padding:20px"><div class="muted">No filers to compare for this field and period end — widen the tickers or pick another period.</div></div>`;
+    out.innerHTML=unresHtml+`<div style="padding:20px"><div class="muted">No filers to compare for this field and fiscal year — widen the tickers or pick another year.</div></div>`;
     return;
   }
   const max=Math.max(...rows.map(r=>Math.abs(r.value||0)),1);
   out.innerHTML=unresHtml+`
     ${CMP.excluded_no_filed_date?`<div class="muted" style="font-size:11px;margin-bottom:6px">${CMP.excluded_no_filed_date} value(s) hidden (no filed date)</div>`:''}
     <table style="font-size:12px;width:100%">
-      <tr><th style="text-align:left">Filer</th><th class="num">Value</th><th style="width:45%"></th></tr>
+      <tr><th style="text-align:left">Filer</th><th style="text-align:left">Period end</th><th class="num">Value</th><th style="width:45%"></th></tr>
       ${rows.map(r=>{
         const w=Math.max(0,Math.round(Math.abs(r.value||0)/max*100));
         return `<tr>
           <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc((r.name||('CIK '+r.cik))+(r.concept?'\n'+r.concept:''))}">${esc(r.name||('CIK '+r.cik))}</td>
+          <td class="muted" style="white-space:nowrap">${esc(r.period_end||'')}</td>
           <td class="num" style="white-space:nowrap">${fmtFact(r.value,'USD')}</td>
           <td><div style="background:var(--accent);height:12px;width:${w}%;min-width:2px;border-radius:3px"></div></td>
         </tr>`;

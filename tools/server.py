@@ -2781,17 +2781,30 @@ def store_standardized(cik=None, period="annual", as_of=None):
         store.close()
 
 
-def store_compare(field=None, period_end=None, tickers=None, as_of=None):
-    """One STANDARD field ranked across filers for a single period end.
+def store_compare(field=None, period_end=None, tickers=None, as_of=None, fy=None):
+    """One STANDARD field ranked across filers, for a fiscal year or one exact
+    period end.
 
-    Every filer in the store (or, with `tickers`, only those it names) is
-    resolved to one value for `field` at `period_end` via
-    `canonical_concepts.resolve`, and the rows are sorted by value descending.
-    `tickers` is a comma list resolved to CIKs from the cached
-    `company_tickers.json` ONLY -- an unknown ticker lands in `unresolved`, never
-    a network call. With `as_of`, a value filed after that date is not shown, and
-    frames facts (no filed date) are excluded and counted in
-    `excluded_no_filed_date`.
+    Exactly one of `fy` and `period_end` must be given (both, or neither, is a
+    ValueError -> HTTP 400):
+
+    * `fy=<year>` ranks each filer's ANNUAL figure for that fiscal year. "Annual"
+      is a duration of `_PERIOD_WINDOWS["annual"]` days (350-380), and the year a
+      filing belongs to is SEC's frames alignment: a period end in
+      `[<fy>-01-01 + 1 month, <fy+1>-01-01 + 1 month)`, i.e. `[<fy>-02-01,
+      <fy+1>-02-01)`. So a fiscal year ending 2025-01-26 is FY2024, and Apple
+      (Sep), Microsoft (Jun) and Walmart (Jan) all rank alongside a December
+      filer. A filer with several matches keeps its latest `period_end`.
+    * `period_end=<date>` keeps the original behaviour: the value reported for
+      exactly that end date, longest span winning a shared end.
+
+    Every filer in the store (or, with `tickers`, only those it names) is resolved
+    to one value for `field` via `canonical_concepts.resolve`, and the rows are
+    sorted by value descending. Each row carries its own `period_end`. `tickers`
+    is a comma list resolved to CIKs from the cached `company_tickers.json` ONLY
+    -- an unknown ticker lands in `unresolved`, never a network call. With
+    `as_of`, a value filed after that date is not shown, and frames facts (no
+    filed date) are excluded and counted in `excluded_no_filed_date`.
     """
     from facts_store import FactsStore
     import canonical_concepts as cc
@@ -2799,8 +2812,19 @@ def store_compare(field=None, period_end=None, tickers=None, as_of=None):
     if not field or field not in cc.CANONICAL:
         raise ValueError(
             f"unknown field {field!r}; known: {', '.join(sorted(cc.CANONICAL))}")
-    if not period_end:
-        raise ValueError("period_end is required")
+    has_fy = fy not in (None, "")
+    has_pe = period_end not in (None, "")
+    if has_fy == has_pe:
+        raise ValueError("exactly one of fy or period_end is required")
+    year, win_lo, win_hi = None, None, None
+    if has_fy:
+        try:
+            year = int(fy)
+        except (TypeError, ValueError):
+            raise ValueError(f"fy must be a year, got {fy!r}")
+        # SEC frames alignment: a fiscal year ending in the month after Jan of
+        # <fy+1> (e.g. 2025-01-26) still belongs to <fy>.
+        win_lo, win_hi = "%04d-02-01" % year, "%04d-02-01" % (year + 1)
     as_of = _validate_as_of(as_of)
 
     scope, unresolved = None, []
@@ -2809,10 +2833,17 @@ def store_compare(field=None, period_end=None, tickers=None, as_of=None):
 
     p = facts_path()
     base = {"store": str(p), "exists": p.exists(), "field": field,
-            "period_end": period_end, "rows": [], "unresolved": unresolved,
-            "excluded_no_filed_date": 0}
+            "period_end": period_end, "fy": year, "rows": [],
+            "unresolved": unresolved, "excluded_no_filed_date": 0}
     if not p.exists():
         return base
+
+    alo, ahi = _PERIOD_WINDOWS["annual"]
+
+    def is_annual_in_window(f):
+        d = _days(f["period_start"], f["period_end"])
+        return (d is not None and alo <= d <= ahi
+                and win_lo <= f["period_end"] < win_hi)
 
     store = FactsStore(path=str(p), readonly=True)
     try:
@@ -2822,23 +2853,40 @@ def store_compare(field=None, period_end=None, tickers=None, as_of=None):
 
         rows, excluded = [], 0
         for cik in ciks:
-            relevant = [f for f in store.facts_for(cik)
-                        if f["concept"] in concepts and f["period_end"] == period_end]
+            facts = store.facts_for(cik)
+            if has_fy:
+                relevant = [f for f in facts
+                            if f["concept"] in concepts and is_annual_in_window(f)]
+            else:
+                relevant = [f for f in facts
+                            if f["concept"] in concepts
+                            and f["period_end"] == period_end]
             if as_of:
                 relevant, dropped = _as_of_facts(store, cik, relevant, as_of)
                 excluded += dropped
             if not relevant:
                 continue
-            match = [e for e in cc.resolve(relevant, field)
-                     if e["period_end"] == period_end]
-            if not match:
-                continue
-            # A filer can report the same end under two durations (a Q4 and the
-            # fiscal year); take the longest span so the annual number ranks.
-            best = max(match, key=lambda e: _days(e["period_start"],
-                                                   e["period_end"]) or 0)
+            match = cc.resolve(relevant, field)
+            if has_fy:
+                match = [e for e in match if win_lo <= e["period_end"] < win_hi]
+                if not match:
+                    continue
+                # Several annual filings land in one fiscal-year window (a filer
+                # that shifted its year end): the latest end is the current one.
+                best = max(match, key=lambda e: (
+                    e["period_end"], _days(e["period_start"], e["period_end"]) or 0))
+            else:
+                match = [e for e in match if e["period_end"] == period_end]
+                if not match:
+                    continue
+                # A filer can report the same end under two durations (a Q4 and
+                # the fiscal year); take the longest span so the annual number
+                # ranks.
+                best = max(match, key=lambda e: _days(e["period_start"],
+                                                       e["period_end"]) or 0)
             rows.append({"cik": cik_bare(cik), "name": filer_name(cik),
-                         "value": best["value"], "concept": best["concept"]})
+                         "value": best["value"], "concept": best["concept"],
+                         "period_end": best["period_end"]})
 
         rows.sort(key=lambda r: (r["value"] is None, -(r["value"] or 0)))
         return {**base, "rows": rows, "excluded_no_filed_date": excluded}
@@ -3217,7 +3265,8 @@ class Handler(SimpleHTTPRequestHandler):
                     (qs.get("field") or [None])[0],
                     (qs.get("period_end") or [None])[0],
                     (qs.get("tickers") or [None])[0],
-                    (qs.get("as_of") or [None])[0]))
+                    (qs.get("as_of") or [None])[0],
+                    (qs.get("fy") or [None])[0]))
             except ValueError as exc:
                 return self._json({"error": str(exc)}, 400)
             except Exception as exc:
