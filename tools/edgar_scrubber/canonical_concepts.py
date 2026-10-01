@@ -151,6 +151,8 @@ CANONICAL = {
 # names its origin in `concept` as "derived:<a>-<b>".
 OTHER_REVENUE_CONCEPT = "derived:revenue-sales_revenue"
 DERIVED = frozenset({"other_revenue"})
+# The concrete fields each derived field is computed from.
+DERIVED_FROM = {"other_revenue": ("revenue", "sales_revenue")}
 
 
 def concepts_for(field):
@@ -158,6 +160,21 @@ def concepts_for(field):
     unknown field -- a typo is a bug, not an empty result. A derived field has no
     concept list and raises too (it is not in ``CANONICAL``)."""
     return CANONICAL[field]
+
+
+def all_fields():
+    """Every standard field a reader can ask for: the concrete ones in
+    ``CANONICAL`` order, then the derived ones. Readers that list fields must
+    use this, not ``CANONICAL`` alone, or derived fields silently never show."""
+    return (*CANONICAL, *sorted(DERIVED))
+
+
+def input_concepts(field):
+    """The set of concepts ``resolve(facts, field)`` reads -- a derived field's
+    is the union of its inputs'. Raises ``KeyError`` for an unknown field."""
+    if field in DERIVED:
+        return {c for f in DERIVED_FROM[field] for c in CANONICAL[f]}
+    return set(CANONICAL[field])
 
 
 def resolve(facts, field):
