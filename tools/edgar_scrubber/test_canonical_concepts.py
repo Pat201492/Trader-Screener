@@ -355,3 +355,18 @@ if __name__ == "__main__":
             fn()
             print(f"  [ok] {name}")
     print("\ncanonical_concepts gate: PASS")
+
+
+def test_all_fields_and_input_concepts_cover_derived():
+    # Readers list fields with all_fields(); CANONICAL alone hid other_revenue
+    # from /standardized and /compare on live data.
+    fields = cc.all_fields()
+    assert set(cc.CANONICAL) <= set(fields) and "other_revenue" in fields
+    assert fields[: len(cc.CANONICAL)] == tuple(cc.CANONICAL)
+    assert cc.input_concepts("other_revenue") == set(cc.CANONICAL["revenue"]) | set(cc.CANONICAL["sales_revenue"])
+    assert cc.input_concepts("revenue") == set(cc.CANONICAL["revenue"])
+    try:
+        cc.input_concepts("nope")
+        raise AssertionError("unknown field must raise KeyError")
+    except KeyError:
+        pass

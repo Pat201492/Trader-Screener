@@ -1666,6 +1666,51 @@ _nm_httpd.shutdown()
 _cs_httpd.shutdown()
 
 # --------------------------------------------------------------------------- #
+section("derived fields reach /standardized and /compare (#260 follow-up)")
+# --------------------------------------------------------------------------- #
+# #260 keeps `other_revenue` out of CANONICAL (frames cannot fetch a computed
+# value), and both endpoints iterated CANONICAL alone -- so on live Walmart data
+# the derived $6.447B never appeared. Seed a Walmart-shaped filer and ask.
+_dv_home = Path(tempfile.mkdtemp(prefix="derived-gate-"))
+_dv_prev = os.environ.get("EDGAR_SCRUBBER_HOME")
+os.environ["EDGAR_SCRUBBER_HOME"] = str(_dv_home)
+server._FILER_NAMES.clear()
+_dv_store = _FactsStore(path=str(_dv_home / "store" / "facts.sqlite"))
+try:
+    _dv_store.put_facts([
+        _FactRecord(cik="104169", concept=c, unit="USD", period_start="2024-02-01",
+                    period_end="2025-01-31", fiscal_year=2025, fiscal_period="FY",
+                    form="10-K", accession="0000104169-25-000021", value=v,
+                    source="xbrl", filed="2025-03-14")
+        for c, v in (("us-gaap:Revenues", 680_985_000_000),
+                     ("us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+                      674_538_000_000))])
+    _dv_store.put_filers({"104169": "Walmart-shaped Co"})
+finally:
+    _dv_store.close()
+try:
+    _dv = server.store_standardized(cik="104169")
+    _dv_rows = {r["field"]: r for r in _dv["rows"]}
+    check("/standardized returns the derived other_revenue row",
+          "other_revenue" in _dv_rows)
+    check("...valued total minus sales, 6447000000",
+          (_dv_rows.get("other_revenue") or {}).get("values", {}).get("2025-01-31")
+          == 6_447_000_000)
+    check("...beside total revenue and sales revenue",
+          _dv_rows["revenue"]["values"]["2025-01-31"] == 680_985_000_000
+          and _dv_rows["sales_revenue"]["values"]["2025-01-31"] == 674_538_000_000)
+    _dvc = server.store_compare(field="other_revenue", fy="2024")
+    check("/compare accepts a derived field and ranks it",
+          [(r["name"], r["value"]) for r in _dvc["rows"]]
+          == [("Walmart-shaped Co", 6_447_000_000)])
+finally:
+    if _dv_prev is None:
+        os.environ.pop("EDGAR_SCRUBBER_HOME", None)
+    else:
+        os.environ["EDGAR_SCRUBBER_HOME"] = _dv_prev
+    server._FILER_NAMES.clear()
+
+# --------------------------------------------------------------------------- #
 if failures:
     print(f"\n{len(failures)} FAILURE(S):")
     for f in failures:

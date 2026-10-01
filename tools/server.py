@@ -2799,7 +2799,7 @@ def store_standardized(cik=None, period="annual", as_of=None):
             return arcs_by_accession[accession]
 
         rows, periods = [], set()
-        for field in cc.CANONICAL:
+        for field in cc.all_fields():
             entries = [e for e in cc.resolve(facts, field) if in_window(e)]
             if not entries:
                 continue
@@ -2862,9 +2862,9 @@ def store_compare(field=None, period_end=None, tickers=None, as_of=None, fy=None
     from facts_store import FactsStore
     import canonical_concepts as cc
 
-    if not field or field not in cc.CANONICAL:
+    if not field or field not in cc.all_fields():
         raise ValueError(
-            f"unknown field {field!r}; known: {', '.join(sorted(cc.CANONICAL))}")
+            f"unknown field {field!r}; known: {', '.join(sorted(cc.all_fields()))}")
     has_fy = fy not in (None, "")
     has_pe = period_end not in (None, "")
     if has_fy == has_pe:
@@ -2901,7 +2901,7 @@ def store_compare(field=None, period_end=None, tickers=None, as_of=None, fy=None
     store = FactsStore(path=str(p), readonly=True)
     try:
         from edgar_client import cik_bare
-        concepts = set(cc.CANONICAL[field])
+        concepts = cc.input_concepts(field)
         ciks = [str(c) for c in scope] if scope is not None else _facts_ciks(store)
 
         rows, excluded = [], 0
