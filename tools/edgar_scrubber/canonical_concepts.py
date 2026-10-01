@@ -19,22 +19,29 @@ general concept), the concept earliest in the list wins -- exactly the rule
 UNION keyed by period, so a period reported only under a later-listed concept is
 still kept.
 
-`revenue` is not spelled out here: it is imported from `revenue_series.REVENUE_TAGS`
-so the two lists cannot drift (there is one definition of "what counts as
-revenue", and it lives with the revenue series that measured it).
+Revenue is split into two levels on purpose (issue #260). A filer that reports
+both net sales and a wider total -- Walmart FY2025 tags `Revenues` 680.985B
+(net sales 674.538B + 6.447B membership and other income) -- used to collapse to
+one `revenue` value, whichever concept came first. Now:
+
+  * `revenue` means TOTAL revenue: `Revenues` first, then the ASC-606 sales
+    concepts. It is its own tuple here, no longer imported from
+    `revenue_series.REVENUE_TAGS` (that series measures a single revenue line and
+    its priority is era-partition, not total-vs-sales; the two definitions are
+    allowed to differ now, so neither is imported into the other).
+  * `sales_revenue` means the net-sales line only (the ASC-606 concepts and
+    pre-606 `SalesRevenueNet`), WITHOUT the general `Revenues` total.
+  * `other_revenue` is DERIVED: `revenue - sales_revenue` for each period where
+    both resolve from DIFFERENT concepts (see `DERIVED` / `resolve`).
 
 `resolve(facts, field)` takes the fact dicts `FactsStore.facts_for(cik)` returns
 and gives one entry per period for `field`. Supersession (a period restated
 under a later accession) is already collapsed by the store, so resolution here
-only settles the cross-concept collision.
+only settles the cross-concept collision. A derived field is computed from the
+concrete fields it is built on, not read from any concept.
 
 stdlib only. Run the self-check:  python tools/edgar_scrubber/canonical_concepts.py
 """
-
-try:  # package import (from .canonical_concepts import ...)
-    from .revenue_series import REVENUE_TAGS
-except ImportError:  # flat import (import canonical_concepts)
-    from revenue_series import REVENUE_TAGS
 
 _TAXONOMY = "us-gaap"
 
@@ -51,11 +58,24 @@ def _q(tag):
 # the standard us-gaap concepts are listed; a filer using none of them resolves
 # to an empty series, not an error.
 #
-# `revenue` is built from `revenue_series.REVENUE_TAGS` by import so the revenue
-# vocabulary has a single definition; the other 16 fields are enumerated here.
+# The two sales concepts (ASC 606) and the pre-606 net-sales concept, shared by
+# `revenue` (as its tail, behind the general `Revenues` total) and by
+# `sales_revenue` (the whole of it). Most specific / most recent first.
+_SALES_CONCEPTS = (
+    _q("RevenueFromContractWithCustomerExcludingAssessedTax"),
+    _q("RevenueFromContractWithCustomerIncludingAssessedTax"),
+    _q("SalesRevenueNet"),
+)
+
 CANONICAL = {
     # Income statement.
-    "revenue": tuple(_q(t) for t in REVENUE_TAGS),
+    # TOTAL revenue: the general `Revenues` total wins over any sales line, so a
+    # filer tagging both (Walmart: Revenues 680.985B and RFCC 674.538B) resolves
+    # `revenue` to the total. A filer with no `Revenues` tag falls through to the
+    # sales concepts, so `revenue` is still populated.
+    "revenue": (_q("Revenues"),) + _SALES_CONCEPTS,
+    # NET SALES only -- the sales concepts, without the `Revenues` total.
+    "sales_revenue": _SALES_CONCEPTS,
     "cost_of_revenue": (
         _q("CostOfGoodsAndServicesSold"),
         _q("CostOfRevenue"),
@@ -123,9 +143,20 @@ CANONICAL = {
 }
 
 
+# ── Derived fields ────────────────────────────────────────────────────────────
+#
+# A derived field is COMPUTED from concrete fields, not tagged by any filer, so
+# it has no entry in `CANONICAL` and no concept to fetch from `companyconcept` or
+# frames. `resolve` computes it; `frames_ingest` refuses it. Each derived entry
+# names its origin in `concept` as "derived:<a>-<b>".
+OTHER_REVENUE_CONCEPT = "derived:revenue-sales_revenue"
+DERIVED = frozenset({"other_revenue"})
+
+
 def concepts_for(field):
     """The ordered concept list for a standard field. Raises ``KeyError`` for an
-    unknown field -- a typo is a bug, not an empty result."""
+    unknown field -- a typo is a bug, not an empty result. A derived field has no
+    concept list and raises too (it is not in ``CANONICAL``)."""
     return CANONICAL[field]
 
 
@@ -142,8 +173,13 @@ def resolve(facts, field):
     (the era-boundary collision), and ``concept`` names which one supplied the
     value. Entries are sorted by ``period_end`` then ``period_start``.
 
+    A DERIVED field (``field in DERIVED``) is computed from the concrete fields
+    it is built on, not read from any concept.
+
     Raises ``KeyError`` for an unknown ``field``. A known field the filer never
     tags returns an empty list, not an error."""
+    if field in DERIVED:
+        return _resolve_derived(facts, field)
     concepts = CANONICAL[field]  # KeyError on an unknown field, by design.
     priority = {concept: i for i, concept in enumerate(concepts)}
 
@@ -169,6 +205,51 @@ def resolve(facts, field):
         for f in by_period.values()
     ]
     # Sort with a sentinel for instant facts (period_start is None).
+    entries.sort(key=lambda e: (e["period_end"], e["period_start"] or ""))
+    return entries
+
+
+def _resolve_derived(facts, field):
+    """Compute a derived field from its concrete inputs. Only ``other_revenue``
+    exists today: ``revenue - sales_revenue`` per period."""
+    if field == "other_revenue":
+        return _resolve_other_revenue(facts)
+    raise KeyError(field)  # named in DERIVED but not implemented -- a bug.
+
+
+def _resolve_other_revenue(facts):
+    """``revenue - sales_revenue`` for each period where BOTH resolve and they
+    resolve from DIFFERENT concepts. The difference is the revenue a filer
+    reports in its total (`Revenues`) beyond its net-sales line -- Walmart's
+    membership and other income. Not emitted when either side is missing, when
+    both resolve from the SAME concept (a filer with no separate total -- the
+    difference is a meaningless zero), or when the difference is negative.
+
+    `concept` is ``derived:revenue-sales_revenue``; `accession` carries the
+    revenue fact's accession, the authoritative total the difference is read
+    against. Entries are sorted like `resolve`'s."""
+    sales = {(e["period_start"], e["period_end"]): e
+             for e in resolve(facts, "sales_revenue")}
+
+    entries = []
+    for r in resolve(facts, "revenue"):
+        key = (r["period_start"], r["period_end"])
+        s = sales.get(key)
+        if s is None:
+            continue  # sales_revenue missing for this period
+        if r["concept"] == s["concept"]:
+            continue  # same concept -> no separate total, difference is 0
+        diff = r["value"] - s["value"]
+        if diff < 0:
+            continue  # a negative "other" is not a real residual; drop it
+        entries.append({
+            "period_start": r["period_start"],
+            "period_end": r["period_end"],
+            "value": diff,
+            "concept": OTHER_REVENUE_CONCEPT,
+            "accession": r["accession"],
+        })
+
     entries.sort(key=lambda e: (e["period_end"], e["period_start"] or ""))
     return entries
 
@@ -206,10 +287,39 @@ if __name__ == "__main__":
     else:
         raise AssertionError("unknown field must raise KeyError")
 
-    # revenue must be REVENUE_TAGS, qualified, in order.
-    assert CANONICAL["revenue"] == tuple(f"us-gaap:{t}" for t in REVENUE_TAGS)
-    assert len(CANONICAL) == 17
+    # revenue = total (Revenues first, then the sales concepts); sales_revenue =
+    # the sales concepts only, so revenue is sales_revenue behind the total.
+    assert CANONICAL["revenue"][0] == "us-gaap:Revenues"
+    assert CANONICAL["revenue"][1:] == CANONICAL["sales_revenue"]
+    assert CANONICAL["sales_revenue"] == (
+        "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+        "us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax",
+        "us-gaap:SalesRevenueNet",
+    )
+    assert len(CANONICAL) == 18
     assert all(CANONICAL[f] for f in CANONICAL)
     assert all(c.startswith("us-gaap:") for cs in CANONICAL.values() for c in cs)
+    assert "other_revenue" in DERIVED and "other_revenue" not in CANONICAL
+
+    # other_revenue: Revenues total over a sales line -> the difference, from
+    # different concepts. Same concept, missing side, negative -> not emitted.
+    rev_facts = [
+        {"concept": "us-gaap:Revenues", "period_start": "2024-02-01",
+         "period_end": "2025-01-31", "value": 680985, "accession": "w1"},
+        {"concept": "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+         "period_start": "2024-02-01", "period_end": "2025-01-31",
+         "value": 674538, "accession": "w2"},
+    ]
+    other = resolve(rev_facts, "other_revenue")
+    assert len(other) == 1
+    assert other[0]["value"] == 680985 - 674538
+    assert other[0]["concept"] == "derived:revenue-sales_revenue"
+
+    # One concept only -> revenue and sales_revenue share it, no other_revenue.
+    one = [{"concept": "us-gaap:SalesRevenueNet", "period_start": "2016-01-01",
+            "period_end": "2016-12-31", "value": 500, "accession": "o1"}]
+    assert resolve(one, "revenue")[0]["value"] == 500
+    assert resolve(one, "sales_revenue")[0]["value"] == 500
+    assert resolve(one, "other_revenue") == []
 
     print("canonical_concepts self-check: PASS")
