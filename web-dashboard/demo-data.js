@@ -107,6 +107,28 @@
       insider_sells_90d: hasInsider ? iBetween(R, 0, 6) : null,
       news_sentiment_30d: hasNews ? between(R, -0.8, 0.85, 2) : null,
       committee_conflict: hasCongress && chance(R, 0.25),
+      // Magic Formula input provenance (issue #270). Appended last so the draws
+      // above (and the stable per-ticker look) are unchanged. ETFs carry none.
+      ...(isEtf ? { magic_source: null, magic_period_end: null, magic_derived: '', roc_nwc_floored: false }
+                : magicProvenance(R)),
+    };
+  }
+
+  // Where this row's Magic Formula inputs came from — filing (xbrl), yfinance
+  // fallback, or mixed — plus any derived-rule list and the NWC-floored flag.
+  function magicProvenance(R) {
+    const roll = R();
+    const source = roll < 0.55 ? 'xbrl' : roll < 0.78 ? 'yfinance' : roll < 0.9 ? 'mixed' : null;
+    const rules = [];
+    if (source === 'xbrl' || source === 'mixed') {
+      if (chance(R, 0.4)) rules.push('ebit=pretax+interest');
+      if (chance(R, 0.3)) rules.push('short_term_debt=0');
+    }
+    return {
+      magic_source: source,
+      magic_period_end: (source === 'xbrl' || source === 'mixed') ? '2025-06-28' : null,
+      magic_derived: rules.join(','),
+      roc_nwc_floored: source != null && chance(R, 0.25),
     };
   }
 

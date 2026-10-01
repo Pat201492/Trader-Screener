@@ -197,6 +197,31 @@ function computeMagicRanks(rows){
   const yieldRank=new Map([...elig].sort((a,b)=>b.ebit_ev_yield-a.ebit_ev_yield).map((r,i)=>[r,i+1]));
   rows.forEach(r=>{ r.magic_rank=eligSet.has(r)?rocRank.get(r)+yieldRank.get(r):null; });
 }
+// ROC (G) cell — the `roc_greenblatt` Magic Rank actually ranks on (not `roic`, the
+// NOPAT-based figure). A ⌊ marker flags rows whose working capital was floored at 0
+// (pipeline #28, `roc_nwc_floored`), with a tooltip saying so.
+function rocGreenblattCell(r){
+  if(isETF(r)||r.roc_greenblatt==null) return '<span class="muted">–</span>';
+  const cell=pct(r.roc_greenblatt);
+  if(!r.roc_nwc_floored) return cell;
+  return `${cell} <span class="muted" title="${esc('Working capital floored at 0 (pipeline #28): negative net working capital was clamped to 0 before ROC was computed.')}">⌊</span>`;
+}
+// Inputs badge — where each Magic Formula input came from: the filing (xbrl), yfinance,
+// or a mix. Tooltip names the period end and every rule that changed a value
+// (`magic_derived`, e.g. ebit=pretax+interest). No source -> "–".
+const MAGIC_SOURCE_LABELS={xbrl:'filed', yfinance:'yfinance', mixed:'mixed'};
+function magicSourceCell(r){
+  const src=r.magic_source;
+  if(!src) return '<span class="muted">–</span>';
+  const label=MAGIC_SOURCE_LABELS[src]||src;
+  const cls=src==='xbrl'?'pos':src==='mixed'?'':'muted';
+  const tipParts=[];
+  if(r.magic_period_end) tipParts.push(`Period end: ${r.magic_period_end}`);
+  const derived=(r.magic_derived||'').split(',').map(s=>s.trim()).filter(Boolean);
+  if(derived.length) tipParts.push('Derived: '+derived.join(', '));
+  const tip=tipParts.length?tipParts.join('\n'):`Magic Formula inputs sourced from ${label}.`;
+  return `<span class="${cls}" title="${esc(tip)}">${esc(label)}</span>`;
+}
 // ── Smart-money moat (issue #41) — the differentiator ─────
 // Harris: congress trades, insider (EDGAR), committee-conflict, and news sentiment are the
 // adverse-selection component of the spread MADE OBSERVABLE — informed order flow. Fold them
@@ -840,7 +865,15 @@ const SCREENER_COLS=[
   {key:'score',  label:'Score',    num:true,               tier:'collected', fmt:r=>fmt(r.score,0)},
   {key:'pe',     label:'P/E',      num:true,               tier:'collected', fmt:r=>isETF(r)?'–':fmt(r.pe,1)},
   {key:'ebit_ev_yield', label:'EBIT/EV', num:true,         tier:'collected', fmt:r=>(isETF(r)||r.ebit_ev_yield==null)?'–':pct(r.ebit_ev_yield)},
-  {key:'roic',   label:'ROIC',     num:true,               tier:'collected', fmt:r=>(isETF(r)||r.roic==null)?'–':pct(r.roic)},
+  {key:'roc_greenblatt', label:'ROC (G)', num:true,        tier:'collected',
+    tip:'Greenblatt ROC = EBIT / (net working capital + net PP&E) — the quality leg Magic Rank actually ranks on (not ROIC, which is NOPAT-based). ⌊ marks rows whose working capital was floored at 0 (pipeline #28).',
+    fmt:r=>rocGreenblattCell(r)},
+  {key:'magic_source', label:'Inputs', cls:'muted',        tier:'collected',
+    tip:'Where the Magic Formula inputs came from: filed (as-filed XBRL), yfinance (fallback), or mixed. Hover a cell for the period end and any rule that derived a value.',
+    fmt:r=>magicSourceCell(r)},
+  {key:'roic',   label:'ROIC',     num:true,               tier:'collected',
+    tip:'NOPAT-based return on invested capital — a pipeline quality figure, NOT the ROC Magic Rank uses. Magic Rank ranks on ROC (G) (Greenblatt EBIT / tangible capital).',
+    fmt:r=>(isETF(r)||r.roic==null)?'–':pct(r.roic)},
   {key:'magic_rank', label:'Magic Rank', num:true,          tier:'collected', fmt:r=>r.magic_rank??'–'},
   {key:'upside', label:'Upside %', num:true,               tier:'collected', fmt:r=>(isETF(r)||r.upside==null)?'–':pct(r.upside)},
   {key:'expense_ratio', label:'Expense', num:true,         tier:'collected', fmt:r=>(isETF(r)&&r.expense_ratio!=null)?pct(r.expense_ratio):'–'},

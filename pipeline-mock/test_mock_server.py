@@ -81,6 +81,19 @@ def run_checks():
         present = any(r.get(field) is not None for r in rows if not r.get("is_etf") or field in ("mkt_cap",))
         check(f"/api/stocks rows carry non-null `{field}` for at least one row", present)
 
+    print("\nMagic Formula input provenance (issue #270): magic_source / magic_period_end"
+          " / magic_derived / roc_nwc_floored on /api/stocks rows")
+    check("some row has magic_source == 'xbrl'", any(r.get("magic_source") == "xbrl" for r in rows))
+    check("some row has magic_source == 'yfinance'", any(r.get("magic_source") == "yfinance" for r in rows))
+    check("some row has magic_source == 'mixed'", any(r.get("magic_source") == "mixed" for r in rows))
+    check("some row has no magic_source (shows '–')", any(r.get("magic_source") is None for r in rows))
+    check("some row carries a magic_period_end",
+          any(r.get("magic_period_end") for r in rows))
+    check("some row carries a non-empty magic_derived rule list",
+          any((r.get("magic_derived") or "").strip() for r in rows))
+    check("some row has roc_nwc_floored True (working capital floored at 0, #28)",
+          any(r.get("roc_nwc_floored") is True for r in rows))
+
     check("ETF `holdings` present (basket-liquidity fallback path, QQQ)",
           isinstance(by_ticker.get("QQQ", {}).get("holdings"), list) and len(by_ticker["QQQ"]["holdings"]) > 0)
     check("ETF `basket_dollar_volume` present (precomputed upstream path, SPY)",

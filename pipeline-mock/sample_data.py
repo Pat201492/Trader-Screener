@@ -99,6 +99,29 @@ _SMART_MONEY = {
 }
 
 
+# ── Magic Formula input provenance (issue #270) ──────────────────────────
+# Where each non-ETF row's roc_greenblatt / ebit_ev_yield inputs came from, as
+# the real pipeline now reports on /api/stocks: the as-filed XBRL ("xbrl"), the
+# yfinance fallback ("yfinance"), or a mix ("mixed"). magic_derived is a comma
+# list of the rules that changed a value (e.g. ebit=pretax+interest), and
+# roc_nwc_floored flags rows whose working capital was floored at 0 (pipeline
+# #28). Deliberately varied so every badge/marker has at least one row.
+_MAGIC_SOURCE = {
+    "AAPL": "xbrl", "MSFT": "xbrl", "NVDA": "xbrl", "JPM": "xbrl",
+    "KO": "xbrl", "DUK": "xbrl", "TSM": "xbrl",
+    "PFE": "yfinance", "MICRO": "yfinance",
+    "XOM": "mixed",
+    # TSLA, NEWCO, RAMPUP left absent -> no provenance ("–" in the screener)
+}
+_MAGIC_DERIVED = {
+    "XOM": "ebit=pretax+interest,short_term_debt=0",
+    "KO": "ebit=pretax+interest",
+    "NVDA": "short_term_debt=0",
+}
+_MAGIC_NWC_FLOORED = {"KO", "DUK"}
+_MAGIC_PERIOD_END = "2025-06-28"  # one as-filed fiscal-year end for the fixture
+
+
 def build_universe():
     rnd = random.Random(SEED)
     stocks = []
@@ -143,6 +166,12 @@ def build_universe():
             "price": price, "mkt_cap": round(rnd.uniform(0.3, 3200), 1),
             "pe": None if is_etf else round(rnd.uniform(9, 45), 1),
             "roic": roic, "roc_greenblatt": roc_greenblatt, "ebit_ev_yield": ebit_ev_yield,
+            # ── Magic Formula input provenance (issue #270) ──
+            "magic_source": None if is_etf else _MAGIC_SOURCE.get(ticker),
+            "magic_period_end": (None if is_etf or _MAGIC_SOURCE.get(ticker) in (None, "yfinance")
+                                 else _MAGIC_PERIOD_END),
+            "magic_derived": "" if is_etf else _MAGIC_DERIVED.get(ticker, ""),
+            "roc_nwc_floored": False if is_etf else (ticker in _MAGIC_NWC_FLOORED),
             "score": score, "score_composite": score,
             "score_label": "Attractive" if score >= 70 else ("Fair" if score >= 45 else "Unattractive"),
             "score_stars": round(score / 20, 1),
