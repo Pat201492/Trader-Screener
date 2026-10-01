@@ -47,11 +47,12 @@
     "name": "Magic Formula Rank",
     "purpose": "Greenblatt composite: rank(ROIC) + rank(EBIT/EV) among screener-eligible names → a single quality-value rank.",
     "status": "working",
-    "inputs": ["fundamentals.roic", "fundamentals.ebit_ev_yield"],
+    "inputs": ["fundamentals.roc_greenblatt", "fundamentals.ebit_ev_yield"],
     "output_field": "magic_rank",
     "last_run": "2026-08-04T09:30:00Z",
     "doc_link": "https://github.com/Pat201492/Trader-Screener/blob/master/Education/summaries/greenblatt-magic-formula.md",
-    "local_doc": "Education/summaries/greenblatt-magic-formula.md"
+    "local_doc": "Education/summaries/greenblatt-magic-formula.md",
+    "graduatedTo": "Stock-Data-Pipeline: fundamentals.py + xbrl_fundamentals.py (roc_greenblatt, ebit_ev_yield from as-filed XBRL, yfinance fallback; magic_source on /api/stocks) - #241"
   },
   {
     "id": "smart-money-score",

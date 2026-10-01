@@ -162,7 +162,7 @@ After reading + marking above, distill to this. *This* is what gets built.
 9. Size (`suggested_shares`, ATR-based position size, issue #44) — deterministic formula, not fitted, nothing to deflate
 10. Max DD (`max_drawdown`, issue #44) — observed historical statistic, not fitted, nothing to deflate
 
-**ROC definition (decided 2026-09-30, #248):** the Magic Formula quality leg is Greenblatt ROC, served as its own field `roc_greenblatt` = EBIT / ((current assets − current liabilities) + net PP&E), in percent. The pipeline's existing `roic` (NOPAT / invested capital) is kept unchanged for its other consumers (Stock-App, sheets) and is not what the Score ranks on. The XBRL-vs-pipeline compare (`tools/edgar_scrubber/magic_inputs.py`, #241) measures `roc_greenblatt` against `roc_greenblatt`.
+**ROC definition (decided 2026-09-30, #248):** the Magic Formula quality leg is Greenblatt ROC, served as its own field `roc_greenblatt` = EBIT / ((current assets − current liabilities) + net PP&E), in percent. The pipeline's existing `roic` (NOPAT / invested capital) is kept unchanged for its other consumers (Stock-App, sheets) and is not what the Score ranks on. The XBRL-vs-pipeline compare (#241) measured `roc_greenblatt` against `roc_greenblatt` and was accepted on 2026-09-30; the as-filed XBRL computation now lives in Stock-Data-Pipeline (`xbrl_fundamentals.py`, served with `magic_source` on `/api/stocks`), and the local `magic_inputs.py` was retired.
 
 **Excluded from default (fails the gate):** Smart $ (`smart_money_score`, issue #41) — `oosPending`, 37 weight/threshold combinations tried, none walk-forward/CSCV validated yet. Opt-in only via **Columns ▾**, same as every other non-default column (nothing is deleted).
 
