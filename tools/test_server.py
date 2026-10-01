@@ -1183,6 +1183,169 @@ finally:
         os.environ["EDGAR_USER_AGENT"] = _prev_ua
 
 # --------------------------------------------------------------------------- #
+section("calculation linkbase: store roll-ups on ingest, flag non-adding values (#262)")
+# --------------------------------------------------------------------------- #
+# Drive the whole wiring offline against the #261 fixtures: a fake client that
+# serves the Apple companyfacts (so facts are written) plus the hand-written
+# Walmart-shaped cal fixtures (index.json + *_cal.xml).
+from calc_linkbase import parse_cal as _parse_cal
+from facts_store import FactRecord as _FactRecord
+
+_CAL_FIX = (server.REPO_ROOT / "tools" / "edgar_scrubber" / "fixtures" / "cal")
+_cal_index = json.loads((_CAL_FIX / "index.json").read_text(encoding="utf-8"))
+_cal_xml = (_CAL_FIX / "wmt-20250131_cal.xml").read_text(encoding="utf-8")
+_cal_arcs = _parse_cal(_cal_xml)
+
+
+class _FakeCalClient(_FakeFactsClient):
+    """Adds the two methods find_cal_url / the ingest path need on top of the
+    companyfacts fake: a filing index and the cal XML text, no network."""
+
+    def __init__(self, payload, index, cal_xml):
+        super().__init__(payload)
+        self._index, self._cal_xml = index, cal_xml
+
+    def filing_index(self, cik, accession):
+        return self._index
+
+    def get_text(self, url):
+        return self._cal_xml
+
+
+# -- AC1: a run over a filing whose index lists a _cal.xml stores its arcs --
+_calc_home = Path(tempfile.mkdtemp(prefix="calc-wire-"))
+_cp_home = os.environ.get("EDGAR_SCRUBBER_HOME")
+_cp_ua = os.environ.get("EDGAR_USER_AGENT")
+os.environ["EDGAR_SCRUBBER_HOME"] = str(_calc_home)
+os.environ["EDGAR_USER_AGENT"] = "Test Tester test@example.com"
+import edgar_client as _ec3
+_real_client3 = _ec3.EdgarClient
+_ec3.EdgarClient = lambda **kw: _FakeCalClient(_facts, _cal_index, _cal_xml)
+try:
+    _wrid = server.RUNS.create("edgar-scrubber", {"limit": 1, "fields": []})
+    server.taxonomy_run(_wrid, [{"cik": "320193", "accession": _ACCN,
+                                 "form": _FORM}], _calc_home)
+finally:
+    _ec3.EdgarClient = _real_client3
+
+_wrun = server.RUNS.get(_wrid)
+check("a taxonomy run over a filing with a _cal.xml completes",
+      _wrun["status"] == "done" and (_wrun.get("facts_written") or 0) > 0)
+_wstore = _FactsStore(path=str(_calc_home / "store" / "facts.sqlite"))
+try:
+    _stored_arcs = _wstore.arcs_for("320193", _ACCN)
+    check("the run stored the filing's calculation arcs",
+          len(_stored_arcs) == len(_cal_arcs) and len(_stored_arcs) > 0)
+    check("a stored arc carries parent/child/weight from the linkbase",
+          any(a["parent"] == "us-gaap:Revenues"
+              and a["child"] == "us-gaap:OtherIncome" and a["weight"] == 1.0
+              for a in _stored_arcs))
+    check("the negative-weight arc round-trips through the store",
+          any(a["weight"] == -1.0 for a in _stored_arcs))
+    check("a log line records the arcs stored",
+          any("calculation arc" in l["message"] and _ACCN in l["message"]
+              for l in _wrun["log"]))
+finally:
+    _wstore.close()
+
+# -- AC2: a filing with no _cal.xml completes with facts written + one log line --
+_nocal_home = Path(tempfile.mkdtemp(prefix="calc-nocal-"))
+os.environ["EDGAR_SCRUBBER_HOME"] = str(_nocal_home)
+_nocal_index = {"directory": {"name": "x", "item": [
+    {"name": "aapl.htm", "type": "10-K", "size": "1"},
+    {"name": "aapl_lab.xml", "type": "EX-101.LAB", "size": "1"},
+]}}
+_ec3.EdgarClient = lambda **kw: _FakeCalClient(_facts, _nocal_index, _cal_xml)
+try:
+    _nrid = server.RUNS.create("edgar-scrubber", {"limit": 1, "fields": []})
+    server.taxonomy_run(_nrid, [{"cik": "320193", "accession": _ACCN,
+                                 "form": _FORM}], _nocal_home)
+finally:
+    _ec3.EdgarClient = _real_client3
+
+_nrun = server.RUNS.get(_nrid)
+check("a filing with no _cal.xml still completes with facts written",
+      _nrun["status"] == "done" and (_nrun.get("facts_written") or 0) > 0)
+check("a filing with no _cal.xml logs one line naming the accession",
+      any("no calculation linkbase" in l["message"] and _ACCN in l["message"]
+          for l in _nrun["log"]))
+_nstore = _FactsStore(path=str(_nocal_home / "store" / "facts.sqlite"))
+try:
+    check("no arcs are stored for a filing with no _cal.xml",
+          _nstore.arcs_for("320193", _ACCN) == [])
+finally:
+    _nstore.close()
+
+# -- AC3/AC4: /standardized checks on a seeded Walmart-shaped filer --
+_WMT_ACCN = "0000104169-25-000012"
+_WMT_PS, _WMT_PE = "2024-02-01", "2025-01-31"
+
+
+def _seed_walmart(home, total):
+    """A store under `home` holding one Walmart-shaped annual period plus its
+    calculation arcs, with `total` as the reported Revenues value."""
+    s = _FactsStore(path=str(home / "store" / "facts.sqlite"))
+    try:
+        s.put_facts([_FactRecord(
+            cik="104169", concept=c, unit="USD", period_start=_WMT_PS,
+            period_end=_WMT_PE, fiscal_year=2024, fiscal_period="FY",
+            form="10-K", accession=_WMT_ACCN, value=v, source="xbrl",
+            filed="2025-03-20") for c, v in (
+                ("us-gaap:Revenues", total),
+                ("us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+                 674538000000),
+                ("us-gaap:OtherIncome", 6447000000),
+                ("us-gaap:CostOfGoodsAndServicesSold", 523002000000),
+            )])
+        s.put_arcs("104169", _WMT_ACCN, _cal_arcs)
+        s.put_filers({"104169": "Walmart Inc."})
+    finally:
+        s.close()
+
+
+_wmt_ok_home = Path(tempfile.mkdtemp(prefix="calc-wmt-ok-"))
+_seed_walmart(_wmt_ok_home, 680985000000)
+os.environ["EDGAR_SCRUBBER_HOME"] = str(_wmt_ok_home)
+server._FILER_NAMES.clear()
+_wstd = server.store_standardized(cik="104169", period="annual")
+_wrev = next((r for r in _wstd["rows"] if r["field"] == "revenue"), None)
+check("standardized has a revenue row for the Walmart-shaped filer",
+      _wrev is not None and _wrev["values"].get(_WMT_PE) == 680985000000)
+check("revenue carries a roll-up check that is ok when the total adds up",
+      _wrev is not None and _wrev.get("checks", {}).get(_WMT_PE, {}).get("ok")
+      is True)
+check("the check names expected and reported",
+      _wrev["checks"][_WMT_PE]["expected"] == 680985000000
+      and _wrev["checks"][_WMT_PE]["reported"] == 680985000000)
+# AC4: cost_of_revenue resolves to CostOfGoodsAndServicesSold, which is a CHILD
+# in the arcs, never a parent -- so its row carries no checks entry.
+_wcost = next((r for r in _wstd["rows"] if r["field"] == "cost_of_revenue"), None)
+check("a field whose concept is not a parent in the arcs has no checks key",
+      _wcost is not None and "checks" not in _wcost)
+
+_wmt_bad_home = Path(tempfile.mkdtemp(prefix="calc-wmt-bad-"))
+_seed_walmart(_wmt_bad_home, int(680985000000 * 1.01))  # total off by 1%
+os.environ["EDGAR_SCRUBBER_HOME"] = str(_wmt_bad_home)
+server._FILER_NAMES.clear()
+_wstd_bad = server.store_standardized(cik="104169", period="annual")
+_wrev_bad = next((r for r in _wstd_bad["rows"] if r["field"] == "revenue"), None)
+check("revenue's check is not ok when the reported total is changed by 1%",
+      _wrev_bad is not None
+      and _wrev_bad.get("checks", {}).get(_WMT_PE, {}).get("ok") is False)
+check("the failing check still reports the sum of children as expected",
+      _wrev_bad["checks"][_WMT_PE]["expected"] == 680985000000)
+
+server._FILER_NAMES.clear()
+if _cp_home is None:
+    os.environ.pop("EDGAR_SCRUBBER_HOME", None)
+else:
+    os.environ["EDGAR_SCRUBBER_HOME"] = _cp_home
+if _cp_ua is None:
+    os.environ.pop("EDGAR_USER_AGENT", None)
+else:
+    os.environ["EDGAR_USER_AGENT"] = _cp_ua
+
+# --------------------------------------------------------------------------- #
 section("canonical layer: /standardized (one filer) and /compare (cross-filer)")
 # --------------------------------------------------------------------------- #
 # One temp store seeded two ways: the Apple companyfacts fixture through
