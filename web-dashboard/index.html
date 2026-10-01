@@ -4154,14 +4154,23 @@ function fmtFact(v,unit){
   if(unit==='shares'&&Math.abs(v)>=1e6) return (v/1e6).toLocaleString(undefined,{maximumFractionDigits:1})+'M';
   return v.toLocaleString(undefined,{maximumFractionDigits:4});
 }
+// One request counter for the whole facts panel (reported, standardized and
+// compare all render into it). Each load takes a ticket; a response whose
+// ticket is no longer the newest is dropped. Without this, two quick dropdown
+// changes raced and the SLOWER (older) answer rendered last: the selects read
+// FY2024 while the table showed FY2025.
+let FACTS_REQ=0;
+const factsTicket=()=>++FACTS_REQ;
+const factsStale=t=>t!==FACTS_REQ;
 async function loadFacts(cik,period,form){
+  const t=factsTicket();
   const qs=new URLSearchParams();
   if(cik) qs.set('cik',cik);
   if(period) qs.set('period',period);
   form=form||(FACTS&&FACTS.form);
   if(form) qs.set('form',form);
-  try{ renderFacts(await (await fetch('/api/store/facts?'+qs)).json()); }
-  catch(e){ const b=document.getElementById('factsView'); if(b) b.innerHTML=`<div class="err">${esc(e.message)}</div>`; }
+  try{ const d=await (await fetch('/api/store/facts?'+qs)).json(); if(factsStale(t)) return; renderFacts(d); }
+  catch(e){ if(factsStale(t)) return; const b=document.getElementById('factsView'); if(b) b.innerHTML=`<div class="err">${esc(e.message)}</div>`; }
 }
 function filterFacts(q){ FACTS_Q=q; renderFacts(FACTS,true); }
 function toggleAllFacts(){ FACTS_ALL=!FACTS_ALL; renderFacts(FACTS); }
@@ -4268,11 +4277,12 @@ function factsFilerControls(cik,period){
     </select>`;
 }
 async function loadStandardized(cik,period){
+  const t=factsTicket();
   const qs=new URLSearchParams();
   if(cik) qs.set('cik',cik);
   if(period) qs.set('period',period);
-  try{ renderStandardized(await (await fetch('/api/store/standardized?'+qs)).json()); }
-  catch(e){ const b=document.getElementById('factsView'); if(b) b.innerHTML=factsModeToggle()+`<div class="err">${esc(e.message)}</div>`; }
+  try{ const d=await (await fetch('/api/store/standardized?'+qs)).json(); if(factsStale(t)) return; renderStandardized(d); }
+  catch(e){ if(factsStale(t)) return; const b=document.getElementById('factsView'); if(b) b.innerHTML=factsModeToggle()+`<div class="err">${esc(e.message)}</div>`; }
 }
 function renderStandardized(data){
   const box=document.getElementById('factsView');
@@ -4320,12 +4330,16 @@ function renderStandardized(data){
 // option lists come from the currently loaded standardized payload (STD); if none
 // is loaded yet, fetch it first so the selects have data.
 async function loadCompare(){
+  const t=factsTicket();
   const box=document.getElementById('factsView');
   if(box) box.innerHTML=factsModeToggle()+'<div class="loading">Reading the canonical layer…</div>';
   if(!STD||!(STD.rows||[]).length){
     const cik=(FACTS&&FACTS.cik)||null;
-    try{ STD=await (await fetch('/api/store/standardized?'+new URLSearchParams(cik?{cik}:{}))).json(); }
-    catch(e){ STD=null; }
+    let d=null;
+    try{ d=await (await fetch('/api/store/standardized?'+new URLSearchParams(cik?{cik}:{}))).json(); }
+    catch(e){ d=null; }
+    if(factsStale(t)) return;   // the reader switched views while this loaded
+    STD=d;
   }
   renderCompare();
   runCompare();
@@ -4372,11 +4386,15 @@ async function runCompare(){
   const out=document.getElementById('cmpResults');
   if(!out) return;
   if(!CMP_FIELD||!CMP_FY){ out.innerHTML='<div class="muted" style="font-size:12px">Pick a field and fiscal year.</div>'; return; }
+  const t=factsTicket();
   const qs=new URLSearchParams({field:CMP_FIELD,fy:CMP_FY});
   if(CMP_TICKERS.trim()) qs.set('tickers',CMP_TICKERS.trim());
   if(CMP_ASOF) qs.set('as_of',CMP_ASOF);
-  try{ CMP=await (await fetch('/api/store/compare?'+qs)).json(); }
-  catch(e){ out.innerHTML=`<div class="err">${esc(e.message)}</div>`; return; }
+  let d;
+  try{ d=await (await fetch('/api/store/compare?'+qs)).json(); }
+  catch(e){ if(!factsStale(t)) out.innerHTML=`<div class="err">${esc(e.message)}</div>`; return; }
+  if(factsStale(t)) return;
+  CMP=d;
   renderCompareResults();
 }
 function renderCompareResults(){
