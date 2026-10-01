@@ -96,6 +96,10 @@
   /* discipline / cool-down banner (issue #47) — Douglas usage layer, reuses the red risk-off accent */
   .cooldownnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--red);border-radius:6px;background:#f851490d;color:var(--muted);font-size:12px;line-height:1.55}
   .cooldownnote b{color:var(--txt)}
+  /* collapsed explainer panel (issue #269) — folds the seven screener notes so the table leads */
+  .screenernotes{margin:0 0 14px}
+  .screenernotes>summary{cursor:pointer;padding:9px 12px;border:1px solid var(--border);border-radius:6px;background:var(--panel);color:var(--muted);font-size:12px;font-weight:600;list-style-position:inside}
+  .screenernotes[open]>summary{margin-bottom:14px}
   /* tear-sheet coherence note (issue #48) — the per-instrument argument's read-order banner */
   .tearnote{margin:0 0 14px;padding:9px 12px;border:1px solid var(--border);border-left:3px solid #a371f7;border-radius:6px;background:#a371f70d;color:var(--muted);font-size:12px;line-height:1.55}
   .tearnote b{color:var(--txt)}
@@ -939,6 +943,13 @@ function isExcludedSector(r,flags){
 const v1Badge=c=>c.notInV1?'<span class="tier t-v1" title="not in v1 — needs a paid quote feed">v1✗</span>':'';
 const oosBadge=c=>c.oosPending?'<span class="tier t-oos" title="Not out-of-sample validated yet (walk-forward/CSCV pending) — opt-in, not a default column">OOS✗</span>':'';
 
+// Screener explainer panel (issue #269): seven notes fold into one collapsed
+// <details> so the table leads. Open/closed state is per-viewer; storage access
+// is always try/catch'd and defaults to collapsed when unavailable.
+const SCREENER_NOTES_KEY='screenerNotesOpen';
+function screenerNotesOpen(){ try{ return localStorage.getItem(SCREENER_NOTES_KEY)==='1'; }catch{ return false; } }
+function setScreenerNotesOpen(open){ try{ localStorage.setItem(SCREENER_NOTES_KEY, open?'1':'0'); }catch{} }
+
 async function renderScreener(){
   const v=document.getElementById('view');
   v.innerHTML='<div class="loading">Loading…</div>';
@@ -984,6 +995,8 @@ async function renderScreener(){
     ${cooldownActive()?`<div class="cooldownnote">
       <b>⚠ Discipline cool-down active</b> — ${currentLossStreak()} consecutive logged losses (≥${COOLDOWN_LOSS_STREAK}). Pre-commitment (Douglas): pause new size increases and don't widen a stop to "make it back" until the streak breaks. Reduce risk% above or sit out — see the <span style="cursor:pointer;color:var(--accent)" onclick="goTab('discipline')">Discipline</span> tab.
     </div>`:''}
+    <details class="screenernotes"${screenerNotesOpen()?' open':''} ontoggle="setScreenerNotesOpen(this.open)">
+    <summary>How to read this screener (7 notes)</summary>
     <div class="defaultviewnote">
       <b>Default view = a gated top 10, not "everything" (issue #47).</b> Bailey et al.: nothing here became a default column or default sort until it was <b>deflated for search effort and validated out-of-sample</b> — every default column's trial-count N (and deflated Sharpe, where a backtest applies) is logged in its header tooltip and in <b>Columns ▾</b> (green "N=…" badge). <b>Smart $</b> (issue #41) is deliberately excluded from the default view — 37 weight/threshold combinations tried, none cleared its own out-of-sample gate yet (red "gate✗" badge) — opt in via <b>Columns ▾</b> if you want it anyway. Nothing is deleted, only opt-in.
     </div>
@@ -1005,6 +1018,7 @@ async function renderScreener(){
     <div class="oflownote">
       <b>Options flow &amp; structure (paid feed, issue #46).</b> Skew (25Δ put/call IV), put/call ratio, OI-by-strike magnets and UOA are all gated on chain liquidity (≥${OPT_LIQ_MIN_OI} OI / ≥${OPT_LIQ_MIN_VOL} vol) — thin chains give unreliable readings, shown as <b>thin chain</b> rather than a number. Equities run a negative skew by default (puts pricier); a <b>flattening</b> is the notable tell, not the skew itself. <b>UOA + put/call extremes also feed the Smart Money tab</b> as the options-side twin of the equity moat — an edge, not a certainty (Douglas): corroborate, don't trade off one flagged extreme alone. Per-position <b>Greeks</b> (Δ/Γ/Θ/V/ρ) live in the Options tab and the stock detail's Greeks card — a risk dashboard, not a screener column.
     </div>
+    </details>
     <div id="tbl"><div class="loading">Loading stocks…</div></div>`;
   try{
     const d=await jget('/api/stocks?limit=1000');
