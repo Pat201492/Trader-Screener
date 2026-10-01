@@ -4301,7 +4301,14 @@ function renderStandardized(data){
             <td style="position:sticky;left:0;background:var(--bg);white-space:nowrap">${esc(r.field)}</td>
             ${periods.map(p=>{
               const v=(r.values||{})[p], c=(r.concepts||{})[p];
-              return `<td class="num" title="${esc(v==null?'':`${c||''}\n${v}`)}">${fmtFact(v,'USD')}</td>`;
+              // A roll-up check the filer's own linkbase failed (#262): the
+              // standard value does not equal the sum the filing says it should.
+              // Mark the cell and put expected-vs-reported in its hover. A cell
+              // with no check (no applicable roll-up) is left unmarked.
+              const chk=(r.checks||{})[p], bad=chk&&chk.ok===false;
+              let title=v==null?'':`${c||''}\n${v}`;
+              if(bad) title+=`\nroll-up mismatch: expected ${chk.expected}, reported ${chk.reported}`;
+              return `<td class="num${bad?' check-bad':''}" title="${esc(title)}"${bad?' style="background:rgba(200,60,60,.18)"':''}>${fmtFact(v,'USD')}${bad?' <span style="color:#c83c3c;font-weight:600">!</span>':''}</td>`;
             }).join('')}
           </tr>`).join('')}
         </table></div>

@@ -901,6 +901,7 @@ def taxonomy_run(run_id, targets, home):
     from edgar_client import EdgarClient
     from facts_store import FactRecord, FactsStore
     from taxonomy_fields import fields_for_filing
+    from calc_linkbase import find_cal_url, parse_cal
 
     ua = os.environ.get("EDGAR_USER_AGENT", "").strip()
     if not ua:
@@ -961,6 +962,26 @@ def taxonomy_run(run_id, targets, home):
             if records:
                 store.put_facts(records)
             written += len(records)
+
+            # Store the filing's own calculation roll-ups beside its facts (#262),
+            # so the standard layer can flag a value that does not equal the sum
+            # the filer says it equals. A filing with no `_cal.xml`, or any
+            # fetch/parse error, logs one line naming the accession and never
+            # fails the run.
+            try:
+                cal_url = find_cal_url(client, cik, accession)
+                if cal_url is None:
+                    RUNS.log(run_id, "%s: no calculation linkbase (_cal.xml); "
+                                     "no roll-ups stored" % accession)
+                else:
+                    arcs = parse_cal(client.get_text(cal_url))
+                    store.put_arcs(cik, accession, arcs)
+                    RUNS.log(run_id, "%s: %d calculation arc(s) stored"
+                                     % (accession, len(arcs)))
+            except Exception as exc:
+                RUNS.log(run_id, "%s: calculation linkbase skipped: %s: %s"
+                                 % (accession, type(exc).__name__, exc))
+
             RUNS.add_document(run_id, {
                 "accession": accession, "document": None,
                 "issuer": meta.get("issuer"), "filed": meta.get("file_date"),
@@ -2722,6 +2743,7 @@ def store_standardized(cik=None, period="annual", as_of=None):
     """
     from facts_store import FactsStore
     import canonical_concepts as cc
+    from calc_linkbase import check_rollups
 
     if period not in _PERIOD_WINDOWS:
         raise ValueError(f"period must be one of {sorted(_PERIOD_WINDOWS)}")
@@ -2759,18 +2781,49 @@ def store_standardized(cik=None, period="annual", as_of=None):
             d = _days(e["period_start"], e["period_end"])
             return d is not None and (d == 0 or lo <= d <= hi)
 
+        # The filer's own roll-ups, used to check the standard layer (#262): a
+        # value whose filing says it equals a sum of other lines, and does not,
+        # is flagged. Arcs are keyed by accession, so the period's resolved value
+        # is checked against the arcs of the very filing that reported it. The
+        # period's `{concept: value}` comes from the same facts the rows resolve
+        # from. Cached by accession so one filing's arcs are fetched once.
+        period_values = {}
+        for f in facts:
+            period_values.setdefault(
+                (f["period_start"], f["period_end"]), {})[f["concept"]] = f["value"]
+        arcs_by_accession = {}
+
+        def _arcs(accession):
+            if accession not in arcs_by_accession:
+                arcs_by_accession[accession] = store.arcs_for(chosen, accession)
+            return arcs_by_accession[accession]
+
         rows, periods = [], set()
         for field in cc.CANONICAL:
             entries = [e for e in cc.resolve(facts, field) if in_window(e)]
             if not entries:
                 continue
-            values, concepts = {}, {}
+            values, concepts, checks = {}, {}, {}
             for e in entries:
                 end = e["period_end"]
                 values[end] = e["value"]
                 concepts[end] = e["concept"]
                 periods.add(end)
-            rows.append({"field": field, "values": values, "concepts": concepts})
+                # Check only when the resolved concept is a PARENT in the arcs of
+                # the filing that reported it -- a field with no applicable
+                # roll-up carries no `checks` entry.
+                arcs = _arcs(e["accession"])
+                pv = period_values.get((e["period_start"], end), {})
+                for res in check_rollups(pv, arcs):
+                    if res["parent"] == e["concept"]:
+                        checks[end] = {"ok": res["ok"],
+                                       "expected": res["expected"],
+                                       "reported": res["reported"]}
+                        break
+            row = {"field": field, "values": values, "concepts": concepts}
+            if checks:
+                row["checks"] = checks
+            rows.append(row)
 
         from edgar_client import cik_bare
         return {"store": str(p), "exists": True, "cik": cik_bare(chosen),
