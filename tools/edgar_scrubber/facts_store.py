@@ -189,6 +189,17 @@ CREATE TABLE IF NOT EXISTS filers (
     name  TEXT
 );
 
+CREATE TABLE IF NOT EXISTS calc_arcs (
+    cik        TEXT NOT NULL,
+    accession  TEXT NOT NULL,
+    role       TEXT NOT NULL,
+    parent     TEXT NOT NULL,
+    child      TEXT NOT NULL,
+    weight     REAL,
+    ord        REAL,
+    UNIQUE (cik, accession, role, parent, child)
+);
+
 CREATE INDEX IF NOT EXISTS ix_facts_period
     ON facts(cik, concept, period_start, period_end);
 CREATE INDEX IF NOT EXISTS ix_facts_cik      ON facts(cik);
@@ -228,6 +239,10 @@ class FactsStore:
             "SELECT name FROM sqlite_master WHERE type = 'table'")}
         self._has_filed = "filed" in cols
         self._has_filers = "filers" in tables
+        # Same read-only tolerance for `calc_arcs` (#261) as #250 gives `filed`:
+        # a store written before this table existed opens read-only without it,
+        # and `arcs_for` returns [] rather than raising on the missing table.
+        self._has_calc_arcs = "calc_arcs" in tables
 
     def _migrate(self):
         """Additive migration for a store opened from before #236. The nullable
@@ -251,7 +266,7 @@ class FactsStore:
         drops those leftovers, so a filer split across two forms ends as one padded
         CIK with no duplicate rows. Only reached on a writable open (see
         ``__init__``), never read-only -- matching #250."""
-        for table in ("facts", "filers", "guidance"):
+        for table in ("facts", "filers", "guidance", "calc_arcs"):
             rows = self._conn.execute(
                 f"SELECT DISTINCT cik FROM {table}").fetchall()
             for r in rows:
@@ -427,6 +442,46 @@ class FactsStore:
             return {}
         rows = self._conn.execute("SELECT cik, name FROM filers").fetchall()
         return {r["cik"]: r["name"] for r in rows}
+
+    # -- calculation arcs (#261) -------------------------------------------
+
+    def put_arcs(self, cik, accession, arcs):
+        """Store a filing's calculation roll-up arcs (``calc_linkbase.parse_cal``
+        output). ``arcs`` is an iterable of ``{role, parent, child, weight,
+        order}`` dicts. Idempotent on ``(cik, accession, role, parent, child)`` —
+        writing the same filing's arcs twice leaves one row per arc (INSERT OR
+        REPLACE on the UNIQUE key)."""
+        self._guard_writable()
+        for a in arcs:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO calc_arcs "
+                "(cik, accession, role, parent, child, weight, ord) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (_norm_cik(cik), accession, a.get("role"), a["parent"],
+                 a["child"], a.get("weight"), a.get("order")),
+            )
+        self._conn.commit()
+
+    def arcs_for(self, cik, accession):
+        """The calculation arcs stored for one ``(cik, accession)``, as a list of
+        ``{role, parent, child, weight, order}`` dicts. A read-only open of a
+        store written before ``calc_arcs`` existed returns ``[]`` rather than
+        raising (same tolerance #250 gives ``filed``)."""
+        if not self._has_calc_arcs:
+            return []
+        rows = self._conn.execute(
+            "SELECT role, parent, child, weight, ord FROM calc_arcs "
+            "WHERE cik = ? AND accession = ? "
+            "ORDER BY role, parent, ord, child",
+            (_norm_cik(cik), accession),
+        ).fetchall()
+        return [{
+            "role": r["role"],
+            "parent": r["parent"],
+            "child": r["child"],
+            "weight": r["weight"],
+            "order": r["ord"],
+        } for r in rows]
 
     # -- prose guidance ----------------------------------------------------
 
