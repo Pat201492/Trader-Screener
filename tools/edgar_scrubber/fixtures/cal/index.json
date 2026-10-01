@@ -1,0 +1,14 @@
+{
+  "directory": {
+    "name": "/Archives/edgar/data/104169/000010416925000012",
+    "item": [
+      {"name": "wmt-20250131.htm", "type": "10-K", "size": "1048576"},
+      {"name": "wmt-20250131.xsd", "type": "EX-101.SCH", "size": "40960"},
+      {"name": "wmt-20250131_cal.xml", "type": "EX-101.CAL", "size": "20480"},
+      {"name": "wmt-20250131_def.xml", "type": "EX-101.DEF", "size": "61440"},
+      {"name": "wmt-20250131_lab.xml", "type": "EX-101.LAB", "size": "81920"},
+      {"name": "wmt-20250131_pre.xml", "type": "EX-101.PRE", "size": "71680"},
+      {"name": "wmt-20250131_htm.xml", "type": "XML", "size": "3145728"}
+    ]
+  }
+}

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Hand-written minimal calculation linkbase for #261 tests. Walmart-shaped: the
+  income-statement roll-up books OtherIncome (membership fees) INSIDE total
+  revenue, and a subtotal subtracts a cost (a negative-weight arc). Standard
+  XBRL 2003 linkbase form; the only year that matters is the summation-item
+  arcrole suffix, which Calculation 1.1 keeps.
+-->
+<link:linkbase
+    xmlns:link="http://www.xbrl.org/2003/linkbase"
+    xmlns:xlink="http://www.w3.org/1999/xlink">
+  <link:calculationLink
+      xlink:type="extended"
+      xlink:role="http://www.walmart.com/role/ConsolidatedStatementsOfIncome">
+
+    <link:loc xlink:type="locator"
+        xlink:href="https://xbrl.sec.gov/us-gaap/2024/us-gaap-2024.xsd#us-gaap_Revenues"
+        xlink:label="Revenues"/>
+    <link:loc xlink:type="locator"
+        xlink:href="https://xbrl.sec.gov/us-gaap/2024/us-gaap-2024.xsd#us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax"
+        xlink:label="RevenueFromContractWithCustomerExcludingAssessedTax"/>
+    <link:loc xlink:type="locator"
+        xlink:href="https://xbrl.sec.gov/us-gaap/2024/us-gaap-2024.xsd#us-gaap_OtherIncome"
+        xlink:label="OtherIncome"/>
+    <link:loc xlink:type="locator"
+        xlink:href="https://xbrl.sec.gov/us-gaap/2024/us-gaap-2024.xsd#us-gaap_GrossProfit"
+        xlink:label="GrossProfit"/>
+    <link:loc xlink:type="locator"
+        xlink:href="https://xbrl.sec.gov/us-gaap/2024/us-gaap-2024.xsd#us-gaap_CostOfGoodsAndServicesSold"
+        xlink:label="CostOfGoodsAndServicesSold"/>
+
+    <!-- Revenues = RevenueFromContract... + OtherIncome  (both added) -->
+    <link:calculationArc
+        xlink:type="arc"
+        xlink:arcrole="http://www.xbrl.org/2003/arcrole/summation-item"
+        xlink:from="Revenues"
+        xlink:to="RevenueFromContractWithCustomerExcludingAssessedTax"
+        order="1" weight="1.0"/>
+    <link:calculationArc
+        xlink:type="arc"
+        xlink:arcrole="http://www.xbrl.org/2003/arcrole/summation-item"
+        xlink:from="Revenues"
+        xlink:to="OtherIncome"
+        order="2" weight="1.0"/>
+
+    <!-- GrossProfit = Revenues - CostOfGoodsAndServicesSold  (cost subtracted) -->
+    <link:calculationArc
+        xlink:type="arc"
+        xlink:arcrole="http://www.xbrl.org/2003/arcrole/summation-item"
+        xlink:from="GrossProfit"
+        xlink:to="Revenues"
+        order="1" weight="1.0"/>
+    <link:calculationArc
+        xlink:type="arc"
+        xlink:arcrole="http://www.xbrl.org/2003/arcrole/summation-item"
+        xlink:from="GrossProfit"
+        xlink:to="CostOfGoodsAndServicesSold"
+        order="2" weight="-1.0"/>
+  </link:calculationLink>
+</link:linkbase>
