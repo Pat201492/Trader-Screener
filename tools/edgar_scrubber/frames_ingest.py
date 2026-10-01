@@ -31,10 +31,10 @@ Run the CLI / self-check:
 import re
 
 try:  # package import (from .frames_ingest import ...)
-    from .canonical_concepts import CANONICAL
+    from .canonical_concepts import CANONICAL, DERIVED
     from .facts_store import FactRecord, FactsStore
 except ImportError:  # flat import (import frames_ingest)
-    from canonical_concepts import CANONICAL
+    from canonical_concepts import CANONICAL, DERIVED
     from facts_store import FactRecord, FactsStore
 
 
@@ -97,7 +97,15 @@ def ingest_frames(client, field, period, store, *, unit=None):
     seen. Idempotent: re-running with the same frames leaves the fact count
     unchanged (the store's UNIQUE key collapses the repeat).
 
-    Raises ``ValueError`` for an invalid period BEFORE any request is made."""
+    Raises ``ValueError`` for a DERIVED field (frames cannot fetch a computed
+    value -- there is no concept to request) or an invalid period, BEFORE any
+    request is made."""
+    if field in DERIVED:
+        raise ValueError(
+            f"{field!r} is a derived field (computed from other fields); "
+            f"frames has no concept to fetch for it. Ingest its inputs and "
+            f"resolve it with canonical_concepts.resolve."
+        )
     is_instant = _validate_period(period)  # raises before any HTTP call
     unit = unit or _default_unit(field)
     concepts = CANONICAL[field]

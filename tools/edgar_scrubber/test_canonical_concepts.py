@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 
 import canonical_concepts as cc
+import frames_ingest
 from facts_store import FactRecord, FactsStore
-from revenue_series import REVENUE_TAGS
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 APPLE = "0000320193"
@@ -72,16 +72,16 @@ def _fy23(field):
 # CANONICAL shape
 # --------------------------------------------------------------------------- #
 
-def test_canonical_defines_all_seventeen_fields():
+def test_canonical_defines_all_concrete_fields():
     expected = {
-        "revenue", "cost_of_revenue", "gross_profit", "operating_income",
-        "net_income", "eps_diluted", "total_assets", "total_liabilities",
-        "stockholders_equity", "cash", "assets_current", "liabilities_current",
-        "ppe_net", "long_term_debt", "short_term_debt", "operating_cash_flow",
-        "capex",
+        "revenue", "sales_revenue", "cost_of_revenue", "gross_profit",
+        "operating_income", "net_income", "eps_diluted", "total_assets",
+        "total_liabilities", "stockholders_equity", "cash", "assets_current",
+        "liabilities_current", "ppe_net", "long_term_debt", "short_term_debt",
+        "operating_cash_flow", "capex",
     }
     assert set(cc.CANONICAL) == expected
-    assert len(cc.CANONICAL) == 17
+    assert len(cc.CANONICAL) == 18
 
 
 def test_every_field_is_a_nonempty_ordered_qualified_list():
@@ -91,9 +91,30 @@ def test_every_field_is_a_nonempty_ordered_qualified_list():
         assert all(c.startswith("us-gaap:") for c in concepts), field
 
 
-def test_revenue_is_built_from_revenue_tags_by_import():
-    # Must MATCH REVENUE_TAGS, qualified and in order -- so the two cannot drift.
-    assert cc.CANONICAL["revenue"] == tuple(f"us-gaap:{t}" for t in REVENUE_TAGS)
+def test_revenue_is_total_sales_concepts_behind_the_revenues_total():
+    # `revenue` = total: the general `Revenues` first, then the sales concepts.
+    assert cc.CANONICAL["revenue"][0] == "us-gaap:Revenues"
+    assert cc.CANONICAL["revenue"] == (
+        "us-gaap:Revenues",
+        "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+        "us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax",
+        "us-gaap:SalesRevenueNet",
+    )
+
+
+def test_sales_revenue_is_the_sales_concepts_without_the_total():
+    # `sales_revenue` = the net-sales concepts only; it is `revenue`'s tail.
+    assert cc.CANONICAL["sales_revenue"] == (
+        "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+        "us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax",
+        "us-gaap:SalesRevenueNet",
+    )
+    assert cc.CANONICAL["revenue"][1:] == cc.CANONICAL["sales_revenue"]
+
+
+def test_other_revenue_is_derived_not_a_canonical_concept():
+    assert "other_revenue" in cc.DERIVED
+    assert "other_revenue" not in cc.CANONICAL
 
 
 # --------------------------------------------------------------------------- #
@@ -212,6 +233,93 @@ def test_resolve_ppe_net_prefers_plain_concept_over_finance_lease():
 
 
 # --------------------------------------------------------------------------- #
+# revenue split: total, sales, and derived other_revenue (issue #260)
+# --------------------------------------------------------------------------- #
+# Walmart FY2025 shape: a `Revenues` total of 680.985B over a net-sales line of
+# 674.538B. Synthetic facts shaped like `FactsStore.facts_for` rows.
+
+_RFCC_EX = "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+_WMT_START, _WMT_END = "2024-02-01", "2025-01-31"
+
+
+def _walmart_facts():
+    return [
+        {"concept": "us-gaap:Revenues", "period_start": _WMT_START,
+         "period_end": _WMT_END, "value": 680985000000, "accession": "wmt-10k"},
+        {"concept": _RFCC_EX, "period_start": _WMT_START,
+         "period_end": _WMT_END, "value": 674538000000, "accession": "wmt-10k"},
+    ]
+
+
+def test_walmart_revenue_is_the_total_and_names_revenues():
+    out = cc.resolve(_walmart_facts(), "revenue")
+    assert len(out) == 1
+    assert out[0]["value"] == 680985000000
+    assert out[0]["concept"] == "us-gaap:Revenues"
+
+
+def test_walmart_sales_revenue_is_the_net_sales_line():
+    out = cc.resolve(_walmart_facts(), "sales_revenue")
+    assert len(out) == 1
+    assert out[0]["value"] == 674538000000
+    assert out[0]["concept"] == _RFCC_EX
+
+
+def test_walmart_other_revenue_is_the_difference_from_different_concepts():
+    out = cc.resolve(_walmart_facts(), "other_revenue")
+    assert len(out) == 1
+    e = out[0]
+    assert e["value"] == 6447000000  # 680.985B - 674.538B
+    assert e["concept"] == "derived:revenue-sales_revenue"
+    assert e["period_start"] == _WMT_START and e["period_end"] == _WMT_END
+
+
+def test_sales_revenue_net_only_resolves_both_levels_to_the_same_value():
+    # A pre-ASC 606 filer tagging only SalesRevenueNet: both revenue and
+    # sales_revenue resolve to it, and other_revenue is NOT emitted (same
+    # concept on both sides -> no separate total).
+    facts = [
+        {"concept": "us-gaap:SalesRevenueNet", "period_start": "2016-01-01",
+         "period_end": "2016-12-31", "value": 215639000000, "accession": "p1"},
+    ]
+    assert cc.resolve(facts, "revenue")[0]["value"] == 215639000000
+    assert cc.resolve(facts, "sales_revenue")[0]["value"] == 215639000000
+    assert cc.resolve(facts, "other_revenue") == []
+
+
+def test_other_revenue_not_emitted_when_sales_side_missing():
+    # Only the `Revenues` total: sales_revenue has nothing, so no difference.
+    facts = [
+        {"concept": "us-gaap:Revenues", "period_start": _WMT_START,
+         "period_end": _WMT_END, "value": 680985000000, "accession": "r1"},
+    ]
+    assert cc.resolve(facts, "sales_revenue") == []
+    assert cc.resolve(facts, "other_revenue") == []
+
+
+def test_other_revenue_not_emitted_when_difference_is_negative():
+    # A sales line larger than the total would make a negative "other" -- drop it.
+    facts = [
+        {"concept": "us-gaap:Revenues", "period_start": _WMT_START,
+         "period_end": _WMT_END, "value": 100, "accession": "n1"},
+        {"concept": _RFCC_EX, "period_start": _WMT_START,
+         "period_end": _WMT_END, "value": 150, "accession": "n2"},
+    ]
+    assert cc.resolve(facts, "other_revenue") == []
+
+
+def test_ingest_frames_refuses_derived_field_with_zero_client_calls():
+    class ExplodingClient:
+        def frames(self, *a, **k):
+            raise AssertionError("frames must not be called for a derived field")
+
+    store = FactsStore(":memory:")
+    with pytest.raises(ValueError):
+        frames_ingest.ingest_frames(ExplodingClient(), "other_revenue",
+                                    "CY2024", store)
+
+
+# --------------------------------------------------------------------------- #
 # resolve() against the real Apple fixture -- FY ending 2023-09-30
 # --------------------------------------------------------------------------- #
 
@@ -227,6 +335,18 @@ def test_resolve_apple_revenue_uses_asc606_concept():
     assert entry["concept"] == (
         "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax")
     assert entry["accession"] == "0000320193-23-000106"
+
+
+def test_resolve_apple_sales_revenue_equals_revenue_no_other_for_fy2023():
+    # Apple tags only RFCC (no separate `Revenues` total) for FY2023, so revenue
+    # and sales_revenue are the same value and concept, and other_revenue has no
+    # entry for that period.
+    rev, sales = _fy23("revenue"), _fy23("sales_revenue")
+    assert rev["value"] == 383285000000
+    assert sales["value"] == 383285000000
+    assert rev["concept"] == sales["concept"]
+    other = cc.resolve(apple_facts(), "other_revenue")
+    assert not any(e["period_end"] == FY23_END for e in other)
 
 
 if __name__ == "__main__":
