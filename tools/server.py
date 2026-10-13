@@ -2984,6 +2984,125 @@ def loaded_runtime(base_url, model):
     return {"loaded": False}
 
 
+_MODEL_START = {"state": "idle", "message": None, "started_at": None}
+_MODEL_START_LOCK = threading.Lock()
+
+
+def _ollama_base_and_model():
+    from ollama_client import OllamaConfig
+    cfg = OllamaConfig.from_env({})
+    return cfg.base_url.rsplit("/v1", 1)[0], cfg.model
+
+
+def _ollama_up(base, timeout=2):
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=timeout) as resp:
+            return json.load(resp)
+    except Exception:
+        return None
+
+
+def _find_ollama():
+    """The ollama binary: PATH first, then the Windows per-user install dir."""
+    import shutil
+    exe = shutil.which("ollama")
+    if exe:
+        return exe
+    cand = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
+    return str(cand) if cand.exists() else None
+
+
+def _launch_ollama_serve(exe):
+    """Start `ollama serve` detached, so it outlives this request (and this
+    server). Output goes to a log beside the scrubber's store."""
+    import subprocess
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    home.mkdir(parents=True, exist_ok=True)
+    log = open(home / "ollama-serve.log", "ab")
+    flags = 0
+    if sys.platform == "win32":
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen([exe, "serve"], stdout=log, stderr=subprocess.STDOUT,
+                     stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True)
+
+
+def start_local_model(*, up=None, find=None, launch=None, warm=None, sleep=None,
+                      wait_s=30):
+    """The "Start local model" button. Brings Ollama up if it is down, then loads
+    the scrubber's model into memory so the first extraction does not pay for the
+    load. Never pulls a model (several GB): a missing one is reported with the
+    exact command. Runs synchronously; the page polls /api/health meanwhile.
+    Returns {"ok", "state", "message"}. The seams are for tests."""
+    import time as _time
+    import urllib.request
+    up = up or _ollama_up
+    find = find or _find_ollama
+    launch = launch or _launch_ollama_serve
+    sleep = sleep or _time.sleep
+    base, model = _ollama_base_and_model()
+
+    def _warm():
+        req = urllib.request.Request(
+            f"{base}/api/generate",
+            data=json.dumps({"model": model, "prompt": "", "keep_alive": "30m"}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            resp.read()
+    warm = warm or _warm
+
+    tags = up(base)
+    if tags is None:
+        exe = find()
+        if not exe:
+            return {"ok": False, "state": "no-ollama",
+                    "message": "Ollama is not installed (no `ollama` on PATH or in "
+                               "%LOCALAPPDATA%\Programs\Ollama). Install it from https://ollama.com."}
+        launch(exe)
+        waited = 0
+        while tags is None and waited < wait_s:
+            sleep(1)
+            waited += 1
+            tags = up(base)
+        if tags is None:
+            return {"ok": False, "state": "ollama-timeout",
+                    "message": f"started Ollama but it did not answer at {base} within {wait_s}s"}
+
+    names = [m.get("name") for m in tags.get("models", [])]
+    if model not in names:
+        return {"ok": False, "state": "model-missing",
+                "message": f"Ollama is up, but {model} is not downloaded. Run: ollama pull {model}"
+                           " (or build the 8k-context model: ollama create edgar-qwen7b -f "
+                           "tools/edgar_scrubber/Modelfile.qwen2.5-7b, and set OLLAMA_MODEL=edgar-qwen7b)"}
+    try:
+        warm()
+    except Exception as exc:
+        return {"ok": False, "state": "load-failed",
+                "message": f"Ollama is up but loading {model} failed: {type(exc).__name__}: {exc}"}
+    return {"ok": True, "state": "ready", "message": f"{model} loaded"}
+
+
+def start_local_model_async():
+    """Kick start_local_model() on a thread; one at a time. The page polls
+    /api/health (which carries `model_start`) for progress."""
+    with _MODEL_START_LOCK:
+        if _MODEL_START["state"] == "starting":
+            return dict(_MODEL_START)
+        _MODEL_START.update(state="starting", message="starting Ollama / loading model",
+                            started_at=utcnow())
+
+    def _go():
+        try:
+            res = start_local_model()
+        except Exception as exc:
+            res = {"ok": False, "state": "error", "message": f"{type(exc).__name__}: {exc}"}
+        with _MODEL_START_LOCK:
+            _MODEL_START.update(state=res["state"], message=res["message"])
+
+    threading.Thread(target=_go, daemon=True, name="model-start").start()
+    return dict(_MODEL_START)
+
+
 def health():
     ok_ollama, model, detail, runtime = False, None, None, None
     try:
@@ -3006,6 +3125,7 @@ def health():
         "runner": "edgar-scrubber",
         "ollama": {"ok": ok_ollama, "model": model, "detail": detail,
                    "runtime": runtime},
+        "model_start": dict(_MODEL_START),
         "edgar_user_agent": bool(os.environ.get("EDGAR_USER_AGENT", "").strip()),
         "store": {"path": str(store_path()), "exists": store_path().exists()},
         "queries": sorted(p.stem for p in (SCRUBBER / "queries").glob("*.json")),
@@ -3362,6 +3482,8 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError:
             return self._json({"error": "body must be JSON"}, 400)
 
+        if path == "/api/tools/edgar-scrubber/model/start":
+            return self._json(start_local_model_async(), 202)
         if path == "/api/tools/edgar-scrubber/search":
             try:
                 return self._json(edgar_search_daily(params)
