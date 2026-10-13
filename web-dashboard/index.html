@@ -4094,6 +4094,14 @@ function runnerBanner(){
   // Resident-vs-selected profile. A model 24% on the CPU is ~10x slower and
   // otherwise invisible — it reads as "the local model is just slow".
   const rt=RUNNER.ollama.runtime;
+  // One click to bring the local model up: starts Ollama if it is down and loads
+  // the model into memory. Shown whenever the model is not ready or not loaded.
+  const ms=RUNNER.model_start||{};
+  if(ms.state==='starting'){
+    bits.push(`<span style="color:#e3b341">starting local model…</span>`);
+  }else if(!RUNNER.ollama.ok||!(rt&&rt.loaded)){
+    bits.push(`<button onclick="startLocalModel(this)" style="background:var(--accent);border:1px solid var(--accent);color:#fff;border-radius:6px;padding:2px 10px;font-size:12px;cursor:pointer">${RUNNER.ollama.ok?'Load local model':'Start local model'}</button>`);
+  }
   if(rt&&rt.loaded){
     bits.push(`ctx <code>${rt.context_length}</code>`);
     bits.push(rt.cpu_offload_pct>0
@@ -4102,7 +4110,23 @@ function runnerBanner(){
   }
   return `<div style="font-size:12px;margin-bottom:12px;color:var(--muted)">${bits.join(' · ')}
     ${blocked.length?`<div style="color:#e3b341;margin-top:4px">${blocked.map(esc).join('<br>')}</div>`:''}
+    ${ms.state&&!['idle','starting','ready'].includes(ms.state)&&ms.message?`<div style="color:var(--red);margin-top:4px">${esc(ms.message)}</div>`:''}
   </div>`;
+}
+// Start Ollama + load the model, then poll /api/health until it settles and
+// re-render the current tab so the banner and Run buttons reflect it.
+async function startLocalModel(btn){
+  if(btn){ btn.disabled=true; btn.textContent='starting…'; }
+  try{ await fetch('/api/tools/edgar-scrubber/model/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); }
+  catch(e){}
+  const t0=Date.now();
+  while(Date.now()-t0<180000){
+    await new Promise(r=>setTimeout(r,2000));
+    await probeRunner();
+    const st=(RUNNER&&RUNNER.model_start&&RUNNER.model_start.state)||'idle';
+    if(st!=='starting') break;
+  }
+  if(SECTION&&TAB) goTab(TAB);
 }
 
 async function renderToolsGather(){

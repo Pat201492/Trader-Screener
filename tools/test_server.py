@@ -1567,6 +1567,54 @@ finally:
         os.environ["EDGAR_USER_AGENT"] = _cprev_ua
 
 # --------------------------------------------------------------------------- #
+section("Start local model button: bring Ollama up, load the model")
+# --------------------------------------------------------------------------- #
+_ms_base, _ms_model = server._ollama_base_and_model()
+_tags_with = {"models": [{"name": _ms_model}]}
+
+# 1) Ollama down -> launch -> comes up on the 2nd poll -> model warmed.
+_seq = [None, None, _tags_with]
+_launched, _warmed = [], []
+_r = server.start_local_model(up=lambda base: _seq.pop(0) if _seq else _tags_with,
+                              find=lambda: "C:/fake/ollama.exe",
+                              launch=_launched.append, warm=lambda: _warmed.append(1),
+                              sleep=lambda s: None, wait_s=10)
+check("Ollama down: it is launched once", _launched == ["C:/fake/ollama.exe"])
+check("...then the model is loaded and the result is ready",
+      _r["ok"] and _r["state"] == "ready" and _warmed == [1])
+
+# 2) Already up -> no launch, just load.
+_launched2 = []
+_r2 = server.start_local_model(up=lambda base: _tags_with, find=lambda: "x",
+                               launch=_launched2.append, warm=lambda: None,
+                               sleep=lambda s: None)
+check("Ollama already up: nothing is launched, the model is loaded",
+      _r2["ok"] and _launched2 == [])
+
+# 3) Model not downloaded -> never pulls; names the exact command.
+_r3 = server.start_local_model(up=lambda base: {"models": [{"name": "other:1b"}]},
+                               find=lambda: "x", launch=lambda e: None,
+                               warm=lambda: (_ for _ in ()).throw(AssertionError("must not warm")),
+                               sleep=lambda s: None)
+check("model not downloaded: reported with the pull command, nothing loaded",
+      not _r3["ok"] and _r3["state"] == "model-missing" and f"ollama pull {_ms_model}" in _r3["message"])
+
+# 4) No ollama installed.
+_r4 = server.start_local_model(up=lambda base: None, find=lambda: None,
+                               launch=lambda e: None, warm=lambda: None, sleep=lambda s: None)
+check("Ollama not installed: says so", not _r4["ok"] and _r4["state"] == "no-ollama")
+
+# 5) Launched but never answers -> times out instead of hanging.
+_r5 = server.start_local_model(up=lambda base: None, find=lambda: "x", launch=lambda e: None,
+                               warm=lambda: None, sleep=lambda s: None, wait_s=3)
+check("Ollama launched but silent: times out with a message",
+      not _r5["ok"] and _r5["state"] == "ollama-timeout")
+
+# 6) /api/health carries the start state for the page to poll.
+check("/api/health reports model_start", "model_start" in server.health()
+      and "state" in server.health()["model_start"])
+
+# --------------------------------------------------------------------------- #
 section("the scrubber tool names no population (#211 AC6)")
 # --------------------------------------------------------------------------- #
 # The scrubber is a REGISTRY of per-form scrubbers -- 10-K, 10-Q, 8-K and 424B2
