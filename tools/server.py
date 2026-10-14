@@ -427,7 +427,7 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
     from extraction_ladder import ExtractionLadder
     from ollama_client import OllamaClient, OllamaConfig
     from output_store import OutputStore, DocumentExtraction, FieldValue
-    from validation import RenderDocument, LadderExtractor
+    from validation import RenderDocument, LadderExtractor, FieldProposal
 
     t_start = time.time()
     ua = os.environ.get("EDGAR_USER_AGENT", "").strip()
@@ -581,6 +581,23 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
             model_issuer = None
             extractor = LadderExtractor(spec, ladder, sections=sections)
             render_doc = RenderDocument.from_normalized(nd)
+            # Deterministic first step: the filing's own labelled terms
+            # ("Threshold Price:: $244.678, which is equal to 70% of the
+            # starting price"). A field it reads with certainty never reaches
+            # the model; everything else falls through exactly as before.
+            # SCRUBBER_KEY_TERMS=0 turns it off (model-only, for comparison).
+            key_terms = {}
+            if os.environ.get("SCRUBBER_KEY_TERMS", "1") != "0":
+                try:
+                    from key_terms import extract_key_terms
+                    key_terms = extract_key_terms(nd.text, field_names)
+                except Exception as exc:          # never let it sink a document
+                    RUNS.log(run_id, f"{accession}: key-terms step failed "
+                                     f"({type(exc).__name__}: {exc}) -- model only")
+                if key_terms:
+                    RUNS.log(run_id, f"{accession}: key terms read "
+                                     f"{len(key_terms)} field(s) without the model: "
+                                     f"{', '.join(sorted(key_terms))}")
             for name in field_names:
                 if RUNS.stop_requested(run_id):
                     stopped = True
@@ -593,13 +610,25 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
                 # looks hung.
                 RUNS.event(run_id, "field_start", accession=accession, field=name)
                 try:
-                    # One field at a time through LadderExtractor so the stored
-                    # span is in ORIGINAL document coordinates (it resolves the
-                    # model's context-relative offsets back through the #101
-                    # reduction map). A span nothing can point at is not evidence.
-                    p = extractor.propose(render_doc, issuer=meta.get("issuer"),
-                                          ex107=ex107, accession=accession,
-                                          document=primary.name, fields=[name])[0]
+                    kt = key_terms.get(name)
+                    if kt is not None:
+                        # Read off the filing's own term line: same proposal
+                        # shape as the model's, so the span / bounds / format
+                        # checks below judge it exactly the same way.
+                        p = FieldProposal(
+                            field=name, value=kt.value, raw_value=kt.raw,
+                            source_span=tuple(kt.span), rung="terms",
+                            provenance=f"terms:{kt.method}:{kt.label}", confidence=1.0,
+                            unit=getattr(spec.field(name), "unit", None),
+                            flags=[f.as_dict() for f in spec.check_value(name, kt.value, ex107)])
+                    else:
+                        # One field at a time through LadderExtractor so the stored
+                        # span is in ORIGINAL document coordinates (it resolves the
+                        # model's context-relative offsets back through the #101
+                        # reduction map). A span nothing can point at is not evidence.
+                        p = extractor.propose(render_doc, issuer=meta.get("issuer"),
+                                              ex107=ex107, accession=accession,
+                                              document=primary.name, fields=[name])[0]
                 except Exception as exc:  # one bad field must not kill the document
                     out.append({"field": name, "error": f"{type(exc).__name__}: {exc}"})
                     RUNS.event(run_id, "field_error", accession=accession, field=name,
@@ -611,7 +640,12 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
                 # otherwise the store fills up with spans that point nowhere and
                 # the #105 review loop has nothing to review.
                 fdef = spec.field(name)
-                vocab = field_vocabulary_present(low_text, fdef)
+                # The vocabulary gate stops a MODEL inventing a value for a term
+                # the filing never uses. A key-terms value was read off the
+                # filing's own text with its span, so it is exempt -- JPMorgan
+                # states one "Threshold Price" that also governs the coupon, and
+                # never writes "coupon barrier", yet 70% is what it says.
+                vocab = None if p.rung == "terms" else field_vocabulary_present(low_text, fdef)
                 p_flags = list(p.flags or [])
                 element_spans = None
                 stored_value = p.value
@@ -719,7 +753,9 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
                 # produced and then threw away leaves no trace anywhere else.
                 empty = p.value in (None, "", [])
                 withheld = ("value_withheld_no_span" in flags
-                            or "value_withheld_out_of_bounds" in flags)
+                            or "value_withheld_out_of_bounds" in flags
+                            or "value_withheld_invalid_format" in flags
+                            or "value_withheld_not_in_document" in flags)
                 dropped = ("field_absent_from_document" in flags
                            or "span_unlocatable" in flags
                            or "element_span_unlocatable" in flags
@@ -1380,9 +1416,33 @@ def withhold_unsupported_value(fdef, value, span, flag_codes):
     present to 24% present is the correct reading of the same evidence, not a
     regression -- the other 60% were values nothing could check.
     """
-    if fdef is None or getattr(fdef, "type", None) not in VALUE_TYPED:
+    if fdef is None:
         return value, None
     if value in (None, "", []):
+        return value, None
+    # A string whose declared format fails (a CUSIP with a bad check digit) is
+    # wrong by the spec's own statement, exactly like an out-of-bounds number.
+    if "invalid_format" in flag_codes:
+        return None, {
+            "field": fdef.name, "code": "value_withheld_invalid_format",
+            "severity": "warn",
+            "message": ("withheld %r: fails this field's declared format (%s)"
+                        % (str(value)[:80], getattr(fdef, "format", None))),
+        }
+    # A format-typed field is a literal code (a CUSIP): it must appear in the
+    # filing as printed. Measured 2026-10-13: the model returned "424B21000" for
+    # a BofA note -- built from the form type, flagged span_unlocatable, and it
+    # happens to pass the CUSIP check digit (a 1-in-10 coincidence), so the
+    # checksum alone cannot be the gate. Not found in the text means not stored.
+    if getattr(fdef, "format", None) and ("span_unlocatable" in flag_codes
+                                           or "element_span_unlocatable" in flag_codes):
+        return None, {
+            "field": fdef.name, "code": "value_withheld_not_in_document",
+            "severity": "warn",
+            "message": ("withheld %r: a %s is a literal code and does not appear "
+                        "in the filing" % (str(value)[:80], fdef.format)),
+        }
+    if getattr(fdef, "type", None) not in VALUE_TYPED:
         return value, None
 
     # A value the spec's own bounds reject is not saved by having a span.
@@ -3057,7 +3117,7 @@ def start_local_model(*, up=None, find=None, launch=None, warm=None, sleep=None,
         if not exe:
             return {"ok": False, "state": "no-ollama",
                     "message": "Ollama is not installed (no `ollama` on PATH or in "
-                               "%LOCALAPPDATA%\Programs\Ollama). Install it from https://ollama.com."}
+                               "%LOCALAPPDATA%\\Programs\\Ollama). Install it from https://ollama.com."}
         launch(exe)
         waited = 0
         while tags is None and waited < wait_s:

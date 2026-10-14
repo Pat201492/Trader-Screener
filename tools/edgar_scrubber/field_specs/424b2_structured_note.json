@@ -2,7 +2,7 @@
   "spec_id": "424b2.structured_note",
   "form_type": "424B2",
   "population": "structured_note",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Structured / market-linked notes filed under Rule 424(b)(2). The high-signal population: estimated_value_per_1000 is the issuer markup the SEC forces onto the page, and underlyings[] + aggregate_principal aggregate into structured-note issuance by underlying (dealer hedging proxy, #110).",
 
   "detection": {
@@ -71,7 +71,8 @@
       "required": true,
       "sections": ["cover", "key_terms"],
       "anchors": ["CUSIP:", "CUSIP "],
-      "description": "9-character CUSIP."
+      "format": "cusip",
+      "description": "The note's 9-character CUSIP, printed on the cover or in the key terms as 'CUSIP: XXXXXXXXX' (often next to an ISIN). Report only that code, exactly as printed. It is never built from the form type or the filing's file number."
     },
     {
       "name": "isin",
@@ -217,7 +218,8 @@
       "extraction_path": "table-resident",
       "sections": ["coupon_terms", "key_terms"],
       "wire_key": "cbar",
-      "anchors": ["Coupon Barrier:", "Coupon Barrier Level:", "Interest Barrier:"],
+      "anchors": ["Coupon Barrier:", "Coupon Barrier Level:", "Interest Barrier:", "Coupon Threshold Price:", "Coupon Threshold Value", "Interest Threshold:", "Coupon Trigger:"],
+      "description": "The level the underlying must close at or above for a contingent coupon to be paid, as a percent of the starting/initial value (e.g. 'Coupon Threshold Price ... equal to 50.00% of the starting price' means 50). Report the percent, not the dollar level. Some notes use one threshold for both the coupon and the downside; then it equals that threshold. It is never the coupon rate.",
       "bounds": { "min": 0, "max": 100 }
     },
     {
@@ -266,7 +268,8 @@
       "extraction_path": "table-resident",
       "sections": ["downside_terms", "key_terms"],
       "wire_key": "bar",
-      "anchors": ["Barrier:", "Barrier Level:", "Downside Threshold:", "Trigger Level:"],
+      "anchors": ["Barrier:", "Barrier Level:", "Downside Threshold:", "Trigger Level:", "Threshold Price:", "Threshold Value:", "Downside Threshold Value", "Trigger Value:", "Trigger Price:", "Barrier Price:", "Knock-In Level:"],
+      "description": "The downside threshold (also called barrier, trigger, or threshold price/value) as a percent of the starting/initial value -- e.g. 'Threshold Price: $244.678, which is equal to 70% of the starting price' means 70. Report the percent, not the dollar level. It is never the 100% principal amount or the 100% initial value.",
       "bounds": { "min": 0, "max": 100 }
     },
     {
@@ -335,7 +338,7 @@
       },
       "sections": ["cover", "estimated_value"],
       "wire_key": "ev1000",
-      "anchors": ["our estimated value", "estimated value of the notes", "Estimated Value:"],
+      "anchors": ["our estimated value", "estimated value of the notes", "Estimated Value:", "estimated value of the Securities", "estimated value of the securities"],
       "bounds": { "min": 900, "max": 1000 },
       "description": "The issuer's own estimated value of the notes, per $1,000 principal amount, as the filing states it. The filing introduces it with wording like 'our estimated value of the notes'. Report the figure the document states. If the document does not state a single figure -- a preliminary pricing supplement often gives only a range -- answer null.",
       "note": "SEC-mandated disclosure; against the $1,000 issue price this is the issuer markup. Null and unflagged-as-error on a preliminary filing (#144) -- see required_unless and estimated_value_low/estimated_value_high. Worst performing field in the spec: it has returned 0.0, then 970.2 copied verbatim from a worked example in the prompt, then 950 -- the midpoint of these bounds -- on 21 of 25 filings (#163). Never put a number in this description."
