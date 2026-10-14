@@ -1,0 +1,307 @@
+"""
+Deterministic key-terms extraction for 424B2 pricing supplements -- the first
+step, before any model.
+
+Every bank's pricing supplement carries a labelled terms block. After
+normalization it reads as `Label:: value` runs:
+
+    CUSIP:: 09712GX58
+    Maturity Date:: October 3, 2029, subject to postponement
+    Coupon Barrier:: $119.392, which is equal to 80.00% of the Starting Price.
+    Threshold Price:: $244.678, which is equal to 70% of the starting price
+
+The labels differ by issuer ("Threshold Price" / "Downside Threshold Value" /
+"Trigger Level"); the structure does not. So: parse the block into label ->
+value pairs, map labels to spec fields through a synonym table, and pull the
+figure out of the value with a pattern. Zero tokens, milliseconds, no GPU, and
+every value comes with the exact span it was read from.
+
+Measured 2026-10-13 on four live notes (BofA, BNS, Wells Fargo, JPMorgan): the
+local 7B scored 27/36 on the default fields, with barrier_pct 1/4,
+estimated_value_per_1000 1/4 and cusip 2/4. Those values were sitting in term
+lines the whole time.
+
+Anything this cannot read with certainty is left out, never guessed: the field
+falls through to the model rung exactly as before. A wrong deterministic value
+would be worse than a missing one, because it skips the model entirely.
+
+stdlib only. Self-check:  python tools/edgar_scrubber/key_terms.py
+"""
+
+import re
+from dataclasses import dataclass
+from datetime import datetime
+
+# A term label: words immediately followed by "::"; the value runs to the next
+# label. A label is built from WORDS only -- a capitalised word, a short
+# all-caps word (CUSIP, ISIN), a lowercase word after the first, a connector or
+# a parenthetical -- so a value token like "GX58" (letters+digits) can never
+# start one: "CUSIP:: 09712GX58 Maturity Date::" must give the value 09712GX58,
+# not split it. Footnote markers glued to the end ("Stated Maturity Date1",
+# "Maturity Date*") are allowed and stripped when the label is normalized.
+_W_FIRST = r"(?:[A-Z][a-z'’\-]+|[A-Z]{2,6}(?![A-Za-z0-9]))"
+_W_NEXT = r"(?:[A-Z][a-z'’\-]+|[A-Z]{2,6}(?![A-Za-z0-9])|[a-z][a-z'’\-]*|/|&|\([^()]{1,60}\))"
+_LABEL_RE = re.compile(rf"({_W_FIRST}(?:[ \t]+{_W_NEXT}){{0,9}})[\d*]*\s*::")
+_MAX_VALUE = 700
+
+# Spec field -> normalized labels that state it, in preference order. A label
+# starting "hypothetical" belongs to an illustration table and never matches.
+FIELD_LABELS = {
+    "cusip": ("cusip", "cusip / isin", "cusip/isin", "cusip number", "cusip no."),
+    "issuer": ("issuer",),
+    "maturity_date": ("maturity date", "stated maturity date"),
+    "pricing_date": ("pricing date", "trade date"),
+    "issue_date": ("issue date", "original issue date", "settlement date"),
+    "contingent_coupon_rate": ("contingent coupon rate", "contingent interest rate",
+                               "coupon rate", "interest rate"),
+    "coupon_barrier_pct": ("coupon barrier", "coupon barrier level", "coupon threshold price",
+                           "coupon threshold value", "coupon threshold level",
+                           "interest barrier", "interest threshold", "coupon trigger"),
+    # Specific before generic: a note with both a "Call Threshold Price" (the
+    # autocall level) and a "Downside Threshold Price" must read the downside
+    # one. Held-out BNS 0001839882-26-045355 returned the 95% call level here.
+    "barrier_pct": ("downside threshold price", "downside threshold value",
+                    "downside threshold level", "downside threshold", "threshold price",
+                    "threshold value", "threshold level", "barrier", "barrier level",
+                    "barrier price", "trigger level", "trigger value", "trigger price",
+                    "knock-in level"),
+}
+
+# A label with one of these words in front of a generic phrase is a DIFFERENT
+# term ("call threshold price" is the autocall level, not the downside barrier),
+# so the run-on fallback in extract_key_terms must never strip them off.
+_QUALIFIERS = {"call", "autocall", "coupon", "interest", "redemption", "early",
+               "hypothetical", "upside", "cap", "knock-out"}
+
+# A figure the filing does not commit to: a floor, a ceiling, a range, or a
+# value set later. A preliminary supplement says "will be at least 23.00% per
+# annum" and "expected to be between $920.00 and $970.00". Reporting either as
+# the value is wrong, so the field is left to the model, which the spec tells
+# to answer null for an uncommitted figure.
+_HEDGE_BEFORE = re.compile(
+    r"(?:at least|at most|not less than|no less than|not more than|no more than|"
+    r"between|approximately|expected to be|will be determined|to be determined|"
+    r"will be set)\W*(?:\$\s*)?$", re.I)
+_RANGE_AFTER = re.compile(r"^\s*%?\s*(?:per annum\s*)?(?:and|to|-|–)\s*\$?\s*\d", re.I)
+
+
+def _committed(text, start, end):
+    """False when the figure at text[start:end] is hedged: a floor, ceiling or
+    range, or a value to be set later."""
+    before = text[max(0, start - 40):start]
+    after = text[end:end + 25]
+    return not (_HEDGE_BEFORE.search(before) or _RANGE_AFTER.search(after))
+
+_MONTHS = ("January|February|March|April|May|June|July|August|September|"
+           "October|November|December")
+_DATE_RE = re.compile(rf"\b({_MONTHS})\s+(\d{{1,2}}),\s*(\d{{4}})\b")
+_PCT_OF_INITIAL_RE = re.compile(
+    r"(?:equal to|is|equals|of)\s*(\d{1,3}(?:\.\d+)?)\s?%\s*of\s+(?:the\s+)?"
+    r"(?:starting|initial|strike)", re.I)
+_PCT_LEAD_RE = re.compile(r"^\s*(\d{1,3}(?:\.\d+)?)\s?%\s*of\s+(?:the\s+)?(?:starting|initial|strike)", re.I)
+_RATE_RE = re.compile(r"(\d{1,2}(?:\.\d+)?)\s?%\s*per\s+annum", re.I)
+_CUSIP_RE = re.compile(r"\b([0-9A-Z]{9})\b")
+_EST_VALUE_RE = re.compile(
+    r"estimated (?:initial )?value of the (?:securities|notes)[^$]{0,160}?\$\s?(\d{3,4}(?:,\d{3})?\.\d{2})",
+    re.I | re.S)
+
+
+@dataclass(frozen=True)
+class Term:
+    label: str          # normalized: lowercase, footnote markers stripped
+    raw_label: str
+    value: str          # text after "::" up to the next label (trimmed)
+    value_start: int    # offset of `value` in the document text
+    value_end: int
+
+
+@dataclass(frozen=True)
+class KeyTermValue:
+    field: str
+    value: object       # parsed: str / float / ISO date
+    raw: str            # the figure exactly as the filing prints it
+    span: tuple         # (start, end) of `raw` in the document text
+    label: str          # the term label (or "prose") it was read from
+    method: str         # "term", "term-table" or "prose"
+
+
+def normalize_label(label):
+    s = label.strip().lower().replace("’", "'")
+    s = re.sub(r"[\d*]+$", "", s).strip()      # footnote markers: "date1", "date*"
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def parse_terms(text):
+    """Every `Label:: value` run in the text, in document order."""
+    hits = list(_LABEL_RE.finditer(text))
+    terms = []
+    for i, m in enumerate(hits):
+        start = m.end()
+        end = hits[i + 1].start() if i + 1 < len(hits) else len(text)
+        end = min(end, start + _MAX_VALUE)
+        raw_val = text[start:end]
+        lead = len(raw_val) - len(raw_val.lstrip())
+        val = raw_val.strip()
+        terms.append(Term(normalize_label(m.group(1)), m.group(1).strip(), val,
+                          start + lead, start + lead + len(val)))
+    return terms
+
+
+def valid_cusip(value):
+    """9 characters with a correct modulus-10 "double-add-double" check digit."""
+    s = (value or "").strip().upper()
+    if len(s) != 9 or not s[8].isdigit():
+        return False
+    total = 0
+    for i, ch in enumerate(s[:8]):
+        if ch.isdigit():
+            v = int(ch)
+        elif "A" <= ch <= "Z":
+            v = ord(ch) - ord("A") + 10
+        else:
+            return False
+        if i % 2 == 1:
+            v *= 2
+        total += v // 10 + v % 10
+    return (10 - total % 10) % 10 == int(s[8])
+
+
+def _span_of(term, m, group=1):
+    return (term.value_start + m.start(group), term.value_start + m.end(group))
+
+
+def _parse_for(field, term):
+    """(value, raw, span) read from one term's value, or None if not certain."""
+    v = term.value
+    if field == "cusip":
+        for m in _CUSIP_RE.finditer(v[:80]):
+            if valid_cusip(m.group(1)):
+                return m.group(1), m.group(1), _span_of(term, m)
+        return None
+    if field == "issuer":
+        name = re.split(r"\s*(?:\(|;|\.\s|\.$|,\s+a\s|,\s+an\s)", v, maxsplit=1)[0].strip()
+        if 2 <= len(name) <= 120 and not re.search(r"\d{4}", name):
+            return name, name, (term.value_start, term.value_start + len(name))
+        return None
+    if field in ("maturity_date", "pricing_date", "issue_date"):
+        m = _DATE_RE.search(v[:120])
+        if not m:
+            return None
+        iso = datetime.strptime(f"{m.group(1)} {m.group(2)} {m.group(3)}", "%B %d %Y").date().isoformat()
+        return iso, m.group(0), _span_of(term, m, 0)
+    if field == "contingent_coupon_rate":
+        m = _RATE_RE.search(v[:200])
+        return (float(m.group(1)), m.group(1), _span_of(term, m, 1)) if m else None
+    if field in ("coupon_barrier_pct", "barrier_pct"):
+        m = _PCT_OF_INITIAL_RE.search(v[:300]) or _PCT_LEAD_RE.search(v[:300])
+        if not m:
+            return None
+        pct = float(m.group(1))
+        return (pct, m.group(1), _span_of(term, m, 1)) if 0 < pct <= 100 else None
+    return None
+
+
+def _table_threshold(text, header):
+    """Wells Fargo prints thresholds in a small table: a header like
+    "Coupon Threshold Value(2)" and the percent in footnote "(2) 50% of the
+    starting value". Read the percent from the footnote the header points at."""
+    m = re.search(re.escape(header) + r"\s*\((\d)\)", text, re.I)
+    if not m:
+        return None
+    fn = re.search(r"\(" + m.group(1) + r"\)\s*(\d{1,3}(?:\.\d+)?)\s?%\s*of\s+the\s+(?:starting|initial)",
+                   text[m.end():m.end() + 3000], re.I)
+    if not fn:
+        return None
+    pct = float(fn.group(1))
+    s = m.end() + fn.start(1)
+    return (pct, fn.group(1), (s, s + len(fn.group(1)))) if 0 < pct <= 100 else None
+
+
+def extract_key_terms(text, fields=None):
+    """{field: KeyTermValue} for every field this module can read with
+    certainty. Fields it cannot read are absent (left for the model)."""
+    wanted = set(fields) if fields else set(FIELD_LABELS) | {"estimated_value_per_1000"}
+    terms = [t for t in parse_terms(text) if not t.label.startswith("hypothetical")]
+    known = sorted({lab for labs in FIELD_LABELS.values() for lab in labs}, key=len, reverse=True)
+    by_label = {}
+    for t in terms:
+        by_label.setdefault(t.label, t)          # first occurrence: the terms block
+        # Run-on text with no period ("...America Corporation CUSIP::") glues
+        # earlier words onto the label; match on its trailing known phrase.
+        if by_label[t.label] is t:
+            for lab in known:
+                if t.label != lab and t.label.endswith(" " + lab):
+                    prefix = t.label[: -len(lab)].split()
+                    if prefix and prefix[-1] not in _QUALIFIERS:
+                        by_label.setdefault(lab, t)
+                    break      # "call threshold price" is its own term, not "threshold price"
+    out = {}
+
+    for field, labels in FIELD_LABELS.items():
+        if field not in wanted:
+            continue
+        for lab in labels:
+            t = by_label.get(lab)
+            if t is None:
+                continue
+            got = _parse_for(field, t)
+            if got and not _committed(text, got[2][0], got[2][1]):
+                got = None     # a floor / range / to-be-set figure: the model's call
+            if got:
+                out[field] = KeyTermValue(field, got[0], got[1], got[2], t.raw_label, "term")
+                break
+
+    # Thresholds in a table with footnoted percents (Wells Fargo).
+    for field, header in (("coupon_barrier_pct", "Coupon Threshold Value"),
+                          ("barrier_pct", "Downside Threshold Value")):
+        if field in wanted and field not in out:
+            got = _table_threshold(text, header)
+            if got:
+                out[field] = KeyTermValue(field, got[0], got[1], got[2], header, "term-table")
+
+    # One threshold for both coupon and downside: when no coupon-specific label
+    # exists and the coupon term itself is conditioned on the threshold the
+    # downside uses ("...closing price is greater than or equal to the threshold
+    # price"), the coupon barrier IS that threshold.
+    if "coupon_barrier_pct" in wanted and "coupon_barrier_pct" not in out and "barrier_pct" in out:
+        bar = out["barrier_pct"]
+        bar_words = normalize_label(bar.label)
+        for t in terms:
+            if t.label.startswith("contingent coupon payment") or t.label.startswith("contingent interest payment"):
+                if bar_words and bar_words in t.value.lower():
+                    out["coupon_barrier_pct"] = KeyTermValue(
+                        "coupon_barrier_pct", bar.value, bar.raw, bar.span, bar.label, "term-shared")
+                break
+
+    # Estimated value is stated in prose, not as a term line.
+    if "estimated_value_per_1000" in wanted:
+        m = _EST_VALUE_RE.search(text)
+        if m and not _committed(text, m.start(1), m.end(1)):
+            m = None           # "expected to be between $920.00 and $970.00"
+        if m:
+            val = float(m.group(1).replace(",", ""))
+            if 900 <= val <= 1000:
+                out["estimated_value_per_1000"] = KeyTermValue(
+                    "estimated_value_per_1000", val, m.group(1), m.span(1), "prose", "prose")
+    return out
+
+
+if __name__ == "__main__":
+    sample = ("Issuer:: BofA Finance LLC (“BofA Finance”). Guarantor:: Bank of America "
+              "Corporation. CUSIP:: 09712GX58 Maturity Date:: October 3, 2029, subject to "
+              "postponement. Contingent Coupon Rate:: The Contingent Coupon Rate is 19.10% per annum. "
+              "Coupon Barrier:: $119.392, which is equal to 80.00% of the Starting Price. "
+              "Threshold Price:: $119.392, which is equal to 80.00% of the Starting Price. "
+              "Hypothetical Threshold Price:: $80.00 The estimated value of the Securities as "
+              "of the Pricing Date is $962.80 per Security.")
+    got = extract_key_terms(sample)
+    assert got["cusip"].value == "09712GX58"
+    assert got["maturity_date"].value == "2029-10-03"
+    assert got["contingent_coupon_rate"].value == 19.10
+    assert got["coupon_barrier_pct"].value == 80.0 and got["barrier_pct"].value == 80.0
+    assert got["estimated_value_per_1000"].value == 962.80
+    assert got["issuer"].value == "BofA Finance LLC"
+    for k in got.values():
+        assert sample[k.span[0]:k.span[1]] == k.raw, k
+    print("key_terms self-check: PASS")

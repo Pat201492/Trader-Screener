@@ -379,3 +379,37 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ── CUSIP format (2026-10-13 live test) ──────────────────────────────────────
+
+def test_valid_cusip_accepts_real_codes_and_rejects_bad_check_digit():
+    from field_spec import valid_cusip
+    for good in ("09712GX58", "06419TUG1", "95001HRR4", "46661PVZ7", "48133YHT4"):
+        assert valid_cusip(good), good
+    for bad in ("09712GX59", "06419TUG2", "424B21", "", None, "0971 2GX5"):
+        assert not valid_cusip(bad), bad
+
+
+def test_cusip_with_bad_check_digit_is_flagged_invalid_format():
+    import json, os
+    from field_spec import load_spec
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = load_spec(os.path.join(here, "field_specs", "424b2_structured_note.json"))
+    f = spec.field("cusip")
+    assert f.format == "cusip"
+    codes = [fl.code for fl in spec._check_value(f, "09712GX59")]
+    assert "invalid_format" in codes
+    assert [fl.code for fl in spec._check_value(f, "09712GX58")] == []
+
+
+def test_spec_anchors_cover_threshold_and_securities_wording():
+    import os
+    from field_spec import load_spec
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = load_spec(os.path.join(here, "field_specs", "424b2_structured_note.json"))
+    assert "Threshold Price:" in spec.field("barrier_pct").anchors
+    assert "Downside Threshold Value" in spec.field("barrier_pct").anchors
+    assert "Coupon Threshold Price:" in spec.field("coupon_barrier_pct").anchors
+    assert "estimated value of the Securities" in spec.field("estimated_value_per_1000").anchors
+    assert "never the 100%" in spec.field("barrier_pct").description

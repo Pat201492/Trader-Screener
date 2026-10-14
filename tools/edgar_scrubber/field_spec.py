@@ -37,6 +37,32 @@ class SpecError(ValueError):
 
 # ── Field definition ────────────────────────────────────────────────────────
 
+def valid_cusip(value):
+    """True for a 9-character CUSIP whose 9th character is the correct check
+    digit (the standard modulus-10 "double-add-double" over the first eight)."""
+    s = (value or "").strip().upper()
+    if len(s) != 9 or not s[8].isdigit():
+        return False
+    total = 0
+    for i, ch in enumerate(s[:8]):
+        if ch.isdigit():
+            v = int(ch)
+        elif "A" <= ch <= "Z":
+            v = ord(ch) - ord("A") + 10
+        elif ch == "*":
+            v = 36
+        elif ch == "@":
+            v = 37
+        elif ch == "#":
+            v = 38
+        else:
+            return False
+        if i % 2 == 1:
+            v *= 2
+        total += v // 10 + v % 10
+    return (10 - total % 10) % 10 == int(s[8])
+
+
 @dataclass(frozen=True)
 class FieldDefinition:
     """One field from a spec's `fields[]`. Thin typed view over the JSON entry;
@@ -68,6 +94,10 @@ class FieldDefinition:
     # `required` when another record value (usually filing_stage) equals
     # `equals`. See FieldSpec._required_waived / validate_record.
     required_unless: dict = None
+    # A checkable shape for a string field. "cusip": 9 characters with a valid
+    # CUSIP check digit. A failure is flagged `invalid_format` and the runner
+    # withholds the value, as it does for out_of_bounds.
+    format: str = None
     raw: dict = _dc_field(default_factory=dict, repr=False)
 
     @classmethod
@@ -88,6 +118,7 @@ class FieldDefinition:
             description=d.get("description", ""),
             note=d.get("note", ""),
             required_unless=d.get("required_unless"),
+            format=d.get("format"),
             raw=d,
         )
 
@@ -367,6 +398,12 @@ class FieldSpec:
             if not isinstance(val, str):
                 flags.append(Flag(f.name, "type_mismatch", "warn",
                                   f"{f.name} expected string, got {type(val).__name__}"))
+            elif f.format == "cusip" and val and not valid_cusip(val):
+                # Measured 2026-10-13: the model returned "424B21000" (built from
+                # the form type) for a BofA note whose CUSIP is 09712GX58. Nine
+                # alphanumerics passes a length check; the check digit does not.
+                flags.append(Flag(f.name, "invalid_format", "warn",
+                                  f"{f.name}={val!r} is not a valid CUSIP (check digit fails)"))
 
         # bounds — only meaningful for numerics that passed the type check.
         if f.bounds and _is_number(val):

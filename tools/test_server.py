@@ -1567,6 +1567,23 @@ finally:
         os.environ["EDGAR_USER_AGENT"] = _cprev_ua
 
 # --------------------------------------------------------------------------- #
+section("CUSIP is a literal code: withheld when invalid or not in the filing")
+# --------------------------------------------------------------------------- #
+from field_spec import load_spec as _load_spec
+_spec424 = _load_spec(server.SCRUBBER / "field_specs" / "424b2_structured_note.json")
+_fcusip = _spec424.field("cusip")
+_v, _wf = server.withhold_unsupported_value(_fcusip, "424B21000", None, ["span_unlocatable"])
+check("a CUSIP not found in the filing is withheld (the live '424B21000' case)",
+      _v is None and _wf and _wf["code"] == "value_withheld_not_in_document")
+_v, _wf = server.withhold_unsupported_value(_fcusip, "09712GX59", (10, 19), ["invalid_format"])
+check("a CUSIP failing its check digit is withheld",
+      _v is None and _wf and _wf["code"] == "value_withheld_invalid_format")
+_v, _wf = server.withhold_unsupported_value(_fcusip, "09712GX58", (10, 19), [])
+check("a valid CUSIP that appears in the filing is kept", _v == "09712GX58" and _wf is None)
+_v, _wf = server.withhold_unsupported_value(_spec424.field("issuer"), "Some Issuer", None, ["span_unlocatable"])
+check("a plain string field is not withheld just for being unlocatable", _v == "Some Issuer" and _wf is None)
+
+# --------------------------------------------------------------------------- #
 section("Start local model button: bring Ollama up, load the model")
 # --------------------------------------------------------------------------- #
 _ms_base, _ms_model = server._ollama_base_and_model()
