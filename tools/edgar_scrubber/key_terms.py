@@ -48,7 +48,7 @@ _MAX_VALUE = 700
 # starting "hypothetical" belongs to an illustration table and never matches.
 FIELD_LABELS = {
     "cusip": ("cusip", "cusip / isin", "cusip/isin", "cusip number", "cusip no."),
-    "issuer": ("issuer",),
+    "issuer": ("issuer", "company (issuer)", "issuer (company)"),
     "maturity_date": ("maturity date", "stated maturity date"),
     "pricing_date": ("pricing date", "trade date"),
     "issue_date": ("issue date", "original issue date", "settlement date"),
@@ -95,10 +95,12 @@ def _committed(text, start, end):
 _MONTHS = ("January|February|March|April|May|June|July|August|September|"
            "October|November|December")
 _DATE_RE = re.compile(rf"\b({_MONTHS})\s+(\d{{1,2}}),\s*(\d{{4}})\b")
+# "of the / its / their starting price": HSBC and Citi write "each of which is
+# 60% of its starting price" (blind set 2, 2026-10-16).
+_OF_START = r"of\s+(?:(?:the|its|their|each)\s+)?(?:starting|initial|strike)"
 _PCT_OF_INITIAL_RE = re.compile(
-    r"(?:equal to|is|equals|of)\s*(\d{1,3}(?:\.\d+)?)\s?%\s*of\s+(?:the\s+)?"
-    r"(?:starting|initial|strike)", re.I)
-_PCT_LEAD_RE = re.compile(r"^\s*(\d{1,3}(?:\.\d+)?)\s?%\s*of\s+(?:the\s+)?(?:starting|initial|strike)", re.I)
+    rf"(?:equal to|is|equals|of|\()\s*(\d{{1,3}}(?:\.\d+)?)\s?%\s*{_OF_START}", re.I)
+_PCT_LEAD_RE = re.compile(rf"^\s*(\d{{1,3}}(?:\.\d+)?)\s?%\s*{_OF_START}", re.I)
 _RATE_RE = re.compile(r"(\d{1,2}(?:\.\d+)?)\s?%\s*per\s+annum", re.I)
 _CUSIP_RE = re.compile(r"\b([0-9A-Z]{9})\b")
 _EST_VALUE_RE = re.compile(
@@ -132,9 +134,23 @@ def normalize_label(label):
     return s
 
 
+# Some issuers print "Label: value" with ONE colon (Toronto-Dominion,
+# 2026-10-16). Used only when a filing has almost no "::" labels, and a
+# single-colon label must start a line or follow a sentence end -- so prose
+# like "the following: ..." mid-sentence can never become a label.
+_LABEL1_RE = re.compile(
+    rf"(?:(?<=\n)|(?<=\. )|^)({_W_FIRST}(?:[ \t]+{_W_NEXT}){{0,9}})[\d*]*:(?!:)\s", re.M)
+
+
 def parse_terms(text):
-    """Every `Label:: value` run in the text, in document order."""
+    """Every `Label:: value` run in the text, in document order (or every
+    `Label: value` run in a filing that does not use "::")."""
     hits = list(_LABEL_RE.finditer(text))
+    if len(hits) < 5:
+        # Use whichever style the filing actually uses more.
+        single = list(_LABEL1_RE.finditer(text))
+        if len(single) > len(hits):
+            hits = single
     terms = []
     for i, m in enumerate(hits):
         start = m.end()
@@ -180,7 +196,9 @@ def _parse_for(field, term):
                 return m.group(1), m.group(1), _span_of(term, m)
         return None
     if field == "issuer":
-        name = re.split(r"\s*(?:\(|;|\.\s|\.$|,\s+a\s|,\s+an\s)", v, maxsplit=1)[0].strip()
+        # A line break ends the name too: RBC's value ran on into the next line
+        # ("Royal Bank of Canada\nThe common stock of Amazon...").
+        name = re.split(r"\s*(?:\n|\(|;|\.\s|\.$|,\s+a\s|,\s+an\s)", v, maxsplit=1)[0].strip()
         if 2 <= len(name) <= 120 and not re.search(r"\d{4}", name):
             return name, name, (term.value_start, term.value_start + len(name))
         return None
@@ -194,9 +212,18 @@ def _parse_for(field, term):
         m = _RATE_RE.search(v[:200])
         return (float(m.group(1)), m.group(1), _span_of(term, m, 1)) if m else None
     if field in ("coupon_barrier_pct", "barrier_pct"):
-        m = _PCT_OF_INITIAL_RE.search(v[:300]) or _PCT_LEAD_RE.search(v[:300])
-        if not m:
+        # A note on several underlyings states one threshold per underlying
+        # ("With respect to X: ... 75% of its starting value. With respect to
+        # Y: ..."). One number is only THE threshold when every one of them
+        # agrees; if they differ the field is per-underlying -- leave it.
+        found = list(_PCT_OF_INITIAL_RE.finditer(v[:700])) or \
+            [m for m in [_PCT_LEAD_RE.search(v[:300])] if m]
+        if not found:
             return None
+        pcts = {float(m.group(1)) for m in found}
+        if len(pcts) != 1:
+            return None
+        m = found[0]
         pct = float(m.group(1))
         return (pct, m.group(1), _span_of(term, m, 1)) if 0 < pct <= 100 else None
     return None
@@ -206,10 +233,14 @@ def _table_threshold(text, header):
     """Wells Fargo prints thresholds in a small table: a header like
     "Coupon Threshold Value(2)" and the percent in footnote "(2) 50% of the
     starting value". Read the percent from the footnote the header points at."""
-    m = re.search(re.escape(header) + r"\s*\((\d)\)", text, re.I)
+    # Footnote markers are digits (Wells Fargo "(2)") or letters (RBC "(b)").
+    m = re.search(re.escape(header) + r"\s*\(([a-z\d])\)", text, re.I)
     if not m:
         return None
-    fn = re.search(r"\(" + m.group(1) + r"\)\s*(\d{1,3}(?:\.\d+)?)\s?%\s*of\s+the\s+(?:starting|initial)",
+    # RBC puts a lead-in before the figure: "(b) With respect to each
+    # Underlying Stock, 60% of its starting value".
+    fn = re.search(r"\(" + re.escape(m.group(1)) + r"\)\s*(?:[^%()\n]{0,80}?,\s*)?"
+                   r"(\d{1,3}(?:\.\d+)?)\s?%\s*" + _OF_START,
                    text[m.end():m.end() + 3000], re.I)
     if not fn:
         return None

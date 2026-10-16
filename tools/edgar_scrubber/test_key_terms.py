@@ -110,6 +110,53 @@ def test_cusip_needs_a_valid_check_digit():
     assert "cusip" not in extract_key_terms("CUSIP:: 46661PVZ8")
 
 
+def test_its_starting_price_and_two_stocks_with_the_same_threshold():
+    # HSBC 0001104659-26-113364: one figure for two stocks, "of its starting price".
+    t = ("Coupon Threshold Price:: $203.736 with respect to SNOW and $80.406 with respect to NOW, "
+         "each of which is 60% of its starting price. Downside Threshold Price:: $203.736 with "
+         "respect to SNOW and $80.406 with respect to NOW, each of which is 60% of its starting price.")
+    got = extract_key_terms(t)
+    assert got["coupon_barrier_pct"].value == 60.0 and got["barrier_pct"].value == 60.0
+
+
+def test_underlyings_with_different_thresholds_are_left_to_the_model():
+    t = ("Downside Threshold Value:: With respect to ABC: $ , which is equal to 70% of its starting "
+         "value. With respect to XYZ: $ , which is equal to 60% of its starting value.")
+    assert "barrier_pct" not in extract_key_terms(t)
+
+
+def test_letter_footnotes_with_a_lead_in_and_different_levels():
+    # RBC 0000950103-26-015242: "(b)"/"(c)" footnotes and a lead-in phrase;
+    # the coupon (60%) and downside (50%) thresholds differ.
+    t = ("Ticker Symbol Starting Value(a) Coupon Threshold Value(b) Downside Threshold Value(c) "
+         "AMZN UW $ $ $ (a) the closing value on the pricing date (b) With respect to each "
+         "Underlying Stock, 60% of its starting value (c) With respect to each Underlying Stock, "
+         "50% of its starting value")
+    got = extract_key_terms(t)
+    assert got["coupon_barrier_pct"].value == 60.0
+    assert got["barrier_pct"].value == 50.0
+
+
+def test_single_colon_terms_when_a_filing_has_no_double_colons():
+    # Toronto-Dominion 0001140361-26-039351 prints "Label: value".
+    t = ("Issuer: The Toronto-Dominion Bank (the “Bank”).\nCUSIP: 89115NL77\n"
+         "Maturity Date*: October 18, 2029, subject to postponement.\n"
+         "Downside Threshold Price: With respect to each stock, $ , which is equal to 60% of "
+         "its starting price.\nAgent: TD Securities (USA) LLC.\n")
+    got = extract_key_terms(t)
+    assert got["issuer"].value == "The Toronto-Dominion Bank"
+    assert got["cusip"].value == "89115NL77"
+    assert got["maturity_date"].value == "2029-10-18"
+    assert got["barrier_pct"].value == 60.0
+
+
+def test_company_issuer_label_and_issuer_stops_at_a_line_break():
+    assert extract_key_terms("Company (Issuer):: GS Finance Corp.")["issuer"].value == "GS Finance Corp"
+    # RBC: the value ran on into the next line.
+    t = "Issuer:: Royal Bank of Canada\nThe common stock of Amazon.com, Inc."
+    assert extract_key_terms(t)["issuer"].value == "Royal Bank of Canada"
+
+
 def test_nothing_readable_means_nothing_returned():
     assert extract_key_terms("This document has no term lines at all.") == {}
 
