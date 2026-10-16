@@ -621,6 +621,15 @@ def scrubber_run(run_id, targets, fields, home, self_consistency=1,
                             provenance=f"terms:{kt.method}:{kt.label}", confidence=1.0,
                             unit=getattr(spec.field(name), "unit", None),
                             flags=[f.as_dict() for f in spec.check_value(name, kt.value, ex107)])
+                        if getattr(kt, "bound", None) == "min":
+                            # A preliminary filing's "at least 13.50% per
+                            # annum": the floor, not the final figure.
+                            p.flags.append({
+                                "field": name, "code": "preliminary_minimum",
+                                "severity": "info",
+                                "message": "the filing states only a minimum (\"at least "
+                                           f"{kt.raw}\"); the final figure is set on the "
+                                           "pricing date and may be higher"})
                     else:
                         # One field at a time through LadderExtractor so the stored
                         # span is in ORIGINAL document coordinates (it resolves the
