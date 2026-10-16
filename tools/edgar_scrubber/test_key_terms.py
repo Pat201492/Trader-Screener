@@ -45,14 +45,15 @@ def test_a_lone_call_threshold_never_becomes_the_barrier():
     assert "barrier_pct" not in extract_key_terms(t)
 
 
-def test_floor_rate_and_estimated_value_range_are_left_to_the_model():
-    # Preliminary supplements: a floor and a range are not the value.
+def test_floor_rate_is_a_minimum_and_a_range_is_never_the_value():
+    # Preliminary supplements: a floor and a range are not the final value.
     t = ("Contingent Coupon Rate:: The contingent coupon rate will be determined on the pricing "
          "date and will be at least 13.50% per annum. "
          "the estimated value of the securities as determined by the Bank would be between "
          "$934.09 (93.409%) and $964.09 (96.409%) per security.")
     got = extract_key_terms(t)
-    assert "contingent_coupon_rate" not in got
+    assert got["contingent_coupon_rate"].bound == "min"
+    # No cover legend in this snippet, so the range is not read as preliminary.
     assert "estimated_value_per_1000" not in got
 
 
@@ -155,6 +156,63 @@ def test_company_issuer_label_and_issuer_stops_at_a_line_break():
     # RBC: the value ran on into the next line.
     t = "Issuer:: Royal Bank of Canada\nThe common stock of Amazon.com, Inc."
     assert extract_key_terms(t)["issuer"].value == "Royal Bank of Canada"
+
+
+def test_glued_label_words_and_footnote_star():
+    # Goldman Sachs 0001193125-26-415340: "Stated MaturityDate*::".
+    t = "Stated MaturityDate*:: October 12, 2029, subject to postponement. Agent:: GS&Co."
+    assert extract_key_terms(t)["maturity_date"].value == "2029-10-12"
+
+
+def test_preliminary_rate_floor_is_reported_as_a_minimum():
+    t = ("PRELIMINARY PRICING SUPPLEMENT Subject to Completion\n"
+         "Contingent Coupon Rate:: The “contingent coupon rate” will be determined on the "
+         "pricing date and will be at least 13.50% per annum. Agent:: X.")
+    got = extract_key_terms(t)["contingent_coupon_rate"]
+    assert (got.value, got.bound) == (13.5, "min")
+    # Committed figures carry no bound.
+    final = extract_key_terms("Contingent Coupon Rate:: 19.10% per annum. Agent:: X.")
+    assert final["contingent_coupon_rate"].bound is None
+
+
+def test_rate_stated_only_inside_the_coupon_term():
+    # Goldman: no rate line; the coupon term states it in parentheses.
+    t = ("Contingent Coupon Payment:: you will receive a contingent coupon payment equal to at "
+         "least $19 (equivalent to a contingent coupon rate of at least 22.8% per annum) "
+         "(set on the trade date). Agent:: X.")
+    got = extract_key_terms(t)["contingent_coupon_rate"]
+    assert (got.value, got.bound) == (22.8, "min")
+
+
+def test_preliminary_estimated_value_range_and_stage():
+    t = ("Preliminary Pricing Supplement Subject To Completion. The initial estimated value of "
+         "the Securities as of the Pricing Date is expected to be between $920.00 and $970.00 "
+         "per Security.")
+    got = extract_key_terms(t)
+    assert got["filing_stage"].value == "preliminary"
+    assert got["estimated_value_low"].value == 920.0
+    assert got["estimated_value_high"].value == 970.0
+    # No point value exists yet: an explicit null, evidenced by the range.
+    ev = got["estimated_value_per_1000"]
+    assert ev.value is None and ev.raw == "920.00 and $970.00"
+
+
+def test_preliminary_figure_as_of_today_is_not_the_estimated_value():
+    # BMO 0001214659-26-012265: a figure today, a floor at pricing.
+    t = ("Subject To Completion. On the date of this preliminary pricing supplement, the "
+         "estimated initial value of the securities is $973.00 per security. The estimated "
+         "initial value of the securities at pricing may differ from this value but will not "
+         "be less than $925.00 per security.")
+    got = extract_key_terms(t)
+    assert got["estimated_value_per_1000"].value is None
+    assert got["estimated_value_low"].value == 925.0
+    assert "estimated_value_high" not in got
+
+
+def test_final_stage_needs_a_committed_estimate():
+    t = "The estimated value of the Securities as of the Pricing Date is $962.80 per Security."
+    assert extract_key_terms(t)["filing_stage"].value == "final"
+    assert "filing_stage" not in extract_key_terms("CUSIP:: 09712GX58 Agent:: X.")
 
 
 def test_nothing_readable_means_nothing_returned():
