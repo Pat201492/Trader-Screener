@@ -41,10 +41,11 @@ from datetime import datetime
 # "Maturity Date*") are allowed and stripped when the label is normalized.
 # A capitalised word may have a second one glued on with no space: Goldman
 # Sachs prints "Stated MaturityDate*::" (blind set 2, 2026-10-16).
-_W_CAP = r"[A-Z][a-z'’\-]+(?:[A-Z][a-z'’\-]+)?"
+_W_CAP = r"[A-Z][a-z'’\-]+(?:[A-Z][a-z'’\-]+)?(?:/[A-Z][a-z'’\-]+)?"
 _W_FIRST = rf"(?:{_W_CAP}|[A-Z]{{2,6}}(?![A-Za-z0-9]))"
 _W_NEXT = rf"(?:{_W_CAP}|[A-Z]{{2,6}}(?![A-Za-z0-9])|[a-z][a-z'’\-]*|/|&|\([^()]{{1,60}}\))"
-_LABEL_RE = re.compile(rf"({_W_FIRST}(?:[ \t]+{_W_NEXT}){{0,9}})[\d*]*\s*::")
+_FOOTNOTE = r"[\d*†‡§]*(?:,\s?\d+)*"
+_LABEL_RE = re.compile(rf"({_W_FIRST}(?:[ \t]+{_W_NEXT}){{0,9}}){_FOOTNOTE}\s*::")
 _MAX_VALUE = 700
 
 # Spec field -> normalized labels that state it, in preference order. A label
@@ -59,15 +60,18 @@ FIELD_LABELS = {
                                "coupon rate", "interest rate"),
     "coupon_barrier_pct": ("coupon barrier", "coupon barrier level", "coupon threshold price",
                            "coupon threshold value", "coupon threshold level",
-                           "interest barrier", "interest threshold", "coupon trigger"),
+                           "interest barrier", "interest threshold", "coupon trigger",
+                           # JPMorgan: one level for both coupon and downside.
+                           "interest barrier / trigger level", "interest barrier / trigger value"),
     # Specific before generic: a note with both a "Call Threshold Price" (the
     # autocall level) and a "Downside Threshold Price" must read the downside
     # one. Held-out BNS 0001839882-26-045355 returned the 95% call level here.
     "barrier_pct": ("downside threshold price", "downside threshold value",
                     "downside threshold level", "downside threshold", "threshold price",
                     "threshold value", "threshold level", "barrier", "barrier level",
-                    "barrier price", "trigger level", "trigger value", "trigger price",
-                    "knock-in level"),
+                    "barrier price", "barrier amount", "trigger level", "trigger value",
+                    "trigger price", "knock-in level",
+                    "interest barrier / trigger level", "interest barrier / trigger value"),
 }
 
 # A label with one of these words in front of a generic phrase is a DIFFERENT
@@ -114,7 +118,7 @@ _DATE_RE = re.compile(rf"\b({_MONTHS})\s+(\d{{1,2}}),\s*(\d{{4}})\b")
 # 60% of its starting price" (blind set 2, 2026-10-16).
 _OF_START = r"of\s+(?:(?:the|its|their|each)\s+)?(?:starting|initial|strike)"
 _PCT_OF_INITIAL_RE = re.compile(
-    rf"(?:equal to|is|equals|of|\()\s*(\d{{1,3}}(?:\.\d+)?)\s?%\s*{_OF_START}", re.I)
+    rf"(?:equal to|is|equals|of|represents|\(|,)\s*(\d{{1,3}}(?:\.\d+)?)\s?%\s*{_OF_START}", re.I)
 _PCT_LEAD_RE = re.compile(rf"^\s*(\d{{1,3}}(?:\.\d+)?)\s?%\s*{_OF_START}", re.I)
 _RATE_RE = re.compile(r"(\d{1,2}(?:\.\d+)?)\s?%\s*per\s+annum", re.I)
 _CUSIP_RE = re.compile(r"\b([0-9A-Z]{9})\b")
@@ -122,7 +126,8 @@ _CUSIP_RE = re.compile(r"\b([0-9A-Z]{9})\b")
 # payment equal to at least $19 (equivalent to a contingent coupon rate of at
 # least 22.8% per annum)".
 _RATE_PROSE_RE = re.compile(
-    r"contingent (?:coupon|interest) rate of\s+(?:at least\s+)?(\d{1,2}(?:\.\d+)?)\s?%\s*per\s+annum",
+    r"(?:contingent (?:coupon|interest) rate of\s+(?:at least\s+|approximately\s+)?|\()"
+    r"(\d{1,2}(?:\.\d+)?)\s?%\s*per\s+annum",
     re.I)
 # Preliminary: "expected to be between $920.00 and $970.00" (BNS adds the
 # percent: "$934.09 (93.409%) and $964.09"), or only a floor: Citi "at least
@@ -164,7 +169,8 @@ class KeyTermValue:
 def normalize_label(label):
     s = re.sub(r"([a-z])([A-Z])", r"\1 \2", label.strip())   # "MaturityDate"
     s = s.lower().replace("’", "'")
-    s = re.sub(r"[\d*]+$", "", s).strip()      # footnote markers: "date1", "date*"
+    s = re.sub(r"\s*/\s*", " / ", s)                      # "barrier/trigger"
+    s = re.sub(r"[\d*†‡§,\s]+$", "", s).strip()   # footnotes: "date1", "date*", "date1, 2"
     s = re.sub(r"\s+", " ", s)
     return s
 
@@ -174,18 +180,37 @@ def normalize_label(label):
 # single-colon label must start a line or follow a sentence end -- so prose
 # like "the following: ..." mid-sentence can never become a label.
 _LABEL1_RE = re.compile(
-    rf"(?:(?<=\n)|(?<=\. )|^)({_W_FIRST}(?:[ \t]+{_W_NEXT}){{0,9}})[\d*]*:(?!:)\s", re.M)
+    rf"(?:(?<=\n)|(?<=\. )|(?<=[●•▪■◼])|(?<=[●•▪■◼] )|^)({_W_FIRST}(?:[ \t]+{_W_NEXT}){{0,9}}){_FOOTNOTE}:(?!:)\s", re.M)
+
+
+_KNOWN1_RE = None
+
+
+def _known_single(text):
+    global _KNOWN1_RE
+    if _KNOWN1_RE is None:
+        labs = sorted({l for ls in FIELD_LABELS.values() for l in ls}, key=len, reverse=True)
+        alt = "|".join(re.escape(l).replace(r"\ /\ ", r"\s*/\s*").replace(r"\ ", r"\s+")
+                       for l in labs)
+        # Capitalised, as a term line prints it: prose says "less than its
+        # downside threshold price: $1,000" (Toronto-Dominion) mid-sentence.
+        _KNOWN1_RE = re.compile(rf"(?<![\w’'/])(?=[A-Z])((?i:{alt})){_FOOTNOTE}:(?!:)\s")
+    return list(_KNOWN1_RE.finditer(text))
 
 
 def parse_terms(text):
     """Every `Label:: value` run in the text, in document order (or every
     `Label: value` run in a filing that does not use "::")."""
     hits = list(_LABEL_RE.finditer(text))
-    if len(hits) < 5:
-        # Use whichever style the filing actually uses more.
-        single = list(_LABEL1_RE.finditer(text))
-        if len(single) > len(hits):
-            hits = single
+    single = list(_LABEL1_RE.finditer(text))
+    # A filing that mostly writes "Label: value" gets both styles, in document
+    # order -- so a single-colon block's values still end at the next label.
+    # JPMorgan 0001918704-26-009603: 5 "::" labels (a nested Review Date list)
+    # and 52 single-colon ones; reading only the "::" lost its whole terms block.
+    if len(single) > len(hits):
+        seen = {m.end() for m in single} | {m.end() for m in hits}
+        extra = [m for m in _known_single(text) if m.end() not in seen]
+        hits = sorted(hits + single + extra, key=lambda m: m.start())
     terms = []
     for i, m in enumerate(hits):
         start = m.end()
@@ -268,13 +293,17 @@ def _table_threshold(text, header):
     """Wells Fargo prints thresholds in a small table: a header like
     "Coupon Threshold Value(2)" and the percent in footnote "(2) 50% of the
     starting value". Read the percent from the footnote the header points at."""
-    # Footnote markers are digits (Wells Fargo "(2)") or letters (RBC "(b)").
-    m = re.search(re.escape(header) + r"\s*\(([a-z\d])\)", text, re.I)
+    # Footnote markers are digits (Wells Fargo "(2)"), letters (RBC "(b)") or
+    # stars (Citi "Downside threshold price**" ... "** For each of the
+    # underlying shares, 50.00% of its initial share price").
+    m = re.search(re.escape(header) + r"\s*(?:\(([a-z\d])\)|(?<![*])(\*{1,3})(?![*]))", text, re.I)
     if not m:
         return None
+    marker = (r"\(" + re.escape(m.group(1)) + r"\)" if m.group(1)
+              else r"(?<![*])" + re.escape(m.group(2)) + r"(?![*])")
     # RBC puts a lead-in before the figure: "(b) With respect to each
     # Underlying Stock, 60% of its starting value".
-    fn = re.search(r"\(" + re.escape(m.group(1)) + r"\)\s*(?:[^%()\n]{0,80}?,\s*)?"
+    fn = re.search(marker + r"\s*(?:[^%()\n]{0,80}?,\s*)?"
                    r"(\d{1,3}(?:\.\d+)?)\s?%\s*" + _OF_START,
                    text[m.end():m.end() + 3000], re.I)
     if not fn:
@@ -330,7 +359,9 @@ def extract_key_terms(text, fields=None):
                 if m:
                     s, e = _span_of(t, m)
                     floor = _floor(text, s, e)
-                    if floor or _committed(text, s, e):
+                    rounded = re.search(r"equivalent to a contingent (?:coupon|interest) rate of "
+                                        r"approximately\s*$", text[max(0, s - 80):s], re.I)
+                    if floor or rounded or _committed(text, s, e):
                         out["contingent_coupon_rate"] = KeyTermValue(
                             "contingent_coupon_rate", float(m.group(1)), m.group(1), (s, e),
                             t.raw_label, "term-prose", "min" if floor else None)
@@ -338,7 +369,12 @@ def extract_key_terms(text, fields=None):
 
     # Thresholds in a table with footnoted percents (Wells Fargo).
     for field, header in (("coupon_barrier_pct", "Coupon Threshold Value"),
-                          ("barrier_pct", "Downside Threshold Value")):
+                          ("barrier_pct", "Downside Threshold Value"),
+                          ("barrier_pct", "Downside Threshold Price"),
+                          # Citi index notes: "Coupon barrier value** Final
+                          # barrier value***" over a per-index table.
+                          ("coupon_barrier_pct", "Coupon Barrier Value"),
+                          ("barrier_pct", "Final Barrier Value")):
         if field in wanted and field not in out:
             got = _table_threshold(text, header)
             if got:
@@ -352,10 +388,11 @@ def extract_key_terms(text, fields=None):
         bar = out["barrier_pct"]
         bar_words = normalize_label(bar.label)
         for t in terms:
-            if t.label.startswith("contingent coupon payment") or t.label.startswith("contingent interest payment"):
-                if bar_words and bar_words in t.value.lower():
-                    out["coupon_barrier_pct"] = KeyTermValue(
-                        "coupon_barrier_pct", bar.value, bar.raw, bar.span, bar.label, "term-shared")
+            if (t.label.startswith(("contingent coupon", "contingent interest"))
+                    and not t.label.endswith(("rate", "dates", "date"))
+                    and bar_words and bar_words in t.value.lower()):
+                out["coupon_barrier_pct"] = KeyTermValue(
+                    "coupon_barrier_pct", bar.value, bar.raw, bar.span, bar.label, "term-shared")
                 break
 
     preliminary = bool(_PRELIM_RE.search(text[:2000]))

@@ -215,6 +215,81 @@ def test_final_stage_needs_a_committed_estimate():
     assert "filing_stage" not in extract_key_terms("CUSIP:: 09712GX58 Agent:: X.")
 
 
+# --- Scale test on the 114 stored filings (2026-10-18) ----------------------
+
+def test_jpmorgan_run_on_single_colon_block():
+    # 0001918704-26-0096xx: "Label: value" with no line breaks, a bullet before
+    # CUSIP, a slash with no spaces, and a stray nested "::" line (the real
+    # filing has 5 of those against 52 single-colon labels).
+    t = ("●CUSIP: 46660RS47\n\nKey Terms Issuer: JPMorgan Chase Financial Company LLC, a direct, "
+         "wholly owned finance subsidiary of JPMorgan Chase & Co. Guarantor: JPMorgan Chase & Co. "
+         "Contingent Interest Rate: 15.00% per annum, payable at a rate of 1.25% per month "
+         "Interest Barrier/Trigger Value: 70.00% of the Initial Value, which is 2,456.251 "
+         "Pricing Date: April 7, 2026 Original Issue Date (Settlement Date): On or about April 10, "
+         "2026 Review Date*: April 8, 2027 Maturity Date*: April 12, 2029 * Subject to postponement\n"
+         "●first Review Date:: 12.20% × $1,000\n")
+    got = extract_key_terms(t)
+    assert got["cusip"].value == "46660RS47"
+    assert got["issuer"].value == "JPMorgan Chase Financial Company LLC"
+    assert got["contingent_coupon_rate"].value == 15.0
+    assert got["coupon_barrier_pct"].value == 70.0 and got["barrier_pct"].value == 70.0
+    assert got["maturity_date"].value == "2029-04-12"
+
+
+def test_footnote_dagger_and_numbered_footnotes():
+    assert extract_key_terms("Maturity Date†:: April 9, 2026 † Subject to postponement. "
+                             "Agent:: X")["maturity_date"].value == "2026-04-09"
+    assert extract_key_terms("Stated Maturity Date1, 2:: January 27, 2028 Principal Amount:: "
+                             "$1,000")["maturity_date"].value == "2028-01-27"
+
+
+def test_jpmorgan_represents_and_separate_interest_barrier():
+    t = "Interest Barrier / Trigger Level:: An amount that represents 70.00% of the Initial Stock Price"
+    assert extract_key_terms(t)["barrier_pct"].value == 70.0
+    t = ("Interest Barrier: 70.00% of the Initial Value\nTrigger Value: 60.00% of the Initial Value\n"
+         "Pricing Date: April 15, 2026\nIssuer: X\nAgent: Y\nCUSIP: 46660RS47\n")
+    got = extract_key_terms(t)
+    assert got["coupon_barrier_pct"].value == 70.0 and got["barrier_pct"].value == 60.0
+
+
+def test_citi_comma_lead_in_and_rate_in_parentheses():
+    t = ("Maturity date:: Unless earlier automatically redeemed, August 31, 2028 "
+         "Contingent coupon:: the securities will pay a contingent coupon equal to 4.075% of the "
+         "stated principal amount of the securities (16.30% per annum) if and only if the closing "
+         "price of the underlying shares is greater than or equal to the downside threshold price. "
+         "Downside threshold price:: $45.012, 60.00% of the initial share price Listing:: none")
+    got = extract_key_terms(t)
+    assert got["contingent_coupon_rate"].value == 16.3      # not the quarterly 4.075
+    assert got["barrier_pct"].value == 60.0
+    assert got["coupon_barrier_pct"].value == 60.0          # the coupon uses the same threshold
+
+
+def test_citi_rounded_annual_rate_is_committed():
+    t = ("Contingent coupon:: the securities will pay a contingent coupon equal to 0.8542% of the "
+         "stated principal amount (equivalent to a contingent coupon rate of approximately 10.25% "
+         "per annum) if and only if ... Listing:: none")
+    got = extract_key_terms(t)["contingent_coupon_rate"]
+    assert (got.value, got.bound) == (10.25, None)
+
+
+def test_citi_star_footnote_table():
+    t = ("Underlyings:: Underlying Initial underlying value* Coupon barrier value** Final barrier "
+         "value*** Dow Jones Industrial Average Nasdaq-100 Index *For each underlying, its closing "
+         "value on the pricing date **For each underlying, 70.00% of its initial underlying value "
+         "***For each underlying, 55.00% of its initial underlying value\nStated principal amount:: $1,000")
+    got = extract_key_terms(t)
+    assert got["coupon_barrier_pct"].value == 70.0
+    assert got["barrier_pct"].value == 55.0
+
+
+def test_prose_with_a_colon_is_not_a_label():
+    # Toronto-Dominion: "...is less than its downside threshold price: $1,000" mid-sentence.
+    t = ("Issuer: TD\nCUSIP: 89115NL77\nAgent: TD\nMaturity Date: October 18, 2029\n"
+         "Payment: if the ending price is greater than or equal to its downside threshold price: "
+         "$1,000; or if less\nDownside Threshold Price: $ , which is equal to 60% of its starting price.\n")
+    assert extract_key_terms(t)["barrier_pct"].value == 60.0
+
+
 def test_nothing_readable_means_nothing_returned():
     assert extract_key_terms("This document has no term lines at all.") == {}
 
