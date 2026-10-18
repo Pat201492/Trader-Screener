@@ -290,6 +290,64 @@ def test_prose_with_a_colon_is_not_a_label():
     assert extract_key_terms(t)["barrier_pct"].value == 60.0
 
 
+# --- More fields off the term lines (2026-10-18) ---------------------------
+
+def test_guarantor_calculation_agent_isin_denomination():
+    t = ("Issuer:: JPMorgan Chase Financial Company LLC, a direct, wholly owned finance subsidiary "
+         "of JPMorgan Chase & Co.\nGuarantor:: JPMorgan Chase & Co.\n"
+         "Calculation Agent:: J.P. Morgan Securities LLC (“JPMS”)\n"
+         "CUSIP / ISIN:: 17334CV68 / US17334CV683\nDenominations:: $1,000 and any integral "
+         "multiple of $1,000.\nAgent:: X\n")
+    got = extract_key_terms(t)
+    assert got["guarantor"].value == "JPMorgan Chase & Co"
+    assert got["calculation_agent"].value == "J.P. Morgan Securities LLC"   # "J.P." is not a sentence end
+    assert got["isin"].value == "US17334CV683"
+    assert got["denomination"].value == 1000.0
+
+
+def test_isin_check_digit():
+    from key_terms import valid_isin
+    assert valid_isin("US0378331005") and not valid_isin("US0378331006")
+
+
+def test_citi_guarantee_sentence():
+    t = ("Guarantee:: All payments due on the securities are fully and unconditionally guaranteed "
+         "by Citigroup Inc.\nStated principal amount:: $1,000 per security\n")
+    got = extract_key_terms(t)
+    assert got["guarantor"].value == "Citigroup Inc"
+    assert got["denomination"].value == 1000.0
+
+
+def test_defined_abbreviation_resolves_to_the_entity():
+    # BofA: "Guarantor:: BAC." after "Bank of America Corporation (“BAC” or the “Guarantor”)".
+    t = ("issued by BofA Finance LLC (“BofA Finance”), and Bank of America Corporation (“BAC” or "
+         "the “Guarantor”).\nIssuer:: BofA Finance LLC.\nGuarantor:: BAC.\nAgent:: X\n")
+    got = extract_key_terms(t)
+    assert got["guarantor"].value == "Bank of America Corporation"
+    assert t[got["guarantor"].span[0]:got["guarantor"].span[1]] == "Bank of America Corporation"
+    # An abbreviation nothing defines is not reported.
+    assert "guarantor" not in extract_key_terms("Guarantor:: XYZ.\nAgent:: X\n")
+
+
+def test_coupon_frequency_from_dates_line_or_rate():
+    t = "Contingent Coupon Payment Dates:: Quarterly, on the third business day following each calculation day"
+    assert extract_key_terms(t)["coupon_frequency"].value == "quarterly"
+    t = ("Contingent Interest Rate: 11.55% per annum, payable at a rate of 0.9625% per month\n"
+         "Pricing Date: April 7, 2026\nIssuer: X\n")
+    assert extract_key_terms(t)["coupon_frequency"].value == "monthly"
+
+
+def test_autocall_level_buffer_and_leverage():
+    t = ("Call Value: With respect to each Index, 90.00% of its Initial Value\n"
+         "Buffer Amount: 20.00%\nPricing Date: April 7, 2026\nIssuer: X\n")
+    got = extract_key_terms(t)
+    assert got["autocall_barrier_pct"].value == 90.0
+    assert got["buffer_pct"].value == 20.0
+    assert "barrier_pct" not in got                 # a call level is never the downside barrier
+    t = "Downside Leverage Factor:: 1.42857 Automatic Call:: If ..."
+    assert extract_key_terms(t)["downside_leverage"].value == 1.42857
+
+
 def test_nothing_readable_means_nothing_returned():
     assert extract_key_terms("This document has no term lines at all.") == {}
 

@@ -52,6 +52,21 @@ _MAX_VALUE = 700
 # starting "hypothetical" belongs to an illustration table and never matches.
 FIELD_LABELS = {
     "cusip": ("cusip", "cusip / isin", "cusip/isin", "cusip number", "cusip no."),
+    "isin": ("isin", "cusip / isin", "cusip/isin"),
+    "guarantor": ("guarantor", "guarantee"),
+    "calculation_agent": ("calculation agent",),
+    # "$1,000 per security" / "$1,000 and any integral multiple of $1,000".
+    "denomination": ("denominations", "denomination", "minimum denominations",
+                     "stated principal amount", "principal amount", "face amount"),
+    "coupon_frequency": ("contingent coupon payment dates", "contingent interest payment dates",
+                         "coupon payment dates", "interest payment dates"),
+    # The autocall level. Never the downside barrier: "call threshold price" is
+    # kept out of barrier_pct by _QUALIFIERS, and lives here instead.
+    "autocall_barrier_pct": ("call threshold price", "call threshold value", "call threshold level",
+                             "call value", "call level", "call barrier", "autocall level",
+                             "autocall barrier", "redemption threshold"),
+    "buffer_pct": ("buffer amount", "buffer percentage", "buffer"),
+    "downside_leverage": ("downside leverage factor",),
     "issuer": ("issuer", "company (issuer)", "issuer (company)"),
     "maturity_date": ("maturity date", "stated maturity date"),
     "pricing_date": ("pricing date", "trade date"),
@@ -224,6 +239,26 @@ def parse_terms(text):
     return terms
 
 
+_ISIN_RE = re.compile(r"\b([A-Z]{2}[0-9A-Z]{9}\d)\b")
+_FREQ = {"monthly": "monthly", "quarterly": "quarterly", "semiannually": "semiannual",
+         "annually": "annual"}
+
+
+def valid_isin(value):
+    """12 characters, country prefix, Luhn check digit over the letters-as-numbers."""
+    s = (value or "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{2}[0-9A-Z]{9}\d", s):
+        return False
+    digits = "".join(str(int(c, 36)) for c in s[:-1])
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch)
+        if i % 2 == 0:
+            d *= 2
+        total += d // 10 + d % 10
+    return (10 - total % 10) % 10 == int(s[-1])
+
+
 def valid_cusip(value):
     """9 characters with a correct modulus-10 "double-add-double" check digit."""
     s = (value or "").strip().upper()
@@ -247,6 +282,32 @@ def _span_of(term, m, group=1):
     return (term.value_start + m.start(group), term.value_start + m.end(group))
 
 
+_NAME_END = re.compile(r"\s*(?:\n|\(|;|(?<![A-Z])\.\s|(?<![A-Z])\.$|,\s+a\s|,\s+an\s|,\s+which\s)")
+
+
+def _entity(term):
+    """A legal-entity name at the start of a term value."""
+    name = _NAME_END.split(term.value, maxsplit=1)[0].strip().rstrip(".")
+    if 2 <= len(name) <= 120 and not re.search(r"\d{4}", name):
+        return name, name, (term.value_start, term.value_start + len(name))
+    return None
+
+
+def _resolve_defined(text, kt):
+    """BofA writes "Guarantor:: BAC." after defining "Bank of America Corporation
+    (“BAC” or the “Guarantor”)" on the cover. A short all-caps name is a defined term: report the
+    entity it was defined as, with the definition's span."""
+    if not (kt and isinstance(kt.value, str) and re.fullmatch(r"[A-Z&]{2,6}", kt.value)):
+        return kt
+    # The defined name: a run of capitalised words ("Bank of America Corporation").
+    m = re.search(r"([A-Z][\w.&'’-]*(?:\s+(?:[A-Z][\w.&'’-]*|of|&|and)){0,7})\s*\((?:the\s+)?[“\"]" + re.escape(kt.value) + r"[”\"](?:\)|\s+or\s)", text)
+    if not m:
+        return None          # an unexplained abbreviation is not the legal name
+    name = m.group(1).strip().rstrip(",")
+    return KeyTermValue(kt.field, name, name, m.span(1)[0:1] + (m.start(1) + len(name),),
+                        kt.label, kt.method + "+defined")
+
+
 def _parse_for(field, term):
     """(value, raw, span) read from one term's value, or None if not certain."""
     v = term.value
@@ -258,10 +319,40 @@ def _parse_for(field, term):
     if field == "issuer":
         # A line break ends the name too: RBC's value ran on into the next line
         # ("Royal Bank of Canada\nThe common stock of Amazon...").
-        name = re.split(r"\s*(?:\n|\(|;|\.\s|\.$|,\s+a\s|,\s+an\s)", v, maxsplit=1)[0].strip()
-        if 2 <= len(name) <= 120 and not re.search(r"\d{4}", name):
-            return name, name, (term.value_start, term.value_start + len(name))
+        return _entity(term)
+    if field in ("guarantor", "calculation_agent"):
+        # Citi: "Guarantee:: All payments due on the securities are fully and
+        # unconditionally guaranteed by Citigroup Inc."
+        g = re.search(r"guaranteed by\s+(.{2,80}?)(?:\.\s|\.$|\n|,\s|$)", v[:300])
+        if field == "guarantor" and g:
+            name = g.group(1).strip()
+            s0 = term.value_start + g.start(1)
+            return name, name, (s0, s0 + len(name))
+        if v.lower().startswith(("all ", "the notes", "the securities")):
+            return None
+        return _entity(term)
+    if field == "isin":
+        for m in _ISIN_RE.finditer(v[:120]):
+            if valid_isin(m.group(1)):
+                return m.group(1), m.group(1), _span_of(term, m)
         return None
+    if field == "denomination":
+        m = re.match(r"\$\s?(\d{1,3}(?:,\d{3})*)(?:\.00)?\s+(?:per\b|and\b|\(|$)", v)
+        if not m:
+            return None
+        amt = float(m.group(1).replace(",", ""))
+        return (amt, m.group(1), _span_of(term, m)) if 1 <= amt <= 1_000_000 else None
+    if field == "coupon_frequency":
+        m = re.match(r"(monthly|quarterly|semi-?annually|annually)\b", v, re.I)
+        if not m:
+            return None
+        return _FREQ[m.group(1).lower().replace("-", "")], m.group(1), _span_of(term, m)
+    if field == "buffer_pct":
+        m = re.match(r"(\d{1,2}(?:\.\d+)?)\s?%", v)
+        return (float(m.group(1)), m.group(1), _span_of(term, m)) if m else None
+    if field == "downside_leverage":
+        m = re.match(r"(\d{1,2}(?:\.\d+)?)\b(?!\s?%)", v)
+        return (float(m.group(1)), m.group(1), _span_of(term, m)) if m else None
     if field in ("maturity_date", "pricing_date", "issue_date"):
         m = _DATE_RE.search(v[:120])
         if not m:
@@ -271,7 +362,7 @@ def _parse_for(field, term):
     if field == "contingent_coupon_rate":
         m = _RATE_RE.search(v[:200])
         return (float(m.group(1)), m.group(1), _span_of(term, m, 1)) if m else None
-    if field in ("coupon_barrier_pct", "barrier_pct"):
+    if field in ("coupon_barrier_pct", "barrier_pct", "autocall_barrier_pct"):
         # A note on several underlyings states one threshold per underlying
         # ("With respect to X: ... 75% of its starting value. With respect to
         # Y: ..."). One number is only THE threshold when every one of them
@@ -285,7 +376,8 @@ def _parse_for(field, term):
             return None
         m = found[0]
         pct = float(m.group(1))
-        return (pct, m.group(1), _span_of(term, m, 1)) if 0 < pct <= 100 else None
+        top = 200 if field == "autocall_barrier_pct" else 100
+        return (pct, m.group(1), _span_of(term, m, 1)) if 0 < pct <= top else None
     return None
 
 
@@ -352,6 +444,14 @@ def extract_key_terms(text, fields=None):
                 out[field] = KeyTermValue(field, got[0], got[1], got[2], t.raw_label, "term", bound)
                 break
 
+    for f in ("issuer", "guarantor", "calculation_agent"):
+        if f in out:
+            r = _resolve_defined(text, out[f])
+            if r is None:
+                del out[f]
+            else:
+                out[f] = r
+
     if "contingent_coupon_rate" in wanted and "contingent_coupon_rate" not in out:
         for t in terms:
             if t.label.startswith(("contingent coupon", "contingent interest")):
@@ -393,6 +493,22 @@ def extract_key_terms(text, fields=None):
                     and bar_words and bar_words in t.value.lower()):
                 out["coupon_barrier_pct"] = KeyTermValue(
                     "coupon_barrier_pct", bar.value, bar.raw, bar.span, bar.label, "term-shared")
+                break
+
+    if "coupon_frequency" in wanted and "coupon_frequency" not in out:
+        for t in terms:
+            if not t.label.startswith(("contingent coupon", "contingent interest")):
+                continue
+            m = (re.search(r"payable at (?:a rate of )?(?:at least )?[\d.]+%\s+per\s+(month|quarter|year)", t.value[:300], re.I)
+                 or re.search(r"\b(monthly|quarterly|semi-?annual|annual)\s+contingent (?:coupon|interest) payment date",
+                              t.value[:300], re.I))
+            if m:
+                word = m.group(1).lower().replace("-", "")
+                val = {"month": "monthly", "quarter": "quarterly", "year": "annual",
+                       "semiannual": "semiannual", "annual": "annual"}.get(word, word)
+                s0, e0 = _span_of(t, m)
+                out["coupon_frequency"] = KeyTermValue("coupon_frequency", val, m.group(1),
+                                                       (s0, e0), t.raw_label, "term-prose")
                 break
 
     preliminary = bool(_PRELIM_RE.search(text[:2000]))
