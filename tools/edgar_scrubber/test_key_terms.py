@@ -348,6 +348,65 @@ def test_autocall_level_buffer_and_leverage():
     assert extract_key_terms(t)["downside_leverage"].value == 1.42857
 
 
+# --- Underlyings (2026-10-18) ------------------------------------------------
+
+def _und(t):
+    return extract_key_terms(t)["underlyings"].value
+
+
+def test_underlyings_with_tickers():
+    assert _und("Underlying Stock:: The common stock of Micron Technology, Inc. (Bloomberg ticker: MU) "
+                "(the “Underlying Stock”). We refer to the issuer...") == ["Micron Technology, Inc."]
+    assert _und("Indices:: S&P 500® Index (Bloomberg ticker: SPX), Russell 2000® Index (Bloomberg "
+                "ticker: RTY) and Dow Jones Industrial Average® (Bloomberg ticker: INDU) (each referred "
+                "to as an “Index”)") == ["S&P 500® Index", "Russell 2000® Index", "Dow Jones Industrial Average®"]
+    # Parentheticals between members; an ETF after an index.
+    assert _und("Underlyings: The Russell 2000® Index (Bloomberg ticker: RTY) (the “Index”) and the "
+                "iShares® MSCI EAFE ETF (Bloomberg ticker: EFA) (the “Fund”) (each ...)\nIssuer: X\n"
+                "Agent: Y\n") == ["Russell 2000® Index", "iShares® MSCI EAFE ETF"]
+    assert _und("Reference Stock:: The common stock of Oracle Corporation, par value $0.01 per share "
+                "(Bloomberg ticker: ORCL). We refer to Oracle") == ["Oracle Corporation"]
+    assert _und("Underlying Stock:: The Class A common stock of Space Exploration Technologies Corp. "
+                "(Nasdaq Global Select Market symbol: “SPCX”) (the “Underlying Stock”).") == \
+        ["Space Exploration Technologies Corp."]
+
+
+def test_underlyings_without_tickers():
+    assert _und("Market Measure:: Common stock of GE Vernova Inc. (the “Underlying Stock”).") == ["GE Vernova Inc."]
+    assert _und("Underlyings:: The State Street® Energy Select Sector SPDR® ETF, the State Street® "
+                "Financial Select Sector SPDR® ETF and the State Street® Technology Select Sector SPDR® "
+                "ETF (each referred to as an “underlying”)") == [
+        "State Street® Energy Select Sector SPDR® ETF", "State Street® Financial Select Sector SPDR® ETF",
+        "State Street® Technology Select Sector SPDR® ETF"]
+    assert _und("Market Measure:: Common stock of Eli Lilly and Company (the “Underlying Stock”).") == \
+        ["Eli Lilly and Company"]                     # a bare "and" is not a member boundary
+
+
+def test_underlyings_from_tables():
+    # Citi index table: names run together with their levels.
+    t = ("Underlyings:: Underlying Initial underlying value* Coupon barrier value** Final barrier value*** "
+         "Nasdaq-100 Index® 29,433.43 20,603.401 17,660.058 Russell 2000® Index 2,972.372 2,080.660 "
+         "1,783.423 S&P 500® Index 7,711.76 5,398.232 4,627.056 *For each underlying, its closing value")
+    assert _und(t) == ["Nasdaq-100 Index®", "Russell 2000® Index", "S&P 500® Index"]
+    # BMO: one "Market Measures::" row per stock.
+    t = ("Market Measure Bloomberg Ticker Symbol Starting Value(1) Coupon Threshold Value(2) Downside "
+         "Threshold Value(3)\nMarket Measures:: The Common Stock of D.R. Horton, Inc. DHI $127.15 $89.005 $89.005\n"
+         "Market Measures:: The Common Shares of PulteGroup, Inc. PHM $104.44 $73.108 $73.108\n\n(1) With respect")
+    assert _und(t) == ["D.R. Horton, Inc.", "PulteGroup, Inc."]
+
+
+def test_least_performing_definition_is_not_an_underlying():
+    t = "Least Performing Index:: The Index with the Least Performing Index Return Agent:: X"
+    assert "underlyings" not in extract_key_terms(t)
+
+
+def test_unreadable_table_is_left_to_the_model():
+    # RBC prints tickers only.
+    t = ("Market Measures:: Market Measure Bloomberg Ticker Symbol Starting Value(a) Coupon Threshold "
+         "Value(b) Downside Threshold Value(c) Market Measures:: AMZN Stock AMZN UW $ $ $")
+    assert "underlyings" not in extract_key_terms(t)
+
+
 def test_nothing_readable_means_nothing_returned():
     assert extract_key_terms("This document has no term lines at all.") == {}
 

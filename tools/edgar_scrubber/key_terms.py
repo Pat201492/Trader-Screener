@@ -67,6 +67,11 @@ FIELD_LABELS = {
                              "autocall barrier", "redemption threshold"),
     "buffer_pct": ("buffer amount", "buffer percentage", "buffer"),
     "downside_leverage": ("downside leverage factor",),
+    "underlyings": ("underlyings", "underlying", "underlying stocks", "underlying stock",
+                    "underlying shares", "underlying indices", "underlying index",
+                    "underlying funds", "underlying fund", "reference stocks", "reference stock",
+                    "reference assets", "reference asset", "market measures", "market measure",
+                    "underliers", "underlier", "indices", "index", "fund"),
     "issuer": ("issuer", "company (issuer)", "issuer (company)"),
     "maturity_date": ("maturity date", "stated maturity date"),
     "pricing_date": ("pricing date", "trade date"),
@@ -93,7 +98,9 @@ FIELD_LABELS = {
 # term ("call threshold price" is the autocall level, not the downside barrier),
 # so the run-on fallback in extract_key_terms must never strip them off.
 _QUALIFIERS = {"call", "autocall", "coupon", "interest", "redemption", "early",
-               "hypothetical", "upside", "cap", "knock-out"}
+               "hypothetical", "upside", "cap", "knock-out",
+               # "Least Performing Index:" is a definition, not the index.
+               "performing", "least", "lesser", "worst", "lowest", "best"}
 
 # A figure the filing does not commit to: a floor, a ceiling, a range, or a
 # value set later. A preliminary supplement says "will be at least 23.00% per
@@ -308,6 +315,139 @@ def _resolve_defined(text, kt):
                         kt.label, kt.method + "+defined")
 
 
+# A ticker after each name: "(Bloomberg ticker: SPX)", "(ticker symbol: “ZTS
+# UN”)", "(current Bloomberg ticker: “GOOGL UW”)", "(Nasdaq Global Select
+# Market symbol: “SPCX”)".
+_TICKER_RE = re.compile(r"\s*\((?:current\s+)?(?:Bloomberg ticker|ticker symbol|"
+                        r"[A-Z][A-Za-z ]{0,40}symbol)\s*:[^)]*\)")
+_STOCK_LEAD = re.compile(r"^(?:the\s+|shares\s+of\s+)?(?:(?:class\s+[a-z]\s+)?(?:common|ordinary)\s+"
+                         r"(?:stock|shares)|american depositary shares)\s+of\s+", re.I)
+_FUNDISH = re.compile(r"\b(?:index|average|etf|fund|trust)(?:SM|TM)?\b", re.I)   # "IndexSM"
+
+
+def _clean_underlying(item):
+    """One list item -> (name as printed, kind) or None."""
+    # Leftovers of the previous member: '(the “Index”) and the iShares...',
+    # '(each referred to as an “Index,” ...) and Technology Select...'.
+    item = re.sub(r"^(?:\s*\([^()]*\))+", "", item.strip())
+    item = re.sub(r"^(?:,\s*)?(?:and\s+)?", "", item.strip()).strip()
+    # A table row (Citi: 'Underlying shares Initial share price* ... $266.43
+    # $133.215 Shares of Class A Common Stock of Alphabet Inc.'): the member
+    # starts at its "Shares of" / "common stock of".
+    rows = list(re.finditer(r"(?:shares\s+of\s+)?(?:the\s+)?(?:class\s+[a-z]\s+)?common\s+stock\s+of\s+", item, re.I))
+    if rows and rows[-1].start() > 0:
+        item = item[rows[-1].start():]
+    stock = bool(_STOCK_LEAD.match(item))
+    name = _STOCK_LEAD.sub("", item)
+    name = re.split(r",\s+(?:no\s+)?par value\b|\s*\(", name, maxsplit=1)[0].strip()
+    if not stock:
+        name = re.sub(r"^the\s+", "", name, flags=re.I)
+    name = name.rstrip(" ,;")
+    # A sentence-ending period is not part of the name; "Inc." / "Corp." is.
+    if name.endswith(".") and not re.search(
+            r"\b(?:Inc|Corp|Co|Ltd|plc|N\.V|S\.A|S\.E|A\.G|L\.P|S\.p\.A)\.$", name):
+        name = name[:-1]
+    if not (2 <= len(name) <= 100) or re.search(rf"[$%:*()]|\b(?:{_MONTHS})\b", name):
+        return None
+    if stock:
+        kind = "single_stock"
+    elif re.search(r"\b(?:etf|fund|trust)\b", name, re.I):
+        kind = "etf"
+    elif _FUNDISH.search(name):
+        kind = "index"
+    else:
+        return None       # not recognisably a stock, fund or index: leave it
+    return name, kind
+
+
+def _underlyings(term):
+    """The reference assets named on an underlying line, in order:
+    ([names], first name, its span). A table header ("Underlying Initial
+    underlying value* ...") is not a list of names and is left to the model."""
+    v = term.value[:900]
+    if re.match(r"(?:underlying|market measure)\s+(?:initial|bloomberg|ticker|starting)", v, re.I):
+        return None
+    pieces, pos = [], 0
+    for m in _TICKER_RE.finditer(v):
+        pieces.append((pos, v[pos:m.start()]))
+        pos = m.end()
+    if not pieces:
+        # No tickers: "Common stock of NVIDIA Corporation (the “Underlying Stock”)."
+        head = re.split(r"\s*\(|\n|\.\s+(?=(?:We|The|Each|Its|This|In)\b)", v, maxsplit=1)[0]
+        pieces = [(0, part) for part in re.split(r",\s*(?:and\s+)?(?=the\s)|\s+and\s+(?=the\s)", head, flags=re.I)]
+    names, kinds, first_span = [], [], None
+    for off, piece in pieces:
+        # A piece ends at its ticker; anything after a sentence end belongs to
+        # the previous item's description, not to this name.
+        piece = re.split(r"\)\.\s|\.\s(?=[A-Z])", piece)[-1]
+        got = _clean_underlying(piece)
+        if got is None:
+            return None              # one unreadable member: the whole list is the model's
+        name, kind = got
+        idx = term.value.find(name, off)
+        if idx < 0:
+            return None
+        if first_span is None:
+            first_span = (term.value_start + idx, term.value_start + idx + len(name))
+        names.append(name)
+        kinds.append(kind)
+    if not names or len(names) > 12:
+        return None
+    return names, names[0], first_span
+
+
+_NUM_TOKEN = r"\$?\d[\d,.]*(?=\s|$)"
+_FUND_NAME = re.compile(rf"\s*(?<!\S)((?![\d,.$])(?:(?!{_NUM_TOKEN})\S+\s+){{0,9}}?(?!{_NUM_TOKEN})\S*?"
+                        r"(?:Index|Average|ETF|Fund|Trust)(?:®|TM|SM)?)(?=\s|$)")
+_LEVEL = re.compile(r"\$?\d{1,3}(?:,\d{3})*(?:\.\d+)?")
+
+
+def _table_underlyings(text):
+    """Underlyings printed as a table, not a sentence. ([names], first, span).
+
+    Citi:  'Underlying Initial underlying value* Coupon barrier value** Final
+            barrier value*** Nasdaq-100 Index® 29,433.43 20,603.401 ...
+            Russell 2000® Index 2,972.372 ... *For each underlying, ...'
+    BMO / Wells Fargo:  'Market Measure Bloomberg Ticker Symbol Starting
+            Value(1) ... The Common Stock of D.R. Horton, Inc. DHI $127.15 ...'
+    """
+    m = re.search(r"Underlying\s+Initial underlying value\*.*?\s\*\s?For each", text[:60000], re.S)
+    if m:
+        # The names start after the LAST column header ("... value***").
+        heads = list(re.finditer(r"value\*+\s+", m.group(0)))
+        base = m.start() + heads[-1].end()
+        tail = re.search(r"\s\*\s?For each$", m.group(0))
+        region = text[base:m.end() - len(tail.group(0))]
+        names, pos = [], 0
+        for n in _FUND_NAME.finditer(region):
+            gap = region[pos:n.start()]
+            if _LEVEL.sub("", gap).strip():
+                return None          # something in the table this does not understand
+            name = n.group(1).strip()
+            if re.match(r"\$?\d", name):
+                return None
+            names.append((name, base + n.start(1)))
+            pos = n.end()
+        if not names or _LEVEL.sub("", region[pos:]).strip():
+            return None
+        return [x for x, _ in names], names[0][0], (names[0][1], names[0][1] + len(names[0][0]))
+    m = re.search(r"Market Measure\s+Bloomberg Ticker Symbol\s+Starting Value\(1\)[^\n]*?Value\(3\)", text[:60000])
+    if m:
+        end = text.find("(1)", m.end())
+        region = text[m.end():end if end > 0 else m.end() + 3000]
+        out = []
+        for r in re.finditer(r"(?:Market Measures?::\s*)?((?:The\s+)?(?:Class\s+[A-Z]\s+)?Common\s+(?:Stock|Shares)\s+of\s+.+?)"
+                             r"\s+[A-Z]{1,5}\s+\$", region):
+            got = _clean_underlying(r.group(1))
+            if got is None:
+                return None
+            idx = text.find(got[0], m.end() + r.start(1))
+            out.append((got[0], idx))
+        if out:
+            return [x for x, _ in out], out[0][0], (out[0][1], out[0][1] + len(out[0][0]))
+    return None
+
+
 def _parse_for(field, term):
     """(value, raw, span) read from one term's value, or None if not certain."""
     v = term.value
@@ -331,6 +471,8 @@ def _parse_for(field, term):
         if v.lower().startswith(("all ", "the notes", "the securities")):
             return None
         return _entity(term)
+    if field == "underlyings":
+        return _underlyings(term)
     if field == "isin":
         for m in _ISIN_RE.finditer(v[:120]):
             if valid_isin(m.group(1)):
@@ -466,6 +608,12 @@ def extract_key_terms(text, fields=None):
                             "contingent_coupon_rate", float(m.group(1)), m.group(1), (s, e),
                             t.raw_label, "term-prose", "min" if floor else None)
                     break
+
+    if "underlyings" in wanted and "underlyings" not in out:
+        got = _table_underlyings(text)
+        if got:
+            out["underlyings"] = KeyTermValue("underlyings", got[0], got[1], got[2],
+                                              "underlying table", "term-table")
 
     # Thresholds in a table with footnoted percents (Wells Fargo).
     for field, header in (("coupon_barrier_pct", "Coupon Threshold Value"),
