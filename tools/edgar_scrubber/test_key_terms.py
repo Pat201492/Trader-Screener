@@ -45,14 +45,15 @@ def test_a_lone_call_threshold_never_becomes_the_barrier():
     assert "barrier_pct" not in extract_key_terms(t)
 
 
-def test_floor_rate_and_estimated_value_range_are_left_to_the_model():
-    # Preliminary supplements: a floor and a range are not the value.
+def test_floor_rate_is_a_minimum_and_a_range_is_never_the_value():
+    # Preliminary supplements: a floor and a range are not the final value.
     t = ("Contingent Coupon Rate:: The contingent coupon rate will be determined on the pricing "
          "date and will be at least 13.50% per annum. "
          "the estimated value of the securities as determined by the Bank would be between "
          "$934.09 (93.409%) and $964.09 (96.409%) per security.")
     got = extract_key_terms(t)
-    assert "contingent_coupon_rate" not in got
+    assert got["contingent_coupon_rate"].bound == "min"
+    # No cover legend in this snippet, so the range is not read as preliminary.
     assert "estimated_value_per_1000" not in got
 
 
@@ -108,6 +109,185 @@ def test_run_on_label_without_a_period_still_maps():
 def test_cusip_needs_a_valid_check_digit():
     assert valid_cusip("46661PVZ7") and not valid_cusip("46661PVZ8")
     assert "cusip" not in extract_key_terms("CUSIP:: 46661PVZ8")
+
+
+def test_its_starting_price_and_two_stocks_with_the_same_threshold():
+    # HSBC 0001104659-26-113364: one figure for two stocks, "of its starting price".
+    t = ("Coupon Threshold Price:: $203.736 with respect to SNOW and $80.406 with respect to NOW, "
+         "each of which is 60% of its starting price. Downside Threshold Price:: $203.736 with "
+         "respect to SNOW and $80.406 with respect to NOW, each of which is 60% of its starting price.")
+    got = extract_key_terms(t)
+    assert got["coupon_barrier_pct"].value == 60.0 and got["barrier_pct"].value == 60.0
+
+
+def test_underlyings_with_different_thresholds_are_left_to_the_model():
+    t = ("Downside Threshold Value:: With respect to ABC: $ , which is equal to 70% of its starting "
+         "value. With respect to XYZ: $ , which is equal to 60% of its starting value.")
+    assert "barrier_pct" not in extract_key_terms(t)
+
+
+def test_letter_footnotes_with_a_lead_in_and_different_levels():
+    # RBC 0000950103-26-015242: "(b)"/"(c)" footnotes and a lead-in phrase;
+    # the coupon (60%) and downside (50%) thresholds differ.
+    t = ("Ticker Symbol Starting Value(a) Coupon Threshold Value(b) Downside Threshold Value(c) "
+         "AMZN UW $ $ $ (a) the closing value on the pricing date (b) With respect to each "
+         "Underlying Stock, 60% of its starting value (c) With respect to each Underlying Stock, "
+         "50% of its starting value")
+    got = extract_key_terms(t)
+    assert got["coupon_barrier_pct"].value == 60.0
+    assert got["barrier_pct"].value == 50.0
+
+
+def test_single_colon_terms_when_a_filing_has_no_double_colons():
+    # Toronto-Dominion 0001140361-26-039351 prints "Label: value".
+    t = ("Issuer: The Toronto-Dominion Bank (the “Bank”).\nCUSIP: 89115NL77\n"
+         "Maturity Date*: October 18, 2029, subject to postponement.\n"
+         "Downside Threshold Price: With respect to each stock, $ , which is equal to 60% of "
+         "its starting price.\nAgent: TD Securities (USA) LLC.\n")
+    got = extract_key_terms(t)
+    assert got["issuer"].value == "The Toronto-Dominion Bank"
+    assert got["cusip"].value == "89115NL77"
+    assert got["maturity_date"].value == "2029-10-18"
+    assert got["barrier_pct"].value == 60.0
+
+
+def test_company_issuer_label_and_issuer_stops_at_a_line_break():
+    assert extract_key_terms("Company (Issuer):: GS Finance Corp.")["issuer"].value == "GS Finance Corp"
+    # RBC: the value ran on into the next line.
+    t = "Issuer:: Royal Bank of Canada\nThe common stock of Amazon.com, Inc."
+    assert extract_key_terms(t)["issuer"].value == "Royal Bank of Canada"
+
+
+def test_glued_label_words_and_footnote_star():
+    # Goldman Sachs 0001193125-26-415340: "Stated MaturityDate*::".
+    t = "Stated MaturityDate*:: October 12, 2029, subject to postponement. Agent:: GS&Co."
+    assert extract_key_terms(t)["maturity_date"].value == "2029-10-12"
+
+
+def test_preliminary_rate_floor_is_reported_as_a_minimum():
+    t = ("PRELIMINARY PRICING SUPPLEMENT Subject to Completion\n"
+         "Contingent Coupon Rate:: The “contingent coupon rate” will be determined on the "
+         "pricing date and will be at least 13.50% per annum. Agent:: X.")
+    got = extract_key_terms(t)["contingent_coupon_rate"]
+    assert (got.value, got.bound) == (13.5, "min")
+    # Committed figures carry no bound.
+    final = extract_key_terms("Contingent Coupon Rate:: 19.10% per annum. Agent:: X.")
+    assert final["contingent_coupon_rate"].bound is None
+
+
+def test_rate_stated_only_inside_the_coupon_term():
+    # Goldman: no rate line; the coupon term states it in parentheses.
+    t = ("Contingent Coupon Payment:: you will receive a contingent coupon payment equal to at "
+         "least $19 (equivalent to a contingent coupon rate of at least 22.8% per annum) "
+         "(set on the trade date). Agent:: X.")
+    got = extract_key_terms(t)["contingent_coupon_rate"]
+    assert (got.value, got.bound) == (22.8, "min")
+
+
+def test_preliminary_estimated_value_range_and_stage():
+    t = ("Preliminary Pricing Supplement Subject To Completion. The initial estimated value of "
+         "the Securities as of the Pricing Date is expected to be between $920.00 and $970.00 "
+         "per Security.")
+    got = extract_key_terms(t)
+    assert got["filing_stage"].value == "preliminary"
+    assert got["estimated_value_low"].value == 920.0
+    assert got["estimated_value_high"].value == 970.0
+    # No point value exists yet: an explicit null, evidenced by the range.
+    ev = got["estimated_value_per_1000"]
+    assert ev.value is None and ev.raw == "920.00 and $970.00"
+
+
+def test_preliminary_figure_as_of_today_is_not_the_estimated_value():
+    # BMO 0001214659-26-012265: a figure today, a floor at pricing.
+    t = ("Subject To Completion. On the date of this preliminary pricing supplement, the "
+         "estimated initial value of the securities is $973.00 per security. The estimated "
+         "initial value of the securities at pricing may differ from this value but will not "
+         "be less than $925.00 per security.")
+    got = extract_key_terms(t)
+    assert got["estimated_value_per_1000"].value is None
+    assert got["estimated_value_low"].value == 925.0
+    assert "estimated_value_high" not in got
+
+
+def test_final_stage_needs_a_committed_estimate():
+    t = "The estimated value of the Securities as of the Pricing Date is $962.80 per Security."
+    assert extract_key_terms(t)["filing_stage"].value == "final"
+    assert "filing_stage" not in extract_key_terms("CUSIP:: 09712GX58 Agent:: X.")
+
+
+# --- Scale test on the 114 stored filings (2026-10-18) ----------------------
+
+def test_jpmorgan_run_on_single_colon_block():
+    # 0001918704-26-0096xx: "Label: value" with no line breaks, a bullet before
+    # CUSIP, a slash with no spaces, and a stray nested "::" line (the real
+    # filing has 5 of those against 52 single-colon labels).
+    t = ("●CUSIP: 46660RS47\n\nKey Terms Issuer: JPMorgan Chase Financial Company LLC, a direct, "
+         "wholly owned finance subsidiary of JPMorgan Chase & Co. Guarantor: JPMorgan Chase & Co. "
+         "Contingent Interest Rate: 15.00% per annum, payable at a rate of 1.25% per month "
+         "Interest Barrier/Trigger Value: 70.00% of the Initial Value, which is 2,456.251 "
+         "Pricing Date: April 7, 2026 Original Issue Date (Settlement Date): On or about April 10, "
+         "2026 Review Date*: April 8, 2027 Maturity Date*: April 12, 2029 * Subject to postponement\n"
+         "●first Review Date:: 12.20% × $1,000\n")
+    got = extract_key_terms(t)
+    assert got["cusip"].value == "46660RS47"
+    assert got["issuer"].value == "JPMorgan Chase Financial Company LLC"
+    assert got["contingent_coupon_rate"].value == 15.0
+    assert got["coupon_barrier_pct"].value == 70.0 and got["barrier_pct"].value == 70.0
+    assert got["maturity_date"].value == "2029-04-12"
+
+
+def test_footnote_dagger_and_numbered_footnotes():
+    assert extract_key_terms("Maturity Date†:: April 9, 2026 † Subject to postponement. "
+                             "Agent:: X")["maturity_date"].value == "2026-04-09"
+    assert extract_key_terms("Stated Maturity Date1, 2:: January 27, 2028 Principal Amount:: "
+                             "$1,000")["maturity_date"].value == "2028-01-27"
+
+
+def test_jpmorgan_represents_and_separate_interest_barrier():
+    t = "Interest Barrier / Trigger Level:: An amount that represents 70.00% of the Initial Stock Price"
+    assert extract_key_terms(t)["barrier_pct"].value == 70.0
+    t = ("Interest Barrier: 70.00% of the Initial Value\nTrigger Value: 60.00% of the Initial Value\n"
+         "Pricing Date: April 15, 2026\nIssuer: X\nAgent: Y\nCUSIP: 46660RS47\n")
+    got = extract_key_terms(t)
+    assert got["coupon_barrier_pct"].value == 70.0 and got["barrier_pct"].value == 60.0
+
+
+def test_citi_comma_lead_in_and_rate_in_parentheses():
+    t = ("Maturity date:: Unless earlier automatically redeemed, August 31, 2028 "
+         "Contingent coupon:: the securities will pay a contingent coupon equal to 4.075% of the "
+         "stated principal amount of the securities (16.30% per annum) if and only if the closing "
+         "price of the underlying shares is greater than or equal to the downside threshold price. "
+         "Downside threshold price:: $45.012, 60.00% of the initial share price Listing:: none")
+    got = extract_key_terms(t)
+    assert got["contingent_coupon_rate"].value == 16.3      # not the quarterly 4.075
+    assert got["barrier_pct"].value == 60.0
+    assert got["coupon_barrier_pct"].value == 60.0          # the coupon uses the same threshold
+
+
+def test_citi_rounded_annual_rate_is_committed():
+    t = ("Contingent coupon:: the securities will pay a contingent coupon equal to 0.8542% of the "
+         "stated principal amount (equivalent to a contingent coupon rate of approximately 10.25% "
+         "per annum) if and only if ... Listing:: none")
+    got = extract_key_terms(t)["contingent_coupon_rate"]
+    assert (got.value, got.bound) == (10.25, None)
+
+
+def test_citi_star_footnote_table():
+    t = ("Underlyings:: Underlying Initial underlying value* Coupon barrier value** Final barrier "
+         "value*** Dow Jones Industrial Average Nasdaq-100 Index *For each underlying, its closing "
+         "value on the pricing date **For each underlying, 70.00% of its initial underlying value "
+         "***For each underlying, 55.00% of its initial underlying value\nStated principal amount:: $1,000")
+    got = extract_key_terms(t)
+    assert got["coupon_barrier_pct"].value == 70.0
+    assert got["barrier_pct"].value == 55.0
+
+
+def test_prose_with_a_colon_is_not_a_label():
+    # Toronto-Dominion: "...is less than its downside threshold price: $1,000" mid-sentence.
+    t = ("Issuer: TD\nCUSIP: 89115NL77\nAgent: TD\nMaturity Date: October 18, 2029\n"
+         "Payment: if the ending price is greater than or equal to its downside threshold price: "
+         "$1,000; or if less\nDownside Threshold Price: $ , which is equal to 60% of its starting price.\n")
+    assert extract_key_terms(t)["barrier_pct"].value == 60.0
 
 
 def test_nothing_readable_means_nothing_returned():
