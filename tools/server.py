@@ -2704,8 +2704,10 @@ class ResearchBatchStore:
 RESEARCH = ResearchBatchStore(research_home())
 
 
-def build_research_provider(name):
-    """A research_assistant Provider from a short name ("ollama" / "claude").
+def build_research_provider(name, chat_id=None):
+    """A research_assistant Provider from a short name ("ollama" / "claude" /
+    "claude-code"). "claude-code" is per chat: it reuses that chat's background
+    Claude Code process, on the user's subscription.
 
     A seam, not just a dispatch: the tests replace this wholesale with a fake
     provider so `/plan` is exercisable with no model, no key, and no network."""
@@ -2716,7 +2718,20 @@ def build_research_provider(name):
         return ra.OllamaProvider(OllamaClient(OllamaConfig.from_env({})))
     if key == "claude":
         return ra.ClaudeProvider()
+    if key == "claude-code":
+        return ra.ClaudeCodeProvider(chat_id or "default")
     raise ValueError("unknown research provider: %r" % name)
+
+
+def research_session_reset(params):
+    """POST /session/reset {chat_id}: stop this chat's background Claude Code
+    process and forget its conversation -- the "New session" button. The next
+    message starts a fresh conversation. Returns whether one existed."""
+    import claude_code_session as ccs
+    chat_id = (params.get("chat_id") or "").strip()
+    if not chat_id:
+        raise ValueError("chat_id is required")
+    return {"reset": ccs.SESSIONS.reset(chat_id), "chat_id": chat_id}
 
 
 def _require_chat_and_message(params):
@@ -2766,9 +2781,12 @@ def research_providers():
     The picker uses this to disable Claude and show why, before any call."""
     import research_assistant as ra
     ok, reason = ra.claude_available()
+    cc_ok, cc_reason = ra.claude_code_available()
     return {"providers": [
         {"name": "ollama", "label": "Ollama", "available": True, "reason": ""},
-        {"name": "claude", "label": "Claude", "available": bool(ok),
+        {"name": "claude-code", "label": "Claude (your plan)", "available": bool(cc_ok),
+         "reason": "" if cc_ok else cc_reason},
+        {"name": "claude", "label": "Claude (API key)", "available": bool(ok),
          "reason": "" if ok else reason},
     ]}
 
@@ -2780,7 +2798,7 @@ def research_estimate(params):
     import research_assistant as ra
     chat_id, message = _require_chat_and_message(params)
     name = params.get("provider")
-    provider = build_research_provider(name)
+    provider = build_research_provider(name, chat_id)
     history = RESEARCH.history(chat_id)
     estimate = ra.estimate_cost(provider, message, history=history)
     estimate_id = RESEARCH.record_estimate(chat_id, name, estimate)
@@ -2838,7 +2856,7 @@ def research_plan(params):
     # The history fed to the planner is the chat's running transcript -- past
     # questions, replies and metadata-only hit summaries -- never filing text.
     history = RESEARCH.history(chat_id)
-    provider = build_research_provider(name)
+    provider = build_research_provider(name, chat_id)
     # The accessions this chat has already surfaced: an extract proposal may name
     # only these, so a filing the user never saw is dropped, not scrubbed.
     known = RESEARCH.result_filings(chat_id)
@@ -4524,6 +4542,13 @@ class Handler(SimpleHTTPRequestHandler):
             # paid plan must quote. Measures text only -- no provider call.
             try:
                 return self._json(research_estimate(params), 200)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/tools/research/session/reset":
+            # "New session": stop this chat's background Claude Code process
+            # and forget its conversation.
+            try:
+                return self._json(research_session_reset(params), 200)
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
         if path == "/api/tools/research/plan":

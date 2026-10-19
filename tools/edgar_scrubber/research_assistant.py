@@ -492,6 +492,63 @@ class ClaudeProvider(Provider):
         return text or ""
 
 
+class ClaudeCodeProvider(Provider):
+    """Claude through the local Claude Code CLI, on the user's subscription
+    login: no API key, no Console credits (the plan's usage limits apply).
+
+    One background process per chat (claude_code_session.SESSIONS), reused
+    between messages. The process already holds the conversation, so a turn
+    sends only the chat-history entries it has not seen -- new metadata-only
+    result summaries and the new question -- never a replay. If a resumed
+    conversation cannot be continued, the session restarts fresh once with the
+    whole user-side history, so nothing the user asked is lost."""
+
+    def __init__(self, chat_id, registry=None):
+        import claude_code_session as ccs
+        self.chat_id = chat_id
+        self.registry = registry or ccs.SESSIONS
+        self._ccs = ccs
+
+    @staticmethod
+    def _user_text(entries, earlier=False):
+        texts = [m.get("content", "") for m in entries
+                 if isinstance(m, dict) and m.get("role") == "user" and m.get("content")]
+        if earlier and len(texts) > 1:
+            return ("Earlier in this chat (for context):\n\n" + "\n\n".join(texts[:-1])
+                    + "\n\nNow: " + texts[-1])
+        return "\n\n".join(texts)
+
+    def complete(self, system, messages):
+        session = self.registry.get(self.chat_id, system, PLAN_SCHEMA)
+        with session.lock:
+            for attempt in (0, 1):
+                fresh = session.session_id is None or attempt == 1
+                if attempt == 1:
+                    session.reset()
+                new = messages if fresh else messages[session.seen:]
+                text = self._user_text(new, earlier=fresh)
+                if not text:
+                    return ""
+                try:
+                    result, structured = session.turn(text)
+                except self._ccs.ClaudeCodeError:
+                    if attempt == 0 and session.session_id is not None:
+                        continue                # resume failed: start fresh once
+                    raise
+                session.seen = len(messages)
+                return json.dumps(structured) if isinstance(structured, dict) else result
+        return ""
+
+
+def claude_code_available():
+    """(bool, reason): the CLI is installed. Whether it is logged in shows on the
+    first call (the CLI's own error comes back as the plan's dropped reason)."""
+    import claude_code_session as ccs
+    if not ccs.cli_path():
+        return False, "the claude CLI (Claude Code) is not installed"
+    return True, ""
+
+
 def _anthropic_client(api_key=None):
     """The Anthropic SDK client, imported lazily so this module loads on a
     machine that never installed it (same posture as claude_template._client)."""
@@ -569,8 +626,8 @@ def estimate_cost(provider, message, history=None, prices=None):
     output_tokens = OUTPUT_TOKEN_ALLOWANCE
     model = getattr(provider, "model", None)
 
-    if isinstance(provider, OllamaProvider):
-        dollars = 0.0
+    if isinstance(provider, (OllamaProvider, ClaudeCodeProvider)):
+        dollars = 0.0       # local model, or the user's Claude plan: no per-call bill
     else:
         table = prices if prices is not None else load_prices()
         entry = table.get(model)
@@ -662,7 +719,11 @@ def plan(provider, message, history=None, known_accessions=None, today=None):
     reply that is not a JSON object yields a Plan with no searches and a recorded
     reason. Nothing from the model path raises to the caller."""
     messages = list(history or []) + [{"role": "user", "content": message}]
-    raw_text = provider.complete(system_prompt(today), messages)
+    try:
+        raw_text = provider.complete(system_prompt(today), messages)
+    except Exception as exc:     # a dead CLI, a timeout, an unreachable model
+        return Plan(reply="", searches=[],
+                    dropped=[f"provider error: {type(exc).__name__}: {exc}"])
 
     try:
         data = json.loads(raw_text)

@@ -3947,11 +3947,11 @@ async function renderToolResearch(){
   const v=document.getElementById('view');
   stopPolling();
   if(!RESEARCH.chatId) RESEARCH={chatId:'chat-'+Date.now(),turns:[],sending:false,
-    provider:'ollama',claude:{available:null,reason:''},pending:null};
+    provider:'ollama',claude:{available:null,reason:''},claudeCode:{available:null,reason:''},pending:null};
   const header=`<div class="card" style="margin-bottom:14px">
     <div class="name" style="font-size:16px">Research assistant</div>
     <div class="muted" style="font-size:12px;line-height:1.5;margin-top:6px">
-      Ask a question about SEC filings. The assistant proposes EDGAR full-text searches as an editable batch — nothing touches the SEC until you approve it with one click. Pick Ollama (local, free) or Claude (paid; you see the cost and confirm before anything is sent).</div></div>`;
+      Ask a question about SEC filings. The assistant proposes EDGAR full-text searches as an editable batch — nothing touches the SEC until you approve it with one click. Pick Ollama (local, free), Claude on your plan (your Claude subscription, no API key — one background session per chat, reused between messages), or Claude with an API key (billed per call; you see the cost and confirm first).</div></div>`;
   const panel=`<div class="card">
     <div id="researchLog"></div>
     <div id="researchProviderPicker" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px"></div>
@@ -3984,8 +3984,11 @@ async function loadResearchProviders(){
     if(!r.ok) throw new Error(data.error||`HTTP ${r.status}`);
     const claude=(data.providers||[]).find(p=>p.name==='claude');
     if(claude) RESEARCH.claude={available:!!claude.available,reason:claude.reason||''};
+    const cc=(data.providers||[]).find(p=>p.name==='claude-code');
+    if(cc) RESEARCH.claudeCode={available:!!cc.available,reason:cc.reason||''};
   }catch(e){
     RESEARCH.claude={available:false,reason:'provider status unavailable: '+e.message};
+    RESEARCH.claudeCode={available:false,reason:'provider status unavailable: '+e.message};
   }
   renderProviderPicker();
 }
@@ -4001,20 +4004,51 @@ function renderProviderPicker(){
   const radio=(name,label,disabled)=>`<label style="font-size:12px;cursor:${disabled?'not-allowed':'pointer'};opacity:${disabled?0.5:1};display:inline-flex;gap:5px;align-items:center">
       <input type="radio" name="researchProvider" value="${name}" ${RESEARCH.provider===name?'checked':''} ${disabled?'disabled':''}
         onchange="setResearchProvider('${name}')"> ${esc(label)}</label>`;
+  const cc=RESEARCH.claudeCode||{available:null,reason:''};
+  const ccOff=cc.available!==true;
   const reason=claudeOff&&c.reason
-    ? `<span class="muted" style="font-size:11px">Claude unavailable — ${esc(c.reason)}</span>`:'';
+    ? `<span class="muted" style="font-size:11px">API key: ${esc(c.reason)}</span>`:'';
+  const ccReason=ccOff&&cc.reason
+    ? `<span class="muted" style="font-size:11px">Your plan: ${esc(cc.reason)}</span>`:'';
+  // "New session" only means something for the background Claude Code process.
+  const reset=RESEARCH.provider==='claude-code'
+    ? `<button onclick="resetResearchSession()" title="Stop this chat's background Claude session and start a fresh conversation"
+        style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:3px 10px;font-size:11.5px;cursor:pointer">New session</button>`
+    : '';
   el.innerHTML=`<span class="muted" style="font-size:11px">Provider</span>`
     +radio('ollama','Ollama (local, free)',false)
-    +radio('claude','Claude (paid)',claudeOff)
-    +reason;
+    +radio('claude-code','Claude (your plan)',ccOff)
+    +radio('claude','Claude (API key, paid)',claudeOff)
+    +reset+ccReason+reason;
 }
 
 // Switch the chat's provider. Switching away from Claude drops any pending cost
 // confirmation — the estimate was for a Claude call that is no longer wanted.
 function setResearchProvider(name){
   if(name==='claude'&&RESEARCH.claude.available!==true){ renderProviderPicker(); return; }
+  if(name==='claude-code'&&(RESEARCH.claudeCode||{}).available!==true){ renderProviderPicker(); return; }
   RESEARCH.provider=name;
   if(name!=='claude'&&RESEARCH.pending){ RESEARCH.pending=null; renderPending(); }
+  renderProviderPicker();
+}
+
+// "New session" wipes the slate: the server stops this chat's background Claude
+// Code process and forgets it, and the tab starts a brand-new chat (new id, empty
+// log), so nothing from before is sent to Claude again. The old chat's batches
+// stay in the server's audit log.
+async function resetResearchSession(){
+  const errEl=document.getElementById('researchSendErr');
+  try{
+    const r=await fetch('/api/tools/research/session/reset',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:RESEARCH.chatId})});
+    const data=await r.json();
+    if(!r.ok) throw new Error(data.error||`HTTP ${r.status}`);
+    if(errEl) errEl.textContent='';
+    RESEARCH.chatId='chat-'+Date.now();
+    RESEARCH.turns=[{note:'New session — a fresh conversation. Earlier messages are not sent to Claude.'}];
+    RESEARCH.pending=null;
+    renderResearchLog(); renderPending();
+  }catch(e){ if(errEl) errEl.textContent='Reset failed: '+e.message; }
 }
 
 function renderResearchLog(){
@@ -4026,6 +4060,8 @@ function renderResearchLog(){
 }
 
 function researchTurnHtml(turn,ti){
+  // A session note ("New session" pressed), not a question/answer turn.
+  if(turn.note) return `<div class="muted" style="font-size:11.5px;margin:10px 0;font-style:italic">${esc(turn.note)}</div>`;
   const you=`<div style="margin:12px 0 6px"><span class="muted" style="font-size:11px">you</span>
      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 11px;font-size:12.5px;white-space:pre-wrap">${esc(turn.question)}</div></div>`;
   let assistant='';
