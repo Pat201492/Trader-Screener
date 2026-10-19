@@ -4360,6 +4360,17 @@ function applyEditErrors(batch,pd){
   if(!landed && !batch._error) batch._error=(pd&&pd.error)||'Edit rejected.';
 }
 
+// A search that found nothing: ask the assistant for different wordings of it,
+// as an ordinary follow-up message in the same chat (#316).
+function tryOtherWordings(ti,gi){
+  const grp=((((RESEARCH.turns[ti]||{}).batch||{}).hits)||[])[gi]||{};
+  const q=(grp.query||{}).q||'(no phrase)';
+  const inp=document.getElementById('researchInput');
+  if(!inp||RESEARCH.sending) return;
+  inp.value=`The search "${q}" found nothing; propose different wordings for it.`;
+  sendResearch();
+}
+
 function researchResultsHtml(batch,ti){
   const groups=(batch.hits||[]).map((grp,gi)=>{
     const q=grp.query||{}, res=grp.result||{};
@@ -4377,7 +4388,8 @@ function researchResultsHtml(batch,ti){
           <button onclick="openResearchFiling(${ti},${gi},${hi})" style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:2px 8px;font-size:11.5px;cursor:pointer">Open in scrubber</button>
           ${link?`<a href="${esc(link)}" target="_blank" rel="noopener" style="margin-left:6px;font-size:11.5px;color:var(--accent)">sec.gov ↗</a>`:''}
         </td></tr>`;}).join('')
-      : `<tr><td colspan="4" class="muted" style="font-size:12px">No filings matched.</td></tr>`;
+      : `<tr><td colspan="4" class="muted" style="font-size:12px">No filings matched.
+          <button onclick="tryOtherWordings(${ti},${gi})" style="margin-left:8px;background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:5px;padding:2px 8px;font-size:11.5px;cursor:pointer">Try other wordings</button></td></tr>`;
     const count=res.total!=null?res.total:hits.length;
     return `<div style="margin-top:12px">
       <div style="font-size:12.5px"><strong>${esc(q.q||'(no phrase)')}</strong>

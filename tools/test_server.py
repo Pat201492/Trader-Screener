@@ -2526,6 +2526,21 @@ check("the history fed to the next plan carries each hit's metadata",
                                "0001234567", "2025-06-10", "0001234567-25-000042")))
 check("the history carries NO filing text", _SECRET not in _hist)
 
+# #316: the summary lists every search with its query, hit count and truncation,
+# a zero-hit search included, so the next turn can try other wordings.
+_sum = server.summarize_hits_for_history([
+    {"query": {"q": "autocallable NVIDIA", "forms": ["424B2"], "ciks": ["JPM"]},
+     "result": {"total": 0, "hits": []}},
+    {"query": {"q": "", "forms": ["4"], "ciks": []},
+     "result": {"total": 9671, "truncated": True,
+                "hits": [{"form": "4", "issuer": "X", "cik": "1", "file_date": "2026-10-16",
+                          "accession": "a-1"}]}},
+])["content"]
+check("the history summary lists a zero-hit search with its query and count",
+      "q='autocallable NVIDIA'" in _sum and "0 hit(s)" in _sum)
+check("...and flags a truncated search", "9671 hit(s) (TRUNCATED" in _sum)
+check("...and still lists each hit's metadata", "| filed 2026-10-16 | a-1" in _sum)
+
 # -- audit: one line per estimate, plan, edit, approval ----------------------
 _st, _ = _gr_req("POST", "/estimate", {"provider": "claude", "message": "audit?",
                                        "chat_id": "aud"})

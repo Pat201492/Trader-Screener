@@ -682,6 +682,15 @@ number -- a CIK you recall may belong to another company. For structured notes \
 `q`, not in `ciks`. For Form 3/4/5 the filer list includes the issuer, so the \
 company's ticker belongs in `ciks`.
 
+Be creative with wording: filings word the same thing several ways. For a prose \
+form, propose 2-3 phrasings of the idea as filings PRINT it -- trade terms and \
+their variants ("Auto Callable" / "Automatic Call" / "autocallable", "Contingent \
+Coupon" / "Contingent Interest", "Buffered" / "Buffer Amount", "Trigger" / \
+"Barrier"), plus a broad and a narrow version where useful. When a search you \
+proposed came back with 0 hits, do not repeat it: say so and propose different \
+wordings, a wider date range, or a different form (FWP term sheets often precede \
+the 424B2). When one was TRUNCATED, narrow it (dates, issuer) rather than widen.
+
 `q` is matched against the filing's own text and EVERY word must appear, so \
 describing what you want finds nothing. Use one to three short phrases the \
 filings themselves print, in double quotes, plus a name: write \
