@@ -1093,10 +1093,16 @@ def pick_xml_rows(bundle, form):
 
     The ownership forms ship their data as the primary `.xml` document, but the
     same loop also handles a form whose data lives in a separate XML exhibit:
-    every `.xml` item is tried until one reads. A wrong-schema document (an XBRL
-    instance or a calc/label sidecar) raises `XmlFormError` and is skipped, as
-    does any item that is not well-formed XML."""
+    every `.xml` item is tried until one reads. A 13F-HR, for one, keeps its
+    holdings in a separate information-table document while its cover fields
+    (period of report, filing manager) live in `primary_doc.xml`; that primary
+    document's text is handed to every read attempt, so the information-table
+    reader can stamp the cover fields onto each holding. A wrong-schema document
+    (an XBRL instance, a calc/label sidecar, or -- for 13F -- the cover page
+    itself) raises `XmlFormError` and is skipped, as does any item that is not
+    well-formed XML."""
     import xml_forms
+    xml_docs = []
     for doc in bundle.documents:
         name = doc.name or ""
         if not name.lower().endswith(".xml"):
@@ -1105,8 +1111,15 @@ def pick_xml_rows(bundle, form):
         if raw is None:
             continue
         text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        xml_docs.append((name, text))
+
+    primary_text = next(
+        (text for name, text in xml_docs if name.lower() == "primary_doc.xml"),
+        None)
+
+    for name, text in xml_docs:
         try:
-            rows = xml_forms.read_filing(form, text)
+            rows = xml_forms.read_filing(form, text, primary_text=primary_text)
         except Exception:
             # Not this form's schema, or not well-formed -- try the next item.
             continue

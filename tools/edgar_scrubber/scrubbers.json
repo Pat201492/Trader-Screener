@@ -99,6 +99,15 @@
       "q": "",
       "forms": ["5"],
       "field_source": "xml"
+    },
+    {
+      "id": "form-13f-hr",
+      "form_type": "13F-HR",
+      "display_name": "13F-HR institutional holdings",
+      "purpose": "Quarterly report of an institutional investment manager's holdings; a structured information-table XML document.",
+      "q": "",
+      "forms": ["13F-HR"],
+      "field_source": "xml"
     }
   ]
 }

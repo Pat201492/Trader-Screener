@@ -8,6 +8,14 @@ from xml_forms import READERS, XmlFormError, read_filing
 
 FIXTURES = Path(__file__).resolve().parent / "tests" / "fixtures"
 FORM4 = (FIXTURES / "form4_cook.xml").read_text(encoding="utf-8")
+F13F_INFO = (FIXTURES / "form13fhr_infotable.xml").read_text(encoding="utf-8")
+F13F_PRIMARY = (FIXTURES / "form13fhr_primary.xml").read_text(encoding="utf-8")
+
+_F13F_ROW_KEYS = {
+    "name_of_issuer", "title_of_class", "cusip", "value", "shares_or_principal",
+    "sh_prn_type", "put_call", "investment_discretion", "voting_sole",
+    "voting_shared", "voting_none", "report_period", "manager_name",
+}
 
 _ROW_KEYS = {
     "issuer_cik", "issuer_ticker", "owner_name", "owner_cik", "is_director",
@@ -83,9 +91,65 @@ def test_not_xml_raises():
 
 
 def test_wrong_schema_raises():
-    # A form that owns no reader yet: no XML reader exists for 13F-HR.
+    # The 13F-HR reader rejects a Form 4: an ownershipDocument is not an
+    # information table, so it raises rather than returning garbage rows.
     with pytest.raises(XmlFormError):
         read_filing("13F-HR", FORM4)
+
+
+def test_13f_rows_one_per_holding_with_every_key_and_numbers():
+    rows = read_filing("13F-HR", F13F_INFO, primary_text=F13F_PRIMARY)
+    assert len(rows) == 3
+    for row in rows:
+        assert set(row) == _F13F_ROW_KEYS
+
+    apple = rows[0]
+    assert apple["name_of_issuer"] == "APPLE INC"
+    assert apple["title_of_class"] == "COM"
+    assert apple["cusip"] == "037833100"
+    assert apple["sh_prn_type"] == "SH"
+    assert apple["investment_discretion"] == "DFND"
+    # Cover fields from primary_doc.xml are stamped on every row.
+    assert apple["report_period"] == "06-30-2026"
+    assert apple["manager_name"] == "BERKSHIRE HATHAWAY INC"
+    # Numeric fields are numbers, not strings.
+    assert apple["value"] == 91000000 and isinstance(apple["value"], int)
+    assert apple["shares_or_principal"] == 915560382
+    assert isinstance(apple["shares_or_principal"], int)
+    assert apple["voting_sole"] == 915560382
+    assert apple["voting_shared"] == 0
+    assert apple["voting_none"] == 0
+
+
+def test_13f_put_call_is_null_when_absent_and_read_when_present():
+    rows = read_filing("13F-HR", F13F_INFO, primary_text=F13F_PRIMARY)
+    # The Apple holding has no putCall element.
+    assert rows[0]["put_call"] is None
+    # The Coca-Cola holding carries one.
+    assert rows[1]["put_call"] == "Call"
+
+
+def test_13f_principal_holding_carries_prn_type():
+    prn = read_filing("13F-HR", F13F_INFO, primary_text=F13F_PRIMARY)[2]
+    assert prn["sh_prn_type"] == "PRN"
+    assert prn["shares_or_principal"] == 1500000
+    assert prn["voting_none"] == 1500000
+
+
+def test_13f_cover_fields_null_without_primary_document():
+    # The reader still produces holdings when no primary_doc is supplied; only
+    # the cover fields fall out as None.
+    rows = read_filing("13F-HR", F13F_INFO)
+    assert rows[0]["report_period"] is None
+    assert rows[0]["manager_name"] is None
+    assert rows[0]["name_of_issuer"] == "APPLE INC"
+
+
+def test_13f_rejects_primary_document_as_data():
+    # primary_doc.xml is the cover page, not an information table -- feeding it
+    # as the data document raises, which is how xml_run skips past it.
+    with pytest.raises(XmlFormError):
+        read_filing("13F-HR", F13F_PRIMARY)
 
 
 def test_wrong_root_element_raises():
