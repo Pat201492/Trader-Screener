@@ -2364,6 +2364,27 @@ check("a plan proposing 6 searches stores only the 5-search cap",
       _st == 200 and len(_b["searches"]) == server.ResearchBatchStore.MAX_SEARCHES)
 check("...and records the dropped 6th", bool(_b["dropped"]))
 
+# #315: a conversation turn with no searches is stored without a batch.
+_reply_provider = _FakeResearchProvider({
+    "reply": "Happy to help -- which issuer?", "searches": [],
+    "question": "Do you mean JPMorgan's notes or all banks?", "extract": None})
+server.build_research_provider = lambda name, chat_id=None: _reply_provider
+_n_batches_before = len(server.RESEARCH._batches) if hasattr(server.RESEARCH, "_batches") else None
+_st, _b = _rb_req("POST", "/plan", {"chat_id": "chat-conv", "message": "find the notes",
+                                    "provider": "ollama"})
+check("a reply-only plan returns 200 with the reply and question and no batch",
+      _st == 200 and _b.get("batch_id") is None and _b.get("status") == "reply"
+      and _b.get("question") == "Do you mean JPMorgan's notes or all banks?"
+      and _b.get("searches") == [])
+check("...and records the question in the chat history",
+      any("Question for you" in (m.get("content") or "") for m in server.RESEARCH.history("chat-conv")))
+if _n_batches_before is not None:
+    check("...and creates no batch", len(server.RESEARCH._batches) == _n_batches_before)
+server.build_research_provider = lambda name, chat_id=None: _fake_provider
+_st, _b = _rb_req("POST", "/plan", {"chat_id": "chat-conv", "message": "JPMorgan", "provider": "ollama"})
+check("a plan with searches still yields a proposed batch",
+      _st == 200 and _b.get("batch_id") and _b.get("status") == "proposed" and len(_b["searches"]) >= 1)
+
 _rb_httpd.shutdown()
 server.edgar_search = _prev_search
 server.build_research_provider = _prev_build

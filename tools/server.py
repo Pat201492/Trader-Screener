@@ -2874,13 +2874,31 @@ def research_plan(params):
     # only these, so a filing the user never saw is dropped, not scrubbed.
     known = RESEARCH.result_filings(chat_id)
     result = ra.plan(provider, message, history=history, known_accessions=set(known))
+    # The assistant's side of the conversation, as the next turn will see it.
+    said = result.reply or ""
+    if result.question:
+        said = (said + "\n" if said else "") + "Question for you: " + result.question
+    if result.reply_only:
+        # A conversation turn -- a clarifying question or an explanation -- has
+        # nothing to approve, so no batch is created (#315).
+        RESEARCH.append_history(chat_id, [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": said},
+        ])
+        if _is_paid_provider(name):
+            RESEARCH.consume_estimate(chat_id, params.get("estimate_id"))
+        return 200, {"batch_id": None, "chat_id": chat_id, "provider": name,
+                     "status": "reply", "reply": result.reply, "question": result.question,
+                     "searches": [], "dropped": result.dropped, "extract": None,
+                     "hits": None, "created_at": utcnow(), "ran_at": None}
     extract = describe_extract(result.extract.to_dict()) if result.extract else None
     batch = RESEARCH.create(chat_id, name, [s.to_dict() for s in result.searches],
                             reply=result.reply, dropped=result.dropped,
                             extract=extract)
+    batch["question"] = result.question
     RESEARCH.append_history(chat_id, [
         {"role": "user", "content": message},
-        {"role": "assistant", "content": result.reply or ""},
+        {"role": "assistant", "content": said},
     ])
     if _is_paid_provider(name):
         RESEARCH.consume_estimate(chat_id, params.get("estimate_id"))

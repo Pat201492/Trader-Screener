@@ -361,15 +361,41 @@ def run_checks():
           not kept and any("match everything" in w for w in why))
 
 
+def run_conversation_checks():
+    # #315: a turn may be a reply or a clarifying question with no searches.
+    q = json.dumps({"reply": "Which issuer did you mean?", "searches": [],
+                    "question": "Do you mean JPMorgan's notes, or all banks?", "extract": None})
+    pq = ra.plan(FakeProvider(q), "find the notes", today=TODAY)
+    check("conversation: a reply-only turn validates with a question and no dropped reason",
+          pq.searches == [] and pq.question == "Do you mean JPMorgan's notes, or all banks?"
+          and pq.reply_only and not pq.dropped)
+    check("conversation: to_dict carries the question", pq.to_dict()["question"] == pq.question)
+    with_s = ra.plan(FakeProvider(_valid_plan_json()), "x", today=TODAY)
+    check("conversation: a plan with searches is not reply-only and has no question",
+          not with_s.reply_only and with_s.question is None)
+    sp = ra.system_prompt(TODAY)
+    check("conversation: the prompt says to ask a clarifying question when ambiguous",
+          "clarifying" in sp and "question" in sp)
+    check("conversation: the prompt says to explain results and adjust on pushback",
+          "explain" in sp and "pushes back" in sp)
+    check("conversation: the prompt still forbids claiming to have read a filing",
+          "never claim to know what" in sp)
+    check("conversation: the schema allows zero searches and requires `question`",
+          ra.PLAN_SCHEMA["properties"]["searches"]["minItems"] == 0
+          and "question" in ra.PLAN_SCHEMA["required"])
+
+
 def test_research_assistant():
     """pytest entrypoint: run every check and fail on the first problem."""
     run_checks()
+    run_conversation_checks()
     assert not failures, f"{len(failures)} check(s) failed: {failures}"
 
 
 def main():
     print("EDGAR scrubber research-assistant gate (#280)")
     run_checks()
+    run_conversation_checks()
     if failures:
         print(f"\n{len(failures)} check(s) FAILED:")
         for f in failures:

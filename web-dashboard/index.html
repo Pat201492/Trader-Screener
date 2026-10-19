@@ -4080,7 +4080,12 @@ function researchTurnHtml(turn,ti){
     assistant=`<div class="err" style="margin:6px 0">${esc(turn.error)}</div>`;
   }else if(turn.batch){
     const b=turn.batch;
-    const reply=b.reply?`<div style="font-size:12.5px;margin:4px 0 8px">${esc(b.reply)}</div>`:'';
+    // The assistant's side is a chat bubble; a clarifying question gets its own
+    // highlighted line, and a reply-only turn (#315) carries no card at all.
+    const reply=(b.reply||b.question)?`<div style="background:var(--panel,transparent);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:8px 11px;font-size:12.5px;margin:4px 0 8px;white-space:pre-wrap">${b.reply?esc(b.reply):''}${b.question?`<div style="margin-top:${b.reply?'6px':'0'};font-weight:600">❓ ${esc(b.question)}</div>`:''}</div>`:'';
+    if(b.status==='reply'){
+      return you+`<div><span class="muted" style="font-size:11px">assistant</span>${reply||'<div class="muted" style="font-size:12px;padding:6px 0">(no reply)</div>'}</div>`;
+    }
     // A follow-up may be a search batch (the editable card) OR an extraction
     // (its own card with its own approval), and a plan may carry either. Show
     // the search card only when there are searches to show, so an extract-only
@@ -4094,7 +4099,7 @@ function researchTurnHtml(turn,ti){
       ? `<div class="muted" style="font-size:12px;padding:6px 0">The assistant proposed no next step.</div>`:'';
     assistant=`<div><span class="muted" style="font-size:11px">assistant</span>${reply}${searchCard}${extractCard}${nothing}</div>`;
   }else{
-    assistant=`<div class="loading" style="padding:8px">planning searches…</div>`;
+    assistant=`<div class="loading" style="padding:8px">thinking…</div>`;
   }
   return you+assistant;
 }
