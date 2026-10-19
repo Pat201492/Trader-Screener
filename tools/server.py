@@ -3038,7 +3038,7 @@ def loaded_runtime(base_url, model):
     except Exception:
         return None
     for m in ps.get("models", []):
-        if m.get("name") != model:
+        if not model_pulled(model, [m.get("name")]):
             continue
         total, vram = m.get("size") or 0, m.get("size_vram") or 0
         offload = max(0, total - vram)
@@ -3096,6 +3096,16 @@ def _launch_ollama_serve(exe):
                      stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True)
 
 
+def model_pulled(model, names):
+    """Ollama lists a model by its full tag ("edgar-qwen7b:latest"); OLLAMA_MODEL
+    is usually written bare ("edgar-qwen7b"). Both name the same model, so an
+    exact match reported an installed model as "not pulled"."""
+    def norm(n):
+        n = (n or "").strip()
+        return n[:-len(":latest")] if n.endswith(":latest") else n
+    return norm(model) in {norm(n) for n in names}
+
+
 def start_local_model(*, up=None, find=None, launch=None, warm=None, sleep=None,
                       wait_s=30):
     """The "Start local model" button. Brings Ollama up if it is down, then loads
@@ -3138,7 +3148,7 @@ def start_local_model(*, up=None, find=None, launch=None, warm=None, sleep=None,
                     "message": f"started Ollama but it did not answer at {base} within {wait_s}s"}
 
     names = [m.get("name") for m in tags.get("models", [])]
-    if model not in names:
+    if not model_pulled(model, names):
         return {"ok": False, "state": "model-missing",
                 "message": f"Ollama is up, but {model} is not downloaded. Run: ollama pull {model}"
                            " (or build the 8k-context model: ollama create edgar-qwen7b -f "
@@ -3183,7 +3193,7 @@ def health():
         with urllib.request.urlopen(f"{base}/api/tags", timeout=3) as resp:
             tags = json.load(resp)
         names = [m["name"] for m in tags.get("models", [])]
-        ok_ollama = model in names
+        ok_ollama = model_pulled(model, names)
         detail = None if ok_ollama else f"{model} not pulled (have: {', '.join(names[:4])})"
         runtime = loaded_runtime(base, model)
     except Exception as exc:
