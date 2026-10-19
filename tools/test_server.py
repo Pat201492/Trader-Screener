@@ -1905,8 +1905,12 @@ from forms_store import FormsStore as _FormsStore
 _FORM4_FIX = (server.REPO_ROOT / "tools" / "edgar_scrubber" / "tests"
               / "fixtures" / "form4_cook.xml")
 _form4_bytes = _FORM4_FIX.read_bytes()
+_F13F_DIR = (server.REPO_ROOT / "tools" / "edgar_scrubber" / "tests" / "fixtures")
+_f13f_primary_bytes = (_F13F_DIR / "form13fhr_primary.xml").read_bytes()
+_f13f_info_bytes = (_F13F_DIR / "form13fhr_infotable.xml").read_bytes()
 _ACCN_OK = "0000320193-26-000031"       # a readable ownership XML
 _ACCN_BAD = "0000000000-26-000099"      # only a wrong-schema XML -> skipped
+_ACCN_13F = "0001067983-26-000057"      # 13F-HR: primary_doc + info table
 
 
 class _FakeXmlClient:
@@ -1937,6 +1941,13 @@ _xml_filings = {
     # ownershipDocument), so pick_xml_rows finds nothing readable.
     _ACCN_BAD: {"items": [{"name": "inst_htm.xml", "type": "XML", "size": "1"}],
                 "docs": {"inst_htm.xml": b"<xbrl><context/></xbrl>"}},
+    # A 13F-HR: the cover page (primary_doc.xml) lists first, then the holdings
+    # in a separate information-table document. pick_xml_rows must skip past the
+    # cover and read the info table, stamping the cover fields onto each row.
+    _ACCN_13F: {"items": [{"name": "primary_doc.xml", "type": "13F-HR", "size": "1"},
+                          {"name": "infotable.xml", "type": "INFORMATION TABLE", "size": "1"}],
+                "docs": {"primary_doc.xml": _f13f_primary_bytes,
+                         "infotable.xml": _f13f_info_bytes}},
 }
 
 _xml_home = Path(tempfile.mkdtemp(prefix="xmlrun-gate-"))
@@ -2030,6 +2041,42 @@ _nxrun = server.RUNS.get(_nrid)
 check("a selection with no CIK is skipped and the run still finishes",
       _nxrun["status"] == "done" and _nxrun.get("filings_skipped") == 1
       and _nxrun.get("rows_written") == 0)
+
+# A 13F-HR run reads the information-table document (not primary_doc.xml) and
+# writes its holdings, each stamped with the cover fields from primary_doc.xml.
+check("13F-HR resolves to the xml path",
+      (server.scrubber_for_forms(["13F-HR"]) or None)
+      and server.scrubber_for_forms(["13F-HR"]).field_source == "xml")
+
+_f13frid = server.RUNS.create("edgar-scrubber", {"limit": 1, "fields": []})
+_ecx.EdgarClient = lambda **kw: _FakeXmlClient(_xml_filings)
+try:
+    server.xml_run(_f13frid,
+                   [{"accession": _ACCN_13F, "cik": "1067983",
+                     "file_date": "2026-08-14"}],
+                   _xml_home, form_type="13F-HR")
+finally:
+    _ecx.EdgarClient = _real_ecx
+_f13frun = server.RUNS.get(_f13frid)
+check("the 13F-HR run completes and writes the one filing",
+      _f13frun["status"] == "done" and _f13frun.get("rows_written") == 1)
+_13f_docs = _f13frun.get("documents") or []
+check("xml_run read the information table, not primary_doc.xml",
+      len(_13f_docs) == 1 and _13f_docs[0]["document"] == "infotable.xml")
+_13f_grid = server.store_forms(form="13F-HR")
+check("the 13F holdings land in FormsStore, one row per infoTable",
+      len(_13f_grid["rows"]) == 3)
+check("a holding carries its lifted numeric values",
+      any(r.get("cusip") == "037833100" and r.get("value") == 91000000
+          and r.get("shares_or_principal") == 915560382
+          for r in _13f_grid["rows"]))
+check("every holding carries the cover fields from primary_doc.xml",
+      all(r.get("report_period") == "06-30-2026"
+          and r.get("manager_name") == "BERKSHIRE HATHAWAY INC"
+          for r in _13f_grid["rows"]))
+check("a holding with no putCall reads back null",
+      any(r.get("name_of_issuer") == "APPLE INC" and r.get("put_call") is None
+          for r in _13f_grid["rows"]))
 
 if _xprev_home is None:
     os.environ.pop("EDGAR_SCRUBBER_HOME", None)
