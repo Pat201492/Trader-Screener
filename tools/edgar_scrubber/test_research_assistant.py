@@ -409,6 +409,43 @@ def run_conversation_checks():
     check("conversation: the schema allows zero searches and requires `question`",
           ra.PLAN_SCHEMA["properties"]["searches"]["minItems"] == 0
           and "question" in ra.PLAN_SCHEMA["required"])
+    run_insider_checks(sp)
+
+
+def run_insider_checks(sp):
+    # #319: insider questions query the market-wide table, not Form 4 keywords.
+    def iq(**kw):
+        base = {"from": "", "to": "", "type": "", "ticker": "", "role": "",
+                "min_value": "", "sort": ""}
+        base.update(kw)
+        return base
+
+    good = iq(**{"from": "2026-09-01", "to": "2026-10-01", "type": "p, s",
+                 "ticker": "nvda", "role": "officer", "min_value": "1000000", "sort": "value"})
+    q, why = ra.validate_insider_query(good, today=TODAY)
+    check("insider: a valid query is kept, codes and ticker normalised",
+          q and not why and q["type"] == "P,S" and q["ticker"] == "NVDA")
+    for bad, reason in ((iq(**{"from": "2026-10-02", "to": "2026-10-01"}), "is after"),
+                        (iq(type="P,X"), "transaction code"),
+                        (iq(role="janitor"), "role"),
+                        (iq(min_value="-5"), "min_value"),
+                        (iq(sort="size"), "sort"),
+                        (iq(ticker="NOT A TICKER"), "ticker"),
+                        (iq(**{"from": "1990-01-01"}), "from")):
+        q, why = ra.validate_insider_query(bad, today=TODAY)
+        check("insider: a bad query (%s) is dropped with a reason" % reason,
+              q is None and any(reason in w for w in why))
+    pi = ra.plan(FakeProvider(json.dumps({
+        "reply": "Checking the insider table.", "searches": [], "question": None,
+        "extract": None, "report": None, "insider_query": iq(ticker="NVDA", type="P")})),
+        "were insiders buying NVDA?", today=TODAY)
+    check("insider: a plan with only an insider query is not reply-only",
+          pi.insider_query and pi.insider_query["ticker"] == "NVDA" and not pi.reply_only
+          and pi.to_dict()["insider_query"] == pi.insider_query)
+    check("insider: the schema makes insider_query nullable-required",
+          "insider_query" in ra.PLAN_SCHEMA["required"])
+    check("insider: the prompt says to use insider_query instead of Form 4 keyword searches",
+          "insider_query" in sp and "instead of keyword-searching Form 4s" in sp)
 
 
 def test_research_assistant():

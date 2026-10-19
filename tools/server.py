@@ -2373,6 +2373,10 @@ def start_fr_brief(params):
 # whether a query is on target without turning one approval into a bulk pull;
 # `edgar_search` would otherwise default to 25 and allow up to 100.
 RESEARCH_MAX_RESULTS = 20
+# An approved insider query (#319) fetches at most this many rows from the
+# pipeline, and folds at most INSIDER_HISTORY_ROWS of them into the chat.
+INSIDER_FETCH_LIMIT = 200
+INSIDER_HISTORY_ROWS = 20
 
 
 def research_home():
@@ -2948,6 +2952,10 @@ def research_plan(params):
     if report:
         batch = RESEARCH.set_field(batch["batch_id"], "report", report) or batch
         batch["question"] = result.question
+    if result.insider_query:
+        batch = RESEARCH.set_field(batch["batch_id"], "insider_query",
+                                   result.insider_query) or batch
+        batch["question"] = result.question
     RESEARCH.append_history(chat_id, [
         {"role": "user", "content": message},
         {"role": "assistant", "content": said},
@@ -2967,11 +2975,23 @@ def research_edit(batch_id, params):
     if dropped:
         return 400, {"error": "edit rejected: every search must be valid",
                      "dropped": dropped}
+    # The insider query (#319) is edited alongside: present -> re-validated
+    # (a bad field rejects the whole edit), explicit null -> removed, absent ->
+    # left as proposed.
+    has_insider = "insider_query" in params
+    insider = None
+    if has_insider and params.get("insider_query") is not None:
+        insider, bad = ra.validate_insider_query(params.get("insider_query"))
+        if bad:
+            return 400, {"error": "edit rejected: the insider query is invalid",
+                         "dropped": bad}
     batch, err = RESEARCH.replace_searches(batch_id, [s.to_dict() for s in kept])
     if err == 404:
         return 404, {"error": "no such batch: %r" % batch_id}
     if err == 409:
         return 409, {"error": "this batch is no longer a proposal and cannot be edited"}
+    if has_insider:
+        batch = RESEARCH.set_field(batch_id, "insider_query", insider) or batch
     return 200, batch
 
 
@@ -2986,6 +3006,7 @@ def approve_research_batch(batch_id):
     if err == 409:
         return 409, {"error": "batch cannot be approved: it already ran, or "
                               "another batch is running on this server"}
+    insider_query = (RESEARCH.get(batch_id) or {}).get("insider_query")
     try:
         results = []
         for s in searches:
@@ -2999,6 +3020,19 @@ def approve_research_batch(batch_id):
         RESEARCH.abort_approve(batch_id)
         raise
     batch = RESEARCH.finish_approve(batch_id, results)
+    insider_turn = None
+    if batch is not None and insider_query:
+        # The market-wide insider table (#319): a pipeline failure is recorded
+        # on the batch -- the searches still ran and the approval still stands.
+        try:
+            data = fetch_insider_trades(insider_params(insider_query)) or {}
+            rows = list(data.get("rows") or [])
+            insider = {"rows": rows, "total": data.get("total", len(rows)), "error": None}
+        except Exception as exc:
+            insider = {"rows": [], "total": None,
+                       "error": "%s: %s" % (type(exc).__name__, exc)}
+        batch = RESEARCH.set_field(batch_id, "insider_results", insider) or batch
+        insider_turn = summarize_insider_for_history(insider_query, insider)
     # Fold a metadata-only summary of what was found back into the chat, so the
     # next plan() reasons from the results without ever seeing filing text.
     if batch is not None:
@@ -3014,8 +3048,50 @@ def approve_research_batch(batch_id):
                 turns.append(rd.digest_history_turn(digest))
         except Exception as exc:
             batch["digest_error"] = "%s: %s" % (type(exc).__name__, exc)
+        if insider_turn:
+            turns.append(insider_turn)
         RESEARCH.append_history(batch["chat_id"], turns)
     return 200, batch
+
+
+def insider_params(query):
+    """The pipeline query string for a validated insider query: only the
+    non-empty filters, plus the fixed fetch limit."""
+    p = {k: v for k, v in (query or {}).items()
+         if k in ("from", "to", "type", "ticker", "role", "min_value", "sort") and v}
+    p["limit"] = str(INSIDER_FETCH_LIMIT)
+    return p
+
+
+def fetch_insider_trades(params):
+    """GET <PIPELINE_API_BASE>/api/insider-trades (a seam: the tests point it at
+    a stub server). Raises on any HTTP or network failure."""
+    import urllib.request
+    from urllib.parse import urlencode
+    base = os.environ.get("PIPELINE_API_BASE", "http://127.0.0.1:8000").rstrip("/")
+    url = "%s/api/insider-trades?%s" % (base, urlencode(params))
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def summarize_insider_for_history(query, insider):
+    """The insider rows as PARSED DATA for the next plan() turn: the query, the
+    total, and the first INSIDER_HISTORY_ROWS rows, one line each."""
+    q = ", ".join("%s=%s" % (k, v) for k, v in (query or {}).items() if v) or "defaults"
+    if insider.get("error"):
+        return {"role": "user", "content":
+                "Insider-trades query (%s) FAILED: %s" % (q, insider["error"])}
+    rows = insider.get("rows") or []
+    shown = rows[:INSIDER_HISTORY_ROWS]
+    lines = ["- %s | %s | %s (%s) | %s | %s sh @ %s = $%s | %s" % (
+        r.get("transaction_date") or "?", r.get("ticker") or "?",
+        r.get("insider_name") or "?", r.get("insider_title") or "?",
+        r.get("transaction_type") or "?", r.get("shares"), r.get("price_per_share"),
+        r.get("total_value"), r.get("sec_url") or r.get("source_url") or "")
+        for r in shown]
+    head = ("Insider-trades table (parsed data, untrusted). Query: %s. %s matching "
+            "row(s); first %d:" % (q, insider.get("total"), len(shown)))
+    return {"role": "user", "content": head + ("\n" + "\n".join(lines) if lines else "\nNo rows.")}
 
 
 def research_digest_for(results):

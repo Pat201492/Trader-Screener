@@ -2432,6 +2432,78 @@ _st, _b = _rb_req("POST", "/plan", {"chat_id": "chat-conv", "message": "JPMorgan
 check("a plan with searches still yields a proposed batch",
       _st == 200 and _b.get("batch_id") and _b.get("status") == "proposed" and len(_b["searches"]) >= 1)
 
+# #319: an insider query runs against the pipeline's /api/insider-trades on approval.
+import http.server as _ihs
+from urllib.parse import urlparse as _iurl, parse_qs as _iqs
+_ins_seen = []
+_ins_rows = [{"transaction_date": "2026-09-%02d" % (i % 28 + 1), "ticker": "NVDA",
+              "insider_name": "Person %d" % i, "insider_title": "Director",
+              "transaction_type": "P", "shares": 100, "price_per_share": 10.0,
+              "total_value": 1000.0, "sec_url": "https://www.sec.gov/x/%d" % i}
+             for i in range(30)]
+
+
+class _InsHandler(_ihs.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        _ins_seen.append(self.path)
+        body = json.dumps({"count": 30, "total": 57, "rows": _ins_rows}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+_ins_httpd = _ihs.ThreadingHTTPServer(("127.0.0.1", 0), _InsHandler)
+threading.Thread(target=_ins_httpd.serve_forever, daemon=True).start()
+_prev_pipe = os.environ.get("PIPELINE_API_BASE")
+os.environ["PIPELINE_API_BASE"] = "http://127.0.0.1:%d" % _ins_httpd.server_address[1]
+_ins_q = {"from": "2026-09-01", "to": "2026-10-01", "type": "P", "ticker": "NVDA",
+          "role": "", "min_value": "", "sort": "value"}
+server.build_research_provider = lambda name, chat_id=None: _FakeResearchProvider({
+    "reply": "Checking insiders.", "searches": [], "question": None, "extract": None,
+    "report": None, "insider_query": _ins_q})
+_st, _ib = _rb_req("POST", "/plan", {"chat_id": "chat-ins", "message": "NVDA insider buys?",
+                                     "provider": "ollama"})
+check("insider: a plan with only an insider query still creates a proposed batch",
+      _st == 200 and _ib.get("batch_id") and (_ib.get("insider_query") or {}).get("ticker") == "NVDA")
+_st, _ie = _rb_req("PUT", "/batch/%s" % _ib["batch_id"],
+                   {"searches": [], "insider_query": dict(_ins_q, role="janitor")})
+check("insider: an edit with a bad insider query is rejected 400", _st == 400)
+_st, _ie = _rb_req("PUT", "/batch/%s" % _ib["batch_id"],
+                   {"searches": [], "insider_query": dict(_ins_q, min_value="500")})
+check("insider: a valid edit is stored",
+      _st == 200 and (_ie.get("insider_query") or {}).get("min_value") == "500")
+_st, _ir = _rb_req("POST", "/batch/%s/approve" % _ib["batch_id"], {})
+_ins_qs = _iqs(_iurl(_ins_seen[-1]).query) if _ins_seen else {}
+check("insider: approval calls /api/insider-trades with exactly the query's filters",
+      bool(_ins_seen) and _iurl(_ins_seen[-1]).path == "/api/insider-trades"
+      and {k: v[0] for k, v in _ins_qs.items()} == {
+          "from": "2026-09-01", "to": "2026-10-01", "type": "P", "ticker": "NVDA",
+          "min_value": "500", "sort": "value", "limit": "200"})
+_ins_res = _ir.get("insider_results") or {}
+check("insider: the rows and total are stored on the batch",
+      _st == 200 and _ins_res.get("total") == 57
+      and len(_ins_res.get("rows") or []) == 30 and _ins_res.get("error") is None)
+_ins_turn = [m for m in server.RESEARCH.history("chat-ins")
+             if (m.get("content") or "").startswith("Insider-trades table")]
+check("insider: the history gets one turn with the total and at most 20 rows",
+      len(_ins_turn) == 1 and "57 matching" in _ins_turn[0]["content"]
+      and _ins_turn[0]["content"].count("\n- ") == 20)
+os.environ["PIPELINE_API_BASE"] = "http://127.0.0.1:1"
+_st, _ib2 = _rb_req("POST", "/plan", {"chat_id": "chat-ins2", "message": "again", "provider": "ollama"})
+_st, _ir2 = _rb_req("POST", "/batch/%s/approve" % _ib2["batch_id"], {})
+check("insider: a pipeline failure is recorded and the approval is still a 200",
+      _st == 200 and _ir2.get("status") == "ran"
+      and bool((_ir2.get("insider_results") or {}).get("error")))
+_ins_httpd.shutdown()
+if _prev_pipe is None:
+    os.environ.pop("PIPELINE_API_BASE", None)
+else:
+    os.environ["PIPELINE_API_BASE"] = _prev_pipe
+
 _rb_httpd.shutdown()
 server.edgar_search = _prev_search
 server.build_research_provider = _prev_build
