@@ -3937,20 +3937,26 @@ async function renderToolFreeResearch(){
 // the planner returned for it; a proposed batch's rows are editable in place and
 // saved with PUT /batch/{id} before the single approve that runs them. A ran
 // batch is read-only and shows its hits grouped by search (#280/#285/#288).
-let RESEARCH={chatId:null,turns:[],sending:false};
+// `provider` is the chat's choice (Ollama by default) and sticks until a new
+// chat is started; `claude` caches the server's availability + reason for the
+// picker; `pending` is a Claude message awaiting its cost confirmation.
+let RESEARCH={chatId:null,turns:[],sending:false,provider:'ollama',
+  claude:{available:null,reason:''},pending:null};
 
 async function renderToolResearch(){
   const v=document.getElementById('view');
   stopPolling();
-  if(!RESEARCH.chatId) RESEARCH={chatId:'chat-'+Date.now(),turns:[],sending:false};
+  if(!RESEARCH.chatId) RESEARCH={chatId:'chat-'+Date.now(),turns:[],sending:false,
+    provider:'ollama',claude:{available:null,reason:''},pending:null};
   const header=`<div class="card" style="margin-bottom:14px">
     <div class="name" style="font-size:16px">Research assistant</div>
     <div class="muted" style="font-size:12px;line-height:1.5;margin-top:6px">
-      Ask a question about SEC filings. The assistant (local Ollama) proposes EDGAR full-text searches as an editable batch — nothing touches the SEC until you approve it with one click.</div></div>`;
+      Ask a question about SEC filings. The assistant proposes EDGAR full-text searches as an editable batch — nothing touches the SEC until you approve it with one click. Pick Ollama (local, free) or Claude (paid; you see the cost and confirm before anything is sent).</div></div>`;
   const panel=`<div class="card">
     <div id="researchLog"></div>
+    <div id="researchProviderPicker" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px"></div>
     <div class="err" id="researchSendErr" style="margin:8px 0"></div>
-    <div style="display:flex;gap:8px;align-items:flex-end;margin-top:10px">
+    <div style="display:flex;gap:8px;align-items:flex-end;margin-top:6px">
       <textarea id="researchInput" rows="2" placeholder="e.g. Which issuers filed autocallable notes this year?"
         onkeydown="if(event.key==='Enter'&&(event.metaKey||event.ctrlKey)){event.preventDefault();sendResearch();}"
         style="flex:1;background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:8px 10px;font-size:12.5px;resize:vertical"></textarea>
@@ -3958,10 +3964,57 @@ async function renderToolResearch(){
         style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer">Ask</button>
     </div>
     <div class="muted" style="font-size:11px;margin-top:4px">Ctrl/⌘ + Enter to send</div>
+    <div id="researchPending"></div>
   </div>
   <div id="docPanel" style="display:none"></div>`;
   v.innerHTML=runnerBanner()+header+panel;
   renderResearchLog();
+  renderProviderPicker();
+  renderPending();
+  loadResearchProviders();
+}
+
+// Fetch provider availability and refresh the picker. A failed fetch leaves
+// Claude's availability unknown (null); the picker then shows it disabled with
+// a generic reason rather than offering a call that would 409/400.
+async function loadResearchProviders(){
+  try{
+    const r=await fetch('/api/tools/research/providers');
+    const data=await r.json();
+    if(!r.ok) throw new Error(data.error||`HTTP ${r.status}`);
+    const claude=(data.providers||[]).find(p=>p.name==='claude');
+    if(claude) RESEARCH.claude={available:!!claude.available,reason:claude.reason||''};
+  }catch(e){
+    RESEARCH.claude={available:false,reason:'provider status unavailable: '+e.message};
+  }
+  renderProviderPicker();
+}
+
+// The per-chat Ollama/Claude picker. Claude's radio is disabled (with the
+// server's reason beside it) whenever it is not available; selecting it is what
+// turns on the cost-confirmation step in sendResearch.
+function renderProviderPicker(){
+  const el=document.getElementById('researchProviderPicker');
+  if(!el) return;
+  const c=RESEARCH.claude;
+  const claudeOff=c.available!==true;
+  const radio=(name,label,disabled)=>`<label style="font-size:12px;cursor:${disabled?'not-allowed':'pointer'};opacity:${disabled?0.5:1};display:inline-flex;gap:5px;align-items:center">
+      <input type="radio" name="researchProvider" value="${name}" ${RESEARCH.provider===name?'checked':''} ${disabled?'disabled':''}
+        onchange="setResearchProvider('${name}')"> ${esc(label)}</label>`;
+  const reason=claudeOff&&c.reason
+    ? `<span class="muted" style="font-size:11px">Claude unavailable — ${esc(c.reason)}</span>`:'';
+  el.innerHTML=`<span class="muted" style="font-size:11px">Provider</span>`
+    +radio('ollama','Ollama (local, free)',false)
+    +radio('claude','Claude (paid)',claudeOff)
+    +reason;
+}
+
+// Switch the chat's provider. Switching away from Claude drops any pending cost
+// confirmation — the estimate was for a Claude call that is no longer wanted.
+function setResearchProvider(name){
+  if(name==='claude'&&RESEARCH.claude.available!==true){ renderProviderPicker(); return; }
+  RESEARCH.provider=name;
+  if(name!=='claude'&&RESEARCH.pending){ RESEARCH.pending=null; renderPending(); }
 }
 
 function renderResearchLog(){
@@ -4084,29 +4137,109 @@ function discardBatch(ti){
 async function sendResearch(){
   const inp=document.getElementById('researchInput');
   const errEl=document.getElementById('researchSendErr');
-  const btn=document.getElementById('researchSendBtn');
   const msg=(inp.value||'').trim();
   if(errEl) errEl.textContent='';
   if(!msg){ if(errEl) errEl.textContent='Type a question first.'; return; }
   if(RESEARCH.sending) return;
+  // Claude bills per call: estimate and confirm the cost BEFORE any /plan. A new
+  // pending confirmation replaces whatever is showing, so Ask never stacks them.
+  if(RESEARCH.provider==='claude'){ RESEARCH.pending=null; requestClaudeEstimate(msg); return; }
+  submitPlan(msg,'ollama',null);
+}
+
+// Ask the server what the next Claude plan() would cost, then show the estimate
+// card. No /plan call happens here — nothing is sent until "Send to Claude".
+async function requestClaudeEstimate(msg){
+  const errEl=document.getElementById('researchSendErr');
+  const btn=document.getElementById('researchSendBtn');
+  RESEARCH.sending=true; if(btn){ btn.disabled=true; btn.textContent='estimating…'; }
+  renderPending();
+  try{
+    const r=await fetch('/api/tools/research/estimate',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({chat_id:RESEARCH.chatId,message:msg,provider:'claude'})});
+    const data=await r.json();
+    if(!r.ok) throw new Error(data.error||`HTTP ${r.status}`);
+    RESEARCH.pending={message:msg,estimate:data};
+  }catch(e){
+    RESEARCH.pending=null;
+    if(errEl) errEl.textContent='Could not estimate the cost: '+e.message;
+  }finally{
+    RESEARCH.sending=false; if(btn){ btn.disabled=false; btn.textContent='Ask'; }
+    renderPending();
+  }
+}
+
+// The cost-confirmation card for a pending Claude message. "Send to Claude"
+// calls /plan with this estimate's id; "Cancel" clears it and sends nothing.
+function renderPending(){
+  const el=document.getElementById('researchPending');
+  if(!el) return;
+  const p=RESEARCH.pending;
+  if(!p){ el.innerHTML=RESEARCH.sending&&RESEARCH.provider==='claude'
+    ? '<div class="loading" style="padding:8px">estimating cost…</div>':''; return; }
+  const e=p.estimate||{};
+  const n=v=>(typeof v==='number'?v:0).toLocaleString();
+  const price=(e.dollars===null||e.dollars===undefined)
+    ? '<span style="color:#e3b341">price unknown</span>'
+    : `<strong>$${Number(e.dollars).toFixed(4)}</strong>`;
+  el.innerHTML=`<div class="card" style="margin-top:10px;border-color:var(--accent)">
+    <div class="name" style="font-size:13px">Send to Claude?</div>
+    <div class="muted" style="font-size:12px;margin:6px 0;white-space:pre-wrap">${esc(p.message)}</div>
+    <div style="font-size:12px;margin:6px 0">
+      Model ${esc(e.model||'?')} · ${n(e.input_tokens)} input + ${n(e.output_tokens)} output tokens · ${price}</div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button onclick="confirmClaudeSend()" ${RESEARCH.sending?'disabled':''}
+        style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">Send to Claude</button>
+      <button onclick="cancelClaudeSend()" ${RESEARCH.sending?'disabled':''}
+        style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px 12px;font-size:12.5px;cursor:pointer">Cancel</button>
+    </div></div>`;
+}
+
+// Approve the shown cost: send exactly the estimated message to Claude's /plan,
+// quoting the estimate_id the gate requires. The pending card clears first.
+function confirmClaudeSend(){
+  const p=RESEARCH.pending;
+  if(!p||RESEARCH.sending) return;
+  const msg=p.message, eid=p.estimate&&p.estimate.estimate_id;
+  RESEARCH.pending=null; renderPending();
+  submitPlan(msg,'claude',eid);
+}
+
+// Abandon the pending Claude message without spending anything.
+function cancelClaudeSend(){
+  RESEARCH.pending=null;
+  renderPending();
+}
+
+// Push the question as a turn and ask /plan for a proposed batch. Shared by the
+// free Ollama path and the confirmed Claude path; `estimateId` (Claude only)
+// unlocks the paid-provider gate.
+async function submitPlan(msg,provider,estimateId){
+  const inp=document.getElementById('researchInput');
+  const errEl=document.getElementById('researchSendErr');
+  const btn=document.getElementById('researchSendBtn');
+  if(errEl) errEl.textContent='';
+  if(RESEARCH.sending) return;
   syncAllProposedBatches();
-  RESEARCH.sending=true; btn.disabled=true; btn.textContent='asking…';
+  RESEARCH.sending=true; if(btn){ btn.disabled=true; btn.textContent='asking…'; }
   const ti=RESEARCH.turns.length;
   RESEARCH.turns.push({question:msg,batch:null,error:null});
   renderResearchLog();
   try{
+    const body={chat_id:RESEARCH.chatId,message:msg,provider};
+    if(estimateId) body.estimate_id=estimateId;
     const r=await fetch('/api/tools/research/plan',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({chat_id:RESEARCH.chatId,message:msg,provider:'ollama'})});
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const data=await r.json();
     if(!r.ok) throw new Error(data.error||`HTTP ${r.status}`);
     data._rowErrors={}; data._error=null; data._running=false;
     RESEARCH.turns[ti].batch=data;
-    inp.value='';
+    if(inp) inp.value='';
   }catch(e){
     RESEARCH.turns[ti].error='Could not plan searches: '+e.message;
   }finally{
-    RESEARCH.sending=false; btn.disabled=false; btn.textContent='Ask';
+    RESEARCH.sending=false; if(btn){ btn.disabled=false; btn.textContent='Ask'; }
     renderResearchLog();
   }
 }

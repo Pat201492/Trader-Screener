@@ -2609,6 +2609,21 @@ def summarize_hits_for_history(results):
                        + "\n".join(lines)}
 
 
+def research_providers():
+    """GET /providers: each research provider the chat can pick, with whether it
+    is usable right now and -- when it is not -- a human reason. Ollama is a local
+    model and always offered; Claude bills per call and is gated on
+    claude_available() (no key, or no SDK, makes it unavailable with a reason).
+    The picker uses this to disable Claude and show why, before any call."""
+    import research_assistant as ra
+    ok, reason = ra.claude_available()
+    return {"providers": [
+        {"name": "ollama", "label": "Ollama", "available": True, "reason": ""},
+        {"name": "claude", "label": "Claude", "available": bool(ok),
+         "reason": "" if ok else reason},
+    ]}
+
+
 def research_estimate(params):
     """POST /estimate: what the NEXT plan() for this chat would cost, plus an
     `estimate_id` the user's paid plan must quote. No provider CALL -- only the
@@ -4119,6 +4134,13 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(fr_brief_view(brief_id))
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 404)
+        if path == "/api/tools/research/providers":
+            # Which providers the picker may offer, and why Claude is disabled
+            # when it is. No provider is built or called -- availability only.
+            try:
+                return self._json(research_providers(), 200)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
         m = re.fullmatch(r"/api/tools/research/batch/([\w.-]+)", path)
         if m:
             # Persisted, so a batch created before a restart answers here after
