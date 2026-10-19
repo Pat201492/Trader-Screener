@@ -2487,6 +2487,16 @@ let SEARCH={hits:[],selected:new Set(),fields:null,defaults:[],query:null};
 // issuer and date range; the form's `q`+`forms` are fixed by the registry entry.
 let SCRUBBERS=[], SCRUBBER_QUERIES=[], SCRUBBER_FIELDS={fields:[],default:[]};
 let INDEX_SCROLL=0;
+// The set of form codes some scrubber can extract (GET /forms), upper-cased.
+// null means "not loaded for this view" -- the per-form scrubber views search a
+// form they own, so every hit is extractable and the distinction never applies.
+// Only the "Search any form" view fills this, because only there can a hit come
+// back for a form nothing extracts.
+let EXTRACTABLE_FORMS=null;
+function isExtractableHit(h){
+  if(!EXTRACTABLE_FORMS) return true;
+  return EXTRACTABLE_FORMS.has(String(h.form||'').trim().toUpperCase());
+}
 
 async function openToolPanel(toolId){
   // Each runnable tool owns its own panel. The scrubber's surface is not a
@@ -2552,6 +2562,18 @@ function renderScrubberIndex(restoreScroll){
         <button style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer"
                 onclick="closeToolPanel()">close</button>
       </div>
+      <div class="scrubberRow" onclick="openAnyFormSearch()"
+          style="display:flex;align-items:center;gap:12px;padding:11px 12px;border:1px dashed var(--accent);border-radius:8px;margin-top:8px;cursor:pointer">
+        <div style="min-width:96px">
+          <div class="name" style="font-size:14px;color:var(--accent)">Search any form</div>
+          <div class="muted" style="font-size:10.5px">EDGAR full-text</div>
+        </div>
+        <div style="flex:1">
+          <div style="font-size:12.5px">Search and open any EDGAR form</div>
+          <div class="muted" style="font-size:11.5px;line-height:1.4;margin-top:2px">Type a form code — hits you can extract keep a Run button; the rest open read-only.</div>
+        </div>
+        <div style="white-space:nowrap"><span class="muted">›</span></div>
+      </div>
       ${rows||'<div class="muted" style="margin-top:10px">The scrubber registry is empty.</div>'}
     </div>`;
   // Back from a scrubber view returns here without losing where you were (#227 AC2).
@@ -2566,6 +2588,7 @@ function openScrubberView(id){
   const s=(SCRUBBERS||[]).find(x=>x.id===id);
   if(!s) return;
   INDEX_SCROLL=(document.scrollingElement||document.documentElement).scrollTop;
+  EXTRACTABLE_FORMS=null;    // this view owns its form; every hit is extractable
   RESULTS_FORM=s.form_type;  // the EDGAR Results tab opens on this form
   const panel=document.getElementById('toolPanel');
   const fi=SCRUBBER_FIELDS||{fields:[],default:[]};
@@ -2614,6 +2637,85 @@ function openScrubberView(id){
     <div id="runPanel" style="display:none"></div>`;
 }
 
+// The form-agnostic view: the operator names the form (not the registry), so
+// this is the one place a hit can come back for a form nothing extracts. It
+// reuses the same ids (sq_q/sq_forms/sq_ciks/sq_start/sq_end/sq_max) and the
+// same runSearch -> /search -> renderHits path as a per-form scrubber view; the
+// only differences are an editable form input and the /forms list it loads so
+// renderHits can mark non-extractable hits "search only".
+async function openAnyFormSearch(){
+  INDEX_SCROLL=(document.scrollingElement||document.documentElement).scrollTop;
+  const panel=document.getElementById('toolPanel');
+  const fi=SCRUBBER_FIELDS||{fields:[],default:[]};
+  SEARCH={hits:[],selected:new Set(),fields:fi.fields,defaults:fi.default,query:null,issuerFilter:null};
+  const inp='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:6px 9px;font-size:13px';
+  // Load the extractable-form set once. A failure here is not fatal -- the search
+  // still works; without the list every hit simply keeps its Run button.
+  try{
+    const data=await (await fetch('/api/tools/edgar-scrubber/forms')).json();
+    EXTRACTABLE_FORMS=Array.isArray(data.forms)
+      ? new Set(data.forms.map(f=>String(f).trim().toUpperCase())) : new Set();
+  }catch(e){ EXTRACTABLE_FORMS=new Set(); }
+  panel.innerHTML=`
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+        <button onclick="renderScrubberIndex(true)" title="back to the form-type index"
+                style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:4px 10px;cursor:pointer">← forms</button>
+        <div class="name">Search any form</div>
+        <span class="muted" style="font-size:11.5px">any EDGAR form type — hits for forms nothing extracts open read-only</span>
+        <button style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer"
+                onclick="closeToolPanel()">close</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-top:10px">
+        <label style="font-size:11.5px;color:var(--muted)">Form code
+          <input id="sq_forms" style="${inp};width:100%;margin-top:3px" placeholder="S-1" value="">
+          <span id="sq_form_err" style="display:block;color:var(--red);font-size:11px;margin-top:3px;min-height:1px"></span></label>
+        <label style="font-size:11.5px;color:var(--muted)">Issuer — ticker or CIK (optional)
+          <input id="sq_ciks" style="${inp};width:100%;margin-top:3px" placeholder="AAPL or 0000320193"></label>
+        <label style="font-size:11.5px;color:var(--muted)">Filed from
+          <input id="sq_start" type="date" style="${inp};width:100%;margin-top:3px"></label>
+        <label style="font-size:11.5px;color:var(--muted)">Filed to
+          <input id="sq_end" type="date" style="${inp};width:100%;margin-top:3px"></label>
+        <label style="font-size:11.5px;color:var(--muted)">Full-text query (optional)
+          <input id="sq_q" style="${inp};width:100%;margin-top:3px" placeholder="words that must appear in the filing"></label>
+      </div>
+      <input type="hidden" id="sq_max" value="25">
+      <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap">
+        <button onclick="runAnyFormSearch()" style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">Search filings</button>
+        <span id="searchNote" class="muted" style="font-size:11.5px"></span>
+      </div>
+      <details style="margin-top:12px">
+        <summary class="muted" style="cursor:pointer;font-size:12px">fields to extract (<span id="fieldCount">${fi.default.length}</span> of ${fi.fields.length})</summary>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:4px;margin-top:8px">
+          ${fi.fields.map(f=>`<label style="font-size:12px;display:flex;gap:6px;align-items:center" title="${esc(f.description||'')}">
+            <input type="checkbox" class="fieldbox" value="${esc(f.name)}" ${fi.default.includes(f.name)?'checked':''} onchange="countFields()">
+            <span>${esc(f.name)}</span>${f.unit?`<span class="muted" style="font-size:10.5px">${esc(f.unit)}</span>`:''}</label>`).join('')}
+        </div>
+      </details>
+      <div id="searchResults"></div>
+    </div>
+    <div id="docPanel" style="display:none"></div>
+    <div id="runPanel" style="display:none"></div>`;
+}
+
+// Validate the form code locally before spending a request, then hand off to the
+// shared runSearch. The pattern mirrors the server's (a leading alphanumeric,
+// then up to 19 of the characters EDGAR form codes use); a server 400 is routed
+// back to the same inline slot by passing its id to runSearch.
+function runAnyFormSearch(){
+  const formEl=document.getElementById('sq_forms');
+  const errEl=document.getElementById('sq_form_err');
+  if(errEl) errEl.textContent='';
+  const form=formEl.value.trim().toUpperCase();
+  formEl.value=form;
+  if(!/^[A-Z0-9][A-Z0-9 .\/-]{0,19}$/.test(form)){
+    if(errEl) errEl.textContent='Enter a form code like S-1 or 424B2 (letters, digits, space . / - only; max 20 characters).';
+    return;
+  }
+  SEARCH.issuerFilter=null;
+  runSearch('sq_form_err');
+}
+
 // Build the SavedQuery for this scrubber -- the exact {id,q,forms,ciks,startdt,
 // enddt} shape crawl accepts -- from the fixed template plus the two operator
 // knobs, then submit it through the EXISTING run path (runSearch -> /search).
@@ -2650,7 +2752,7 @@ function countFields(){
 function chosenFields(){
   return Array.from(document.querySelectorAll('.fieldbox:checked')).map(b=>b.value);
 }
-async function runSearch(){
+async function runSearch(errTargetId){
   const body={
     mode:'flat',
     q:document.getElementById('sq_q').value.trim(),
@@ -2661,6 +2763,8 @@ async function runSearch(){
     max_results:parseInt(document.getElementById('sq_max').value,10)||25,
   };
   const out=document.getElementById('searchResults');
+  const errEl=errTargetId?document.getElementById(errTargetId):null;
+  if(errEl) errEl.textContent='';
   out.innerHTML='<div class="loading">searching EDGAR…</div>';
   let data;
   try{
@@ -2669,10 +2773,17 @@ async function runSearch(){
     data=await r.json();
     if(!r.ok) throw new Error(data.error||`HTTP ${r.status}`);
   }catch(e){
-    out.innerHTML=`<div class="err">${esc(e.message)}</div>`;
+    // With an inline target (the "Search any form" view) a 400 belongs next to
+    // the input that caused it, not in the empty results pane.
+    if(errEl){ errEl.textContent=e.message; out.innerHTML=''; }
+    else out.innerHTML=`<div class="err">${esc(e.message)}</div>`;
     return;
   }
-  SEARCH.hits=data.hits; SEARCH.selected=new Set(data.hits.map((h,i)=>i)); SEARCH.issuerFilter=null;
+  // Pre-select only what a run could actually extract, so a mixed-form search
+  // does not queue read-only hits the extractor has no scrubber for.
+  SEARCH.hits=data.hits;
+  SEARCH.selected=new Set(data.hits.map((h,i)=>i).filter(i=>isExtractableHit(data.hits[i])));
+  SEARCH.issuerFilter=null;
   SEARCH.query=data.query; SEARCH.days=data.days||null; SEARCH.url=data.search_url;
   // The efts total saturates at 10000 (#100) — say "at least" rather than
   // print a count that is not one.
@@ -2739,8 +2850,8 @@ function renderHits(){
     ${facetBar}
     <div class="scroll" style="max-height:320px;border:1px solid var(--border);border-radius:6px">
     <table><tr><th></th><th>Filed</th><th>Form</th><th>Issuer</th><th>Accession</th><th>Read</th></tr>
-    ${vis.map(i=>SEARCH.hits[i]).map((h,n)=>{const i=vis[n];return `<tr>
-      <td><input type="checkbox" ${SEARCH.selected.has(i)?'checked':''} onchange="toggleHit(${i},this.checked)"></td>
+    ${vis.map(i=>SEARCH.hits[i]).map((h,n)=>{const i=vis[n];const ex=isExtractableHit(h);return `<tr>
+      <td>${ex?`<input type="checkbox" ${SEARCH.selected.has(i)?'checked':''} onchange="toggleHit(${i},this.checked)">`:''}</td>
       <td class="muted">${esc(h.file_date||h.sample_day||'')}</td>
       <td class="muted">${esc(h.form||'')}</td>
       <td>${esc(h.issuer||'')}${(h.tickers&&h.tickers.length)?` <span class="muted">(${esc(h.tickers.join(', '))})</span>`:''}</td>
@@ -2748,6 +2859,7 @@ function renderHits(){
       <td style="white-space:nowrap">
         <button onclick="openDocument(${i})" style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:2px 8px;font-size:11.5px;cursor:pointer">open + highlight</button>
         ${h.document_url?`<a href="${h.document_url}" target="_blank" rel="noopener" style="margin-left:6px;font-size:11.5px;color:var(--accent)">EDGAR ↗</a>`:''}
+        ${ex?'':'<span class="muted" title="No scrubber owns this form — it can be read and opened on EDGAR, but not extracted." style="margin-left:6px;font-size:11px">search only, no extractor</span>'}
       </td></tr>`}).join('')}
     </table></div>
     <div class="muted" style="font-size:11.5px;margin-top:6px">Extraction runs locally, ~40s per filing for 9 fields.${hiddenNote}</div>`;
@@ -3375,7 +3487,8 @@ function toggleHit(i,on){
 // Acts on what you can SEE. With an issuer chip active that is how you queue
 // one issuer's filings and nobody else's, in two clicks.
 function toggleAllHits(){
-  const vis=visibleHitIndexes();
+  // Only extractable hits have a checkbox, so select/clear-all acts on those.
+  const vis=visibleHitIndexes().filter(i=>isExtractableHit(SEARCH.hits[i]));
   const all=vis.length&&vis.every(i=>SEARCH.selected.has(i));
   vis.forEach(i=>{ if(all) SEARCH.selected.delete(i); else SEARCH.selected.add(i); });
   renderHits();
