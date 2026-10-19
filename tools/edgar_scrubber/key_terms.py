@@ -289,12 +289,33 @@ def _span_of(term, m, group=1):
     return (term.value_start + m.start(group), term.value_start + m.end(group))
 
 
-_NAME_END = re.compile(r"\s*(?:\n|\(|;|(?<![A-Z])\.\s|(?<![A-Z])\.$|,\s+a\s|,\s+an\s|,\s+which\s)")
+# A name ends at a line break, a ";", a sentence end, ", a/an/which ...", or a
+# parenthetical that DEFINES a term ("(“BofAS”)", "(the “Bank”)") -- not at any
+# "(": "HSBC Securities (USA) Inc." keeps its "(USA)" (golden set, 2026-10-19).
+# "Inc. / Corp. / Co. / Ltd." is not a sentence end ("Goldman Sachs & Co. LLC",
+# "BofA Securities, Inc. (“BofAS”)") unless a sentence plainly starts after it.
+_NOT_ABBR = r"(?<![A-Z])(?<!\bInc)(?<!\bCorp)(?<!\bCo)(?<!\bLtd)"
+_SENTENCE = r"(?=(?:The|This|These|We|See|All|Each|Any|It|Our|Payments?|If|For)\s)"
+_NAME_END = re.compile(r"\s*(?:\n|\((?=[“\"']|the\s|an?\s|collectively|each|together)|;"
+                       rf"|{_NOT_ABBR}\.\s|{_NOT_ABBR}\.$|\.\s+{_SENTENCE}"
+                       r"|,\s+a\s|,\s+an\s|,\s+which\s)")
+# "Inc." / "Corp." / "Co." / "Ltd." / "N.A." keep their period: it is part of
+# the legal name ("BofA Securities, Inc."), unlike a sentence-ending one.
+_ABBREV_END = re.compile(r"(?:\b(?:Inc|Corp|Co|Ltd|Plc|PLC|L\.P|N\.A|S\.A|N\.V|AG|LLC|Corporation)\.?)$")
+
+
+def _trim_name(name):
+    name = name.strip().rstrip(",;")
+    name = re.sub(r"[’']s$", "", name)          # possessive: "...Markets Inc.’s"
+    if name.endswith(".") and not re.search(r"\b(?:Inc|Corp|Co|Ltd|L\.P|N\.A|S\.A|N\.V)\.$", name):
+        name = name[:-1]
+    return name.strip()
 
 
 def _entity(term):
     """A legal-entity name at the start of a term value."""
-    name = _NAME_END.split(term.value, maxsplit=1)[0].strip().rstrip(".")
+    raw = _NAME_END.split(term.value, maxsplit=1)[0]
+    name = _trim_name(raw)
     if 2 <= len(name) <= 120 and not re.search(r"\d{4}", name):
         return name, name, (term.value_start, term.value_start + len(name))
     return None
@@ -304,13 +325,22 @@ def _resolve_defined(text, kt):
     """BofA writes "Guarantor:: BAC." after defining "Bank of America Corporation
     (“BAC” or the “Guarantor”)" on the cover. A short all-caps name is a defined term: report the
     entity it was defined as, with the definition's span."""
-    if not (kt and isinstance(kt.value, str) and re.fullmatch(r"[A-Z&]{2,6}", kt.value)):
+    if not (kt and isinstance(kt.value, str)):
+        return kt
+    # An abbreviation ("BAC", "CGMI") or a one-word defined term ("The Bank" after
+    # "The Toronto-Dominion Bank (the “Bank”)") stands for the entity defined.
+    word = re.fullmatch(r"(?:[Tt]he\s+)?([A-Z][A-Za-z]{2,14})", kt.value)
+    if re.fullmatch(r"[A-Z&]{2,6}", kt.value):
+        term_name = kt.value
+    elif word and word.group(1) in ("Bank", "Company", "Issuer", "Guarantor", "Parent", "Agent"):
+        term_name = word.group(1)
+    else:
         return kt
     # The defined name: a run of capitalised words ("Bank of America Corporation").
-    m = re.search(r"([A-Z][\w.&'’-]*(?:\s+(?:[A-Z][\w.&'’-]*|of|&|and)){0,7})\s*\((?:the\s+)?[“\"]" + re.escape(kt.value) + r"[”\"](?:\)|\s+or\s)", text)
+    m = re.search(r"([A-Z][\w.&'’-]*(?:\s+(?:[A-Z][\w.&'’-]*|of|&|and)){0,7})\s*\((?:the\s+)?[“\"]" + re.escape(term_name) + r"[”\"](?:\)|\s+or\s|,)", text)
     if not m:
         return None          # an unexplained abbreviation is not the legal name
-    name = m.group(1).strip().rstrip(",")
+    name = _trim_name(m.group(1))
     return KeyTermValue(kt.field, name, name, m.span(1)[0:1] + (m.start(1) + len(name),),
                         kt.label, kt.method + "+defined")
 
@@ -373,7 +403,12 @@ def _underlyings(term):
         pos = m.end()
     if not pieces:
         # No tickers: "Common stock of NVIDIA Corporation (the “Underlying Stock”)."
-        head = re.split(r"\s*\(|\n|\.\s+(?=(?:We|The|Each|Its|This|In)\b)", v, maxsplit=1)[0]
+        # Drop defined-term parentheticals first -- HSBC lists "The common stock
+        # of Snowflake Inc. (“SNOW”) and the common stock of ServiceNow, Inc.
+        # (“NOW”) (each referred to as ...)", and cutting at the first "(" lost
+        # ServiceNow (golden set, 2026-10-19).
+        head = re.sub(r"\s*\((?:[“\"]|the\s|each\s|collectively\s|together\s|an?\s)[^()]*\)", "", v)
+        head = re.split(r"\s*\(|\n|\.\s+(?=(?:We|The|Each|Its|This|In)\b)", head, maxsplit=1)[0]
         pieces = [(0, part) for part in re.split(r",\s*(?:and\s+)?(?=the\s)|\s+and\s+(?=the\s)", head, flags=re.I)]
     names, kinds, first_span = [], [], None
     for off, piece in pieces:
@@ -463,7 +498,7 @@ def _parse_for(field, term):
     if field in ("guarantor", "calculation_agent"):
         # Citi: "Guarantee:: All payments due on the securities are fully and
         # unconditionally guaranteed by Citigroup Inc."
-        g = re.search(r"guaranteed by\s+(.{2,80}?)(?:\.\s|\.$|\n|,\s|$)", v[:300])
+        g = re.search(rf"guaranteed by\s+(.{{2,80}}?)(?:{_NOT_ABBR}\.(?:\s|$)|\.\s+{_SENTENCE}|\n|,\s|$)", v[:300])
         if field == "guarantor" and g:
             name = g.group(1).strip()
             s0 = term.value_start + g.start(1)

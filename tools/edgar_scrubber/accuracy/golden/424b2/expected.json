@@ -1,0 +1,472 @@
+{
+ "form": "424B2",
+ "verified": "2026-10-19: every value checked against its term line in the filing (blind/held-out/design sets); absent fields must stay absent",
+ "cases": [
+  {
+   "accession": "0001918704-26-029963",
+   "doc": "0001918704-26-029963.txt.gz",
+   "expected": {
+    "issuer": "BofA Finance LLC",
+    "guarantor": "Bank of America Corporation",
+    "cusip": "09712GX58",
+    "isin": null,
+    "maturity_date": "2029-10-03",
+    "pricing_date": "2026-09-29",
+    "issue_date": "2026-10-02",
+    "contingent_coupon_rate": 19.1,
+    "coupon_barrier_pct": 80.0,
+    "barrier_pct": 80.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "monthly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": 962.8,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "Space Exploration Technologies Corp."
+    ],
+    "calculation_agent": "BofA Securities, Inc."
+   }
+  },
+  {
+   "accession": "0001839882-26-044007",
+   "doc": "0001839882-26-044007.txt.gz",
+   "expected": {
+    "issuer": "The Bank of Nova Scotia",
+    "guarantor": null,
+    "cusip": "06419TUG1",
+    "isin": "US06419TUG11",
+    "maturity_date": "2029-09-20",
+    "pricing_date": "2026-09-17",
+    "issue_date": "2026-09-22",
+    "contingent_coupon_rate": 13.5,
+    "coupon_barrier_pct": 50.0,
+    "barrier_pct": 50.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "quarterly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": null,
+    "estimated_value_low": 934.09,
+    "estimated_value_high": 964.09,
+    "filing_stage": "preliminary",
+    "underlyings": [
+     "GE Vernova Inc."
+    ],
+    "calculation_agent": "Scotia Capital Inc."
+   }
+  },
+  {
+   "accession": "0001839882-26-048757",
+   "doc": "0001839882-26-048757.txt.gz",
+   "expected": {
+    "issuer": "Wells Fargo Finance LLC",
+    "guarantor": "Wells Fargo & Company",
+    "cusip": "95001HRR4",
+    "isin": null,
+    "maturity_date": "2029-10-04",
+    "pricing_date": "2026-09-29",
+    "issue_date": "2026-10-02",
+    "contingent_coupon_rate": 15.0,
+    "coupon_barrier_pct": 50.0,
+    "barrier_pct": 50.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "quarterly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": 957.62,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "ServiceNow, Inc."
+    ],
+    "calculation_agent": "Wells Fargo Securities, LLC"
+   }
+  },
+  {
+   "accession": "0001213900-26-102256",
+   "doc": "0001213900-26-102256.txt.gz",
+   "expected": {
+    "issuer": "JPMorgan Chase Financial Company LLC",
+    "guarantor": "JPMorgan Chase & Co.",
+    "cusip": "46661PVZ7",
+    "isin": null,
+    "maturity_date": "2028-09-21",
+    "pricing_date": "2026-09-18",
+    "issue_date": "2026-09-23",
+    "contingent_coupon_rate": 10.2,
+    "coupon_barrier_pct": 70.0,
+    "barrier_pct": 70.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "quarterly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": 963.7,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "Alphabet Inc."
+    ],
+    "calculation_agent": "J.P. Morgan Securities LLC"
+   }
+  },
+  {
+   "accession": "0001214659-26-011602",
+   "doc": "0001214659-26-011602.txt.gz",
+   "expected": {
+    "issuer": "Bank of Montreal",
+    "guarantor": null,
+    "cusip": "06376MDE1",
+    "isin": null,
+    "maturity_date": "2029-09-13",
+    "pricing_date": "2026-09-09",
+    "issue_date": "2026-09-14",
+    "contingent_coupon_rate": 23.52,
+    "coupon_barrier_pct": 45.0,
+    "barrier_pct": 45.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "monthly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": 964.02,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "Affirm Holdings, Inc.",
+     "CrowdStrike Holdings, Inc.",
+     "Datadog, Inc."
+    ],
+    "calculation_agent": "BMO Capital Markets Corp."
+   }
+  },
+  {
+   "accession": "0001214659-26-012265",
+   "doc": "0001214659-26-012265.txt.gz",
+   "expected": {
+    "issuer": "Bank of Montreal",
+    "guarantor": null,
+    "cusip": "06376MMM3",
+    "isin": null,
+    "maturity_date": "2029-10-04",
+    "pricing_date": "2026-10-01",
+    "issue_date": "2026-10-06",
+    "contingent_coupon_rate": 23.0,
+    "coupon_barrier_pct": 45.0,
+    "barrier_pct": 45.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "monthly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": null,
+    "estimated_value_low": 925.0,
+    "estimated_value_high": null,
+    "filing_stage": "preliminary",
+    "underlyings": [
+     "Blackstone Inc.",
+     "Datadog, Inc.",
+     "Palantir Technologies Inc."
+    ],
+    "calculation_agent": "BMO Capital Markets Corp."
+   }
+  },
+  {
+   "accession": "0001839882-26-045355",
+   "doc": "0001839882-26-045355.txt.gz",
+   "expected": {
+    "issuer": "The Bank of Nova Scotia",
+    "guarantor": null,
+    "cusip": "06419TUP1",
+    "isin": "US06419TUP10",
+    "maturity_date": "2029-09-13",
+    "pricing_date": "2026-09-10",
+    "issue_date": "2026-09-15",
+    "contingent_coupon_rate": 14.15,
+    "coupon_barrier_pct": 60.0,
+    "barrier_pct": 60.0,
+    "autocall_barrier_pct": 95.0,
+    "coupon_frequency": "monthly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": 961.21,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "Space Exploration Technologies Corp."
+    ],
+    "calculation_agent": "Scotia Capital Inc."
+   }
+  },
+  {
+   "accession": "0001839882-26-046419",
+   "doc": "0001839882-26-046419.txt.gz",
+   "expected": {
+    "issuer": "Wells Fargo Finance LLC",
+    "guarantor": "Wells Fargo & Company",
+    "cusip": "95001HPK1",
+    "isin": null,
+    "maturity_date": "2029-09-20",
+    "pricing_date": "2026-09-17",
+    "issue_date": "2026-09-22",
+    "contingent_coupon_rate": 16.15,
+    "coupon_barrier_pct": 50.0,
+    "barrier_pct": 50.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "quarterly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": 966.98,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "Space Exploration Technologies Corp."
+    ],
+    "calculation_agent": "Wells Fargo Securities, LLC"
+   }
+  },
+  {
+   "accession": "0001918704-26-026028",
+   "doc": "0001918704-26-026028.txt.gz",
+   "expected": {
+    "issuer": "BofA Finance LLC",
+    "guarantor": "Bank of America Corporation",
+    "cusip": "09712CYY3",
+    "isin": null,
+    "maturity_date": "2029-09-07",
+    "pricing_date": "2026-09-04",
+    "issue_date": "2026-09-10",
+    "contingent_coupon_rate": 20.0,
+    "coupon_barrier_pct": 79.0,
+    "barrier_pct": 79.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "monthly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": null,
+    "estimated_value_low": 920.0,
+    "estimated_value_high": 970.0,
+    "filing_stage": "preliminary",
+    "underlyings": [
+     "Space Exploration Technologies Corp."
+    ],
+    "calculation_agent": "BofA Securities, Inc."
+   }
+  },
+  {
+   "accession": "0001918704-26-029560",
+   "doc": "0001918704-26-029560.txt.gz",
+   "expected": {
+    "issuer": "BofA Finance LLC",
+    "guarantor": "Bank of America Corporation",
+    "cusip": "09712HDM1",
+    "isin": null,
+    "maturity_date": "2029-09-28",
+    "pricing_date": "2026-09-25",
+    "issue_date": "2026-09-30",
+    "contingent_coupon_rate": 12.05,
+    "coupon_barrier_pct": 70.0,
+    "barrier_pct": 70.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "quarterly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": 970.7,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "NVIDIA Corporation"
+    ],
+    "calculation_agent": "BofA Securities, Inc."
+   }
+  },
+  {
+   "accession": "0000950103-26-015242",
+   "doc": "0000950103-26-015242.txt.gz",
+   "expected": {
+    "issuer": "Royal Bank of Canada",
+    "guarantor": null,
+    "cusip": "78018DD53",
+    "isin": null,
+    "maturity_date": "2029-10-12",
+    "pricing_date": "2026-10-09",
+    "issue_date": "2026-10-15",
+    "contingent_coupon_rate": 11.2,
+    "coupon_barrier_pct": 60.0,
+    "barrier_pct": 50.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "monthly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": null,
+    "estimated_value_low": 919.9,
+    "estimated_value_high": 969.9,
+    "filing_stage": "preliminary",
+    "underlyings": null,
+    "calculation_agent": "RBC Capital Markets, LLC"
+   }
+  },
+  {
+   "accession": "0000950103-26-015263",
+   "doc": "0000950103-26-015263.txt.gz",
+   "expected": {
+    "issuer": "Citigroup Global Markets Holdings Inc.",
+    "guarantor": "Citigroup Inc.",
+    "cusip": "17334DSD5",
+    "isin": "US17334DSD56",
+    "maturity_date": "2029-10-18",
+    "pricing_date": "2026-10-15",
+    "issue_date": "2026-10-20",
+    "contingent_coupon_rate": 10.75,
+    "coupon_barrier_pct": 75.0,
+    "barrier_pct": 75.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": null,
+    "denomination": 1000.0,
+    "estimated_value_per_1000": null,
+    "estimated_value_low": 901.0,
+    "estimated_value_high": null,
+    "filing_stage": "preliminary",
+    "underlyings": [
+     "State Street\u00ae Energy Select Sector SPDR\u00ae ETF",
+     "State Street\u00ae Financial Select Sector SPDR\u00ae ETF",
+     "State Street\u00ae Technology Select Sector SPDR\u00ae ETF"
+    ],
+    "calculation_agent": "Citigroup Global Markets Inc."
+   }
+  },
+  {
+   "accession": "0000950103-26-015365",
+   "doc": "0000950103-26-015365.txt.gz",
+   "expected": {
+    "issuer": "Barclays Bank PLC",
+    "guarantor": null,
+    "cusip": "06749L7E0",
+    "isin": "US06749L7E01",
+    "maturity_date": "2029-10-11",
+    "pricing_date": "2026-10-06",
+    "issue_date": "2026-10-09",
+    "contingent_coupon_rate": 10.5,
+    "coupon_barrier_pct": 70.0,
+    "barrier_pct": 70.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "quarterly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": 959.6,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "UnitedHealth Group Incorporated"
+    ],
+    "calculation_agent": "Barclays Bank PLC"
+   }
+  },
+  {
+   "accession": "0001104659-26-113364",
+   "doc": "0001104659-26-113364.txt.gz",
+   "expected": {
+    "issuer": "HSBC USA Inc.",
+    "guarantor": null,
+    "cusip": "40447LKU3",
+    "isin": "US40447LKU34",
+    "maturity_date": "2029-10-03",
+    "pricing_date": "2026-09-30",
+    "issue_date": "2026-10-05",
+    "contingent_coupon_rate": 19.5,
+    "coupon_barrier_pct": 60.0,
+    "barrier_pct": 60.0,
+    "autocall_barrier_pct": 90.0,
+    "coupon_frequency": "monthly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": 971.7,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "Snowflake Inc.",
+     "ServiceNow, Inc."
+    ],
+    "calculation_agent": "HSBC Securities (USA) Inc."
+   }
+  },
+  {
+   "accession": "0001140361-26-039351",
+   "doc": "0001140361-26-039351.txt.gz",
+   "expected": {
+    "issuer": "The Toronto-Dominion Bank",
+    "guarantor": null,
+    "cusip": "89115NL77",
+    "isin": "US89115NL778",
+    "maturity_date": "2029-10-18",
+    "pricing_date": "2026-10-14",
+    "issue_date": "2026-10-19",
+    "contingent_coupon_rate": 14.75,
+    "coupon_barrier_pct": 60.0,
+    "barrier_pct": 60.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "monthly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": null,
+    "estimated_value_low": 915.0,
+    "estimated_value_high": 950.0,
+    "filing_stage": "preliminary",
+    "underlyings": [
+     "Apple Inc.",
+     "Meta Platforms, Inc.",
+     "NVIDIA Corporation"
+    ],
+    "calculation_agent": "The Toronto-Dominion Bank"
+   }
+  },
+  {
+   "accession": "0001193125-26-415340",
+   "doc": "0001193125-26-415340.txt.gz",
+   "expected": {
+    "issuer": "GS Finance Corp.",
+    "guarantor": "The Goldman Sachs Group, Inc.",
+    "cusip": "40058MB31",
+    "isin": null,
+    "maturity_date": "2029-10-12",
+    "pricing_date": "2026-10-09",
+    "issue_date": "2026-10-15",
+    "contingent_coupon_rate": 22.8,
+    "coupon_barrier_pct": 60.0,
+    "barrier_pct": 60.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": "monthly",
+    "denomination": 1000.0,
+    "estimated_value_per_1000": null,
+    "estimated_value_low": 925.0,
+    "estimated_value_high": 955.0,
+    "filing_stage": "preliminary",
+    "underlyings": [
+     "Strategy Inc"
+    ],
+    "calculation_agent": "Goldman Sachs & Co. LLC"
+   }
+  },
+  {
+   "accession": "0001839882-26-050193",
+   "doc": "0001839882-26-050193.txt.gz",
+   "expected": {
+    "issuer": "Morgan Stanley Finance LLC",
+    "guarantor": "Morgan Stanley",
+    "cusip": "61781L5C0",
+    "isin": "US61781L5C00",
+    "maturity_date": "2027-10-13",
+    "pricing_date": "2026-10-06",
+    "issue_date": "2026-10-09",
+    "contingent_coupon_rate": 14.5,
+    "coupon_barrier_pct": 70.0,
+    "barrier_pct": 70.0,
+    "autocall_barrier_pct": null,
+    "coupon_frequency": null,
+    "denomination": 1000.0,
+    "estimated_value_per_1000": 969.4,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "Blackstone Inc."
+    ],
+    "calculation_agent": null
+   }
+  }
+ ]
+}

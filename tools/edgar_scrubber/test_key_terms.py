@@ -152,7 +152,7 @@ def test_single_colon_terms_when_a_filing_has_no_double_colons():
 
 
 def test_company_issuer_label_and_issuer_stops_at_a_line_break():
-    assert extract_key_terms("Company (Issuer):: GS Finance Corp.")["issuer"].value == "GS Finance Corp"
+    assert extract_key_terms("Company (Issuer):: GS Finance Corp.")["issuer"].value == "GS Finance Corp."
     # RBC: the value ran on into the next line.
     t = "Issuer:: Royal Bank of Canada\nThe common stock of Amazon.com, Inc."
     assert extract_key_terms(t)["issuer"].value == "Royal Bank of Canada"
@@ -299,7 +299,7 @@ def test_guarantor_calculation_agent_isin_denomination():
          "CUSIP / ISIN:: 17334CV68 / US17334CV683\nDenominations:: $1,000 and any integral "
          "multiple of $1,000.\nAgent:: X\n")
     got = extract_key_terms(t)
-    assert got["guarantor"].value == "JPMorgan Chase & Co"
+    assert got["guarantor"].value == "JPMorgan Chase & Co."
     assert got["calculation_agent"].value == "J.P. Morgan Securities LLC"   # "J.P." is not a sentence end
     assert got["isin"].value == "US17334CV683"
     assert got["denomination"].value == 1000.0
@@ -314,7 +314,7 @@ def test_citi_guarantee_sentence():
     t = ("Guarantee:: All payments due on the securities are fully and unconditionally guaranteed "
          "by Citigroup Inc.\nStated principal amount:: $1,000 per security\n")
     got = extract_key_terms(t)
-    assert got["guarantor"].value == "Citigroup Inc"
+    assert got["guarantor"].value == "Citigroup Inc."
     assert got["denomination"].value == 1000.0
 
 

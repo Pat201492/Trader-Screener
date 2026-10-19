@@ -88,6 +88,26 @@ def _bool(s):
     return s.strip().lower() in ("1", "true")
 
 
+_DATE_FORMS = ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y")
+
+
+def _iso_date(value):
+    """Every date as ISO YYYY-MM-DD. EDGAR's XML forms disagree: Form 4 writes
+    2026-10-06, Schedule 13D/G 10/15/2026, 13F-HR 06-30-2026 (golden set,
+    2026-10-19), so a sort or a date filter across forms broke. A string none of
+    the known shapes parses is returned unchanged rather than guessed."""
+    if not value:
+        return value
+    import datetime as _dt
+    v = str(value).strip()
+    for fmt in _DATE_FORMS:
+        try:
+            return _dt.datetime.strptime(v, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return v
+
+
 def read_ownership(xml_text):
     """Read a Form 3/4/5 ``ownershipDocument`` into one row per transaction or
     holding, across both the non-derivative and derivative tables.
@@ -144,10 +164,14 @@ def read_ownership(xml_text):
             post = _first(line, "postTransactionAmounts")
             nature = _first(line, "ownershipNature")
             row = dict(common)
+            # A holding line (nonDerivativeHolding / derivativeHolding) reports a
+            # position, not a trade; say so instead of leaving a row of nulls.
+            tag = line.tag.rsplit("}", 1)[-1]
             row.update({
                 "table": table,
+                "row_kind": "holding" if tag.endswith("Holding") else "transaction",
                 "security_title": _value(line, "securityTitle"),
-                "transaction_date": _value(line, "transactionDate"),
+                "transaction_date": _iso_date(_value(line, "transactionDate")),
                 # transactionCode is plain text, not <value>-wrapped.
                 "transaction_code":
                     _text(_first(line, "transactionCoding"), "transactionCode"),
@@ -218,8 +242,8 @@ def _read_13f_cover(primary_text):
     except ET.ParseError:
         return None, None
     period_el = _deep(root, "periodOfReport")
-    report_period = (period_el.text.strip() or None
-                     if period_el is not None and period_el.text else None)
+    report_period = _iso_date(period_el.text.strip() or None
+                              if period_el is not None and period_el.text else None)
     manager = _deep(root, "filingManager")
     return report_period, _ctext(manager, "name")
 
@@ -357,8 +381,8 @@ def read_schedule_13dg(xml_text):
         "issuer_cik": _dtext(issuer, "issuerCIK", "issuerCik"),
         "issuer_cusip": _dtext(issuer, "issuerCusipNumber", "issuerCusip"),
         "class_title": _dtext(cover, "securitiesClassTitle"),
-        "event_date": _dtext(cover, "dateOfEvent",
-                             "eventDateRequiresFilingThisStatement"),
+        "event_date": _iso_date(_dtext(cover, "dateOfEvent",
+                                       "eventDateRequiresFilingThisStatement")),
         "is_amendment": is_amendment,
     }
 
@@ -482,8 +506,8 @@ def read_form_d(xml_text):
         "industry_group": _dtext(offering, "industryGroupType"),
         "federal_exemptions": _all_dtext(
             _desc(offering, "federalExemptionsExclusions"), "item"),
-        "date_of_first_sale": _dtext(
-            _desc(offering, "dateOfFirstSale"), "value"),
+        "date_of_first_sale": _iso_date(_dtext(
+            _desc(offering, "dateOfFirstSale"), "value")),
         # "Indefinite" is prose, not a number; _num maps it to None.
         "total_offering_amount": _num(_dtext(sales, "totalOfferingAmount")),
         "total_amount_sold": _num(_dtext(sales, "totalAmountSold")),
