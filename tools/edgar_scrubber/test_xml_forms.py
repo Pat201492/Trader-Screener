@@ -10,6 +10,16 @@ FIXTURES = Path(__file__).resolve().parent / "tests" / "fixtures"
 FORM4 = (FIXTURES / "form4_cook.xml").read_text(encoding="utf-8")
 F13F_INFO = (FIXTURES / "form13fhr_infotable.xml").read_text(encoding="utf-8")
 F13F_PRIMARY = (FIXTURES / "form13fhr_primary.xml").read_text(encoding="utf-8")
+SCHED_13D = (FIXTURES / "schedule13d.xml").read_text(encoding="utf-8")
+SCHED_13GA = (FIXTURES / "schedule13ga.xml").read_text(encoding="utf-8")
+
+_SCHED13_ROW_KEYS = {
+    "issuer_name", "issuer_cik", "issuer_cusip", "class_title",
+    "reporting_person", "citizenship_or_organization", "sole_voting_power",
+    "shared_voting_power", "sole_dispositive_power", "shared_dispositive_power",
+    "aggregate_amount_owned", "percent_of_class", "type_of_reporting_person",
+    "event_date", "is_amendment",
+}
 
 _F13F_ROW_KEYS = {
     "name_of_issuer", "title_of_class", "cusip", "value", "shares_or_principal",
@@ -160,3 +170,84 @@ def test_wrong_root_element_raises():
 
 def test_form_code_matched_case_insensitively_and_trimmed():
     assert read_filing(" 4 ", FORM4)[0]["issuer_cik"] == "0000320193"
+
+
+# ── Schedule 13D / 13G ─────────────────────────────────────────────────────────
+
+def test_schedule_13d_one_row_per_person_with_every_key_and_numbers():
+    rows = read_filing("SCHEDULE 13D", SCHED_13D)
+    assert len(rows) == 1
+    row = rows[0]
+    assert set(row) == _SCHED13_ROW_KEYS
+    assert row["issuer_name"] == "Star Equity Holdings, Inc."
+    assert row["issuer_cik"] == "0001210708"
+    assert row["issuer_cusip"] == "443787205"
+    assert row["class_title"] == "Common Stock, par value $0.001 per share"
+    assert row["reporting_person"] == "JEFFREY E. EBERWEIN"
+    assert row["citizenship_or_organization"] == "X1"
+    assert row["type_of_reporting_person"] == "IN"
+    assert row["event_date"] == "06/25/2026"
+    assert row["is_amendment"] is False
+    # Numeric boxes are numbers, not strings; percent_of_class is a number.
+    assert row["sole_voting_power"] == 1149289
+    assert row["sole_dispositive_power"] == 1149289
+    assert row["aggregate_amount_owned"] == 1149289
+    assert row["percent_of_class"] == 30.7
+    assert isinstance(row["percent_of_class"], float)
+    # A box the 13D filer left blank (shared power) reads back None, not zero.
+    assert row["shared_voting_power"] is None
+    assert row["shared_dispositive_power"] is None
+
+
+def test_schedule_13g_amendment_one_row_per_person_with_every_key():
+    rows = read_filing("SCHEDULE 13G/A", SCHED_13GA)
+    assert len(rows) == 2
+    for row in rows:
+        assert set(row) == _SCHED13_ROW_KEYS
+        # The /A amendment flag is set on every row.
+        assert row["is_amendment"] is True
+        # Cover fields are stamped on every row, read through the 13G spellings.
+        assert row["issuer_name"] == "First Majestic Silver Corp."
+        assert row["issuer_cik"] == "0001308648"
+        assert row["issuer_cusip"] == "32076V103"
+        assert row["class_title"] == "Common Shares, no par value"
+        assert row["event_date"] == "01/16/2025"
+
+    first = rows[0]
+    assert first["reporting_person"] == "Electrum Silver US LLC"
+    assert first["citizenship_or_organization"] == "DE"
+    assert first["type_of_reporting_person"] == "OO"
+    # The power boxes are nested two levels down in 13G; read as numbers.
+    assert first["sole_voting_power"] == 0
+    assert first["shared_voting_power"] == 45631412
+    assert first["sole_dispositive_power"] == 0
+    assert first["shared_dispositive_power"] == 45631412
+    assert first["aggregate_amount_owned"] == 45631412
+    assert first["percent_of_class"] == 9.5
+    assert isinstance(first["percent_of_class"], float)
+
+    second = rows[1]
+    assert second["reporting_person"] == "Electrum Strategic Management LLC"
+    assert second["aggregate_amount_owned"] == 56111157
+    assert second["percent_of_class"] == 11.7
+
+
+def test_schedule_13dg_shares_one_reader_across_all_four_form_types():
+    for form in ("SCHEDULE 13D", "SCHEDULE 13D/A",
+                 "SCHEDULE 13G", "SCHEDULE 13G/A"):
+        assert READERS[form] is READERS["SCHEDULE 13D"]
+    # Case and surrounding space do not matter at the front door.
+    assert read_filing(" schedule 13g/a ", SCHED_13GA)[0]["percent_of_class"] == 9.5
+
+
+def test_schedule_13dg_rejects_a_form_4_and_a_13f_cover():
+    # An ownershipDocument is not a 13D/13G submission; a 13F cover page is an
+    # edgarSubmission but in the wrong namespace. Both raise rather than return
+    # garbage rows.
+    with pytest.raises(XmlFormError):
+        read_filing("SCHEDULE 13D", FORM4)
+    with pytest.raises(XmlFormError):
+        read_filing("SCHEDULE 13G", F13F_PRIMARY)
+    # And the ownership reader rejects a 13D submission in turn.
+    with pytest.raises(XmlFormError):
+        read_filing("4", SCHED_13D)

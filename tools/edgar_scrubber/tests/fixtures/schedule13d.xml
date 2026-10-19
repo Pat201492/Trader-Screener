@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sch:edgarSubmission xmlns:sch="http://www.sec.gov/edgar/schedule13D" xmlns:com="http://www.sec.gov/edgar/common">
+  <sch:schemaVersion>X0202</sch:schemaVersion>
+  <sch:headerData>
+    <sch:submissionType>SCHEDULE 13D</sch:submissionType>
+    <sch:filerInfo>
+      <sch:filer>
+        <sch:filerCredentials>
+          <sch:cik>0001548312</sch:cik>
+          <sch:ccc>XXXXXXXX</sch:ccc>
+        </sch:filerCredentials>
+      </sch:filer>
+      <sch:liveTestFlag>LIVE</sch:liveTestFlag>
+    </sch:filerInfo>
+  </sch:headerData>
+  <sch:formData>
+    <sch:coverPageHeader>
+      <sch:securitiesClassTitle>Common Stock, par value $0.001 per share</sch:securitiesClassTitle>
+      <sch:dateOfEvent>06/25/2026</sch:dateOfEvent>
+      <sch:previouslyFiledFlag>false</sch:previouslyFiledFlag>
+      <sch:issuerInfo>
+        <sch:issuerCIK>0001210708</sch:issuerCIK>
+        <sch:issuerCusips>
+          <sch:issuerCusipNumber>443787205</sch:issuerCusipNumber>
+        </sch:issuerCusips>
+        <sch:issuerName>Star Equity Holdings, Inc.</sch:issuerName>
+        <sch:address>
+          <com:street1>53 FOREST AVENUE, SUITE 101</com:street1>
+          <com:city>OLD GREENWICH</com:city>
+          <com:stateOrCountry>CT</com:stateOrCountry>
+          <com:zipCode>06870</com:zipCode>
+        </sch:address>
+      </sch:issuerInfo>
+    </sch:coverPageHeader>
+    <sch:reportingPersons>
+      <sch:reportingPersonInfo>
+        <sch:reportingPersonCIK>0001548312</sch:reportingPersonCIK>
+        <sch:reportingPersonNoCIK>N</sch:reportingPersonNoCIK>
+        <sch:reportingPersonName>JEFFREY E. EBERWEIN</sch:reportingPersonName>
+        <sch:fundType>PF</sch:fundType>
+        <sch:fundType>OO</sch:fundType>
+        <sch:legalProceedings>N</sch:legalProceedings>
+        <sch:citizenshipOrOrganization>X1</sch:citizenshipOrOrganization>
+        <sch:soleVotingPower>1149289.00</sch:soleVotingPower>
+        <sch:soleDispositivePower>1149289.00</sch:soleDispositivePower>
+        <sch:aggregateAmountOwned>1149289.00</sch:aggregateAmountOwned>
+        <sch:isAggregateExcludeShares>N</sch:isAggregateExcludeShares>
+        <sch:percentOfClass>30.7</sch:percentOfClass>
+        <sch:typeOfReportingPerson>IN</sch:typeOfReportingPerson>
+      </sch:reportingPersonInfo>
+    </sch:reportingPersons>
+    <sch:signatureInfo>
+      <sch:signaturePerson>
+        <sch:signatureReportingPerson>JEFFREY E. EBERWEIN</sch:signatureReportingPerson>
+        <sch:signatureDetails>
+          <sch:signature>/s/ Jeffrey E. Eberwein</sch:signature>
+          <sch:title>Jeffrey E. Eberwein</sch:title>
+          <sch:date>06/29/2026</sch:date>
+        </sch:signatureDetails>
+      </sch:signaturePerson>
+    </sch:signatureInfo>
+  </sch:formData>
+</sch:edgarSubmission>

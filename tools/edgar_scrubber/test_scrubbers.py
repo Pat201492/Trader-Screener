@@ -110,6 +110,39 @@ def test_foreign_and_transition_forms():
         check(f"{fid} fixes its own form filter", s is not None and s.forms == (form,))
 
 
+def test_schedule_13dg_owns_the_four_xml_forms_legacy_stays_unowned():
+    section("Schedule 13D/13G owns the 4 XML form types; SC 13D/SC 13G unowned (#291)")
+    scrubbers = sc.load_scrubbers()
+
+    def owner_for(forms):
+        # Exactly scrubber_for_forms' rule: the entry whose `forms` superset the
+        # wanted set, or None.
+        wanted = {f.upper() for f in forms}
+        for s in scrubbers.values():
+            if wanted and wanted <= {f.upper() for f in s.forms}:
+                return s
+        return None
+
+    s = scrubbers.get("schedule-13d-13g")
+    check("registry defines schedule-13d-13g", s is not None)
+    check("schedule-13d-13g is an xml scrubber",
+          s is not None and s.field_source == "xml")
+    check("it owns all four structured-XML 13D/13G form types",
+          s is not None and {f.upper() for f in s.forms} == {
+              "SCHEDULE 13D", "SCHEDULE 13D/A",
+              "SCHEDULE 13G", "SCHEDULE 13G/A"})
+
+    for form in ("SCHEDULE 13D", "SCHEDULE 13D/A",
+                 "SCHEDULE 13G", "SCHEDULE 13G/A"):
+        owner = owner_for([form])
+        check(f"{form} resolves to the xml 13D/13G scrubber",
+              owner is not None and owner.id == "schedule-13d-13g")
+
+    for legacy in ("SC 13D", "SC 13G"):
+        check(f"legacy {legacy} is owned by no scrubber (search-only)",
+              owner_for([legacy]) is None)
+
+
 def test_load_validates_and_names_offender():
     section("A malformed entry fails at load, naming the offending id (#212)")
 
@@ -172,6 +205,7 @@ def main():
         test_field_source_by_form,
         test_registry_ships_forms_and_resolves_queries,
         test_foreign_and_transition_forms,
+        test_schedule_13dg_owns_the_four_xml_forms_legacy_stays_unowned,
         test_load_validates_and_names_offender,
         test_build_query_round_trip,
     ]

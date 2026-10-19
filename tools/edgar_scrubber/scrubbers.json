@@ -108,6 +108,15 @@
       "q": "",
       "forms": ["13F-HR"],
       "field_source": "xml"
+    },
+    {
+      "id": "schedule-13d-13g",
+      "form_type": "SCHEDULE 13D",
+      "display_name": "Schedule 13D/13G beneficial ownership",
+      "purpose": "Beneficial ownership of 5%+ of a class; a structured XML form, one block per reporting person. Legacy SC 13D/SC 13G filings stay search-only.",
+      "q": "",
+      "forms": ["SCHEDULE 13D", "SCHEDULE 13D/A", "SCHEDULE 13G", "SCHEDULE 13G/A"],
+      "field_source": "xml"
     }
   ]
 }
