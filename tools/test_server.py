@@ -2048,6 +2048,16 @@ check("13F-HR resolves to the xml path",
       (server.scrubber_for_forms(["13F-HR"]) or None)
       and server.scrubber_for_forms(["13F-HR"]).field_source == "xml")
 
+# Structured Schedule 13D/13G (#291) resolve to the xml path; the legacy
+# HTML/text SC 13D / SC 13G are owned by no scrubber, so the search view shows
+# them as "search only, no extractor".
+_s13g = server.scrubber_for_forms(["SCHEDULE 13G"])
+check("SCHEDULE 13G resolves to the xml 13D/13G scrubber",
+      _s13g is not None and _s13g.id == "schedule-13d-13g"
+      and _s13g.field_source == "xml")
+check("legacy SC 13G is owned by no scrubber",
+      server.scrubber_for_forms(["SC 13G"]) is None)
+
 _f13frid = server.RUNS.create("edgar-scrubber", {"limit": 1, "fields": []})
 _ecx.EdgarClient = lambda **kw: _FakeXmlClient(_xml_filings)
 try:

@@ -267,16 +267,142 @@ def read_13f(xml_text, primary_text=None):
     return rows
 
 
+# ── Schedule 13D / 13G — 5%+ beneficial ownership ───────────────────────────────
+#
+# Since December 2024 Schedules 13D and 13G are filed as structured XML under the
+# form types `SCHEDULE 13D`, `SCHEDULE 13D/A`, `SCHEDULE 13G` and `SCHEDULE 13G/A`
+# (older `SC 13D` / `SC 13G` are HTML or text and stay search-only). Both carry
+# the issuer's cover page and one block per reporting person — the 5%+ beneficial
+# owner, its citizenship, its voting and dispositive power, the aggregate amount
+# owned and the percent of class.
+#
+# The two forms do NOT share one schema. 13D is the `schedule13D` namespace and
+# spells the event date `dateOfEvent`, the issuer CIK `issuerCIK`, the CUSIP
+# `issuerCusips/issuerCusipNumber`, the aggregate `aggregateAmountOwned`, the
+# percent `percentOfClass`, and lists each person as `reportingPersonInfo` with
+# the power boxes as direct children. 13G is the `schedule13g` namespace and
+# spells the same data `eventDateRequiresFilingThisStatement`, `issuerCik`,
+# `issuerCusip`, `reportingPersonBeneficiallyOwnedAggregateNumberOfShares`,
+# `classPercent`, and `coverPageHeaderReportingPersonDetails` with the power
+# boxes nested under `reportingPersonBeneficiallyOwnedNumberOfShares`. One reader
+# serves all four by matching on the LOCAL element name, case-insensitively, and
+# accepting either spelling for the fields the two schemas name differently; a
+# box the filer left blank reads back as None, never a zero.
+
+
+# The per-person block, by local name, in each schema.
+_SCHED13_PERSON_TAGS = ("reportingPersonInfo",
+                        "coverPageHeaderReportingPersonDetails")
+
+
+def _desc(elem, *names):
+    """First element at or below ``elem`` whose local name is any of ``names``
+    (case-insensitive, namespace ignored), or None. A descendant search because
+    the 13D and 13G schemas nest the same datum at different depths — a power box
+    is a direct child in 13D and two levels down in 13G."""
+    if elem is None:
+        return None
+    wanted = {n.lower() for n in names}
+    for e in elem.iter():
+        if _local(e.tag).lower() in wanted:
+            return e
+    return None
+
+
+def _dtext(elem, *names):
+    """Stripped text of the first descendant matching ``names`` (see ``_desc``),
+    or None when it is absent or empty."""
+    found = _desc(elem, *names)
+    if found is None or found.text is None:
+        return None
+    return found.text.strip() or None
+
+
+def read_schedule_13dg(xml_text):
+    """Read a structured Schedule 13D/13G into one row per reporting person.
+
+    Serves all four XML form types (`SCHEDULE 13D`, `SCHEDULE 13D/A`,
+    `SCHEDULE 13G`, `SCHEDULE 13G/A`). Every row carries the issuer and cover
+    fields (constant across the filing) plus that person's citizenship, voting
+    and dispositive power, aggregate amount owned, percent of class and type;
+    `event_date` and `is_amendment` are stamped on every row. `is_amendment` is
+    read from the filing's own `submissionType` (a `/A` suffix), not guessed.
+
+    Raises ``XmlFormError`` if the text is not well-formed XML or is not a
+    Schedule 13D/13G submission (a Form 4 or a 13F cover page, say). Numeric
+    boxes — the power boxes, the aggregate and the percent — come back as
+    numbers; a box the filer omitted is None.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise XmlFormError(f"not well-formed XML: {exc}") from exc
+    # The root is `edgarSubmission` in a `schedule13D`/`schedule13g` namespace.
+    # That namespace is what tells a 13D/13G apart from a 13F-HR cover page,
+    # whose root is also `edgarSubmission` but in the thirteenF namespace.
+    if _local(root.tag).lower() != "edgarsubmission" \
+            or "schedule13" not in root.tag.lower():
+        raise XmlFormError(
+            f"not a Schedule 13D/13G submission (root is {root.tag!r})")
+
+    submission_type = _dtext(root, "submissionType")
+    is_amendment = bool(submission_type
+                        and submission_type.strip().upper().endswith("/A"))
+
+    cover = _desc(root, "coverPageHeader")
+    issuer = _desc(cover, "issuerInfo")
+    common = {
+        "issuer_name": _dtext(issuer, "issuerName"),
+        "issuer_cik": _dtext(issuer, "issuerCIK", "issuerCik"),
+        "issuer_cusip": _dtext(issuer, "issuerCusipNumber", "issuerCusip"),
+        "class_title": _dtext(cover, "securitiesClassTitle"),
+        "event_date": _dtext(cover, "dateOfEvent",
+                             "eventDateRequiresFilingThisStatement"),
+        "is_amendment": is_amendment,
+    }
+
+    rows = []
+    person_tags = {t.lower() for t in _SCHED13_PERSON_TAGS}
+    for person in root.iter():
+        if _local(person.tag).lower() not in person_tags:
+            continue
+        row = dict(common)
+        row.update({
+            "reporting_person": _dtext(person, "reportingPersonName"),
+            "citizenship_or_organization":
+                _dtext(person, "citizenshipOrOrganization"),
+            "sole_voting_power": _num(_dtext(person, "soleVotingPower")),
+            "shared_voting_power": _num(_dtext(person, "sharedVotingPower")),
+            "sole_dispositive_power":
+                _num(_dtext(person, "soleDispositivePower")),
+            "shared_dispositive_power":
+                _num(_dtext(person, "sharedDispositivePower")),
+            "aggregate_amount_owned": _num(_dtext(
+                person, "aggregateAmountOwned",
+                "reportingPersonBeneficiallyOwnedAggregateNumberOfShares")),
+            "percent_of_class":
+                _num(_dtext(person, "percentOfClass", "classPercent")),
+            "type_of_reporting_person":
+                _dtext(person, "typeOfReportingPerson"),
+        })
+        rows.append(row)
+    return rows
+
+
 # ── Registry + front door ──────────────────────────────────────────────────────
 
-# Form code -> reader. Later issues extend this (SC 13D/13G, D); each reader owns
-# its schema check and raises XmlFormError when handed another form's XML. Codes
-# are matched case-insensitively (see `read_filing`).
+# Form code -> reader. Later issues extend this (Form D); each reader owns its
+# schema check and raises XmlFormError when handed another form's XML. Codes are
+# matched case-insensitively (see `read_filing`).
 READERS = {
     "3": read_ownership,
     "4": read_ownership,
     "5": read_ownership,
     "13F-HR": read_13f,
+    "SCHEDULE 13D": read_schedule_13dg,
+    "SCHEDULE 13D/A": read_schedule_13dg,
+    "SCHEDULE 13G": read_schedule_13dg,
+    "SCHEDULE 13G/A": read_schedule_13dg,
 }
 
 
