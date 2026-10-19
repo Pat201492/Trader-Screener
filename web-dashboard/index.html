@@ -3164,7 +3164,12 @@ async function acceptProposal(idx){
   await loadAnnotations();
 }
 async function openDocument(i,withPreview){
-  const hit=SEARCH.hits[i];
+  await openFilingDoc(SEARCH.hits[i],withPreview);
+}
+// Open one filing's primary document in the shared doc panel. Takes a hit
+// object (not a SEARCH index) so the Research tab can open a filing it found
+// through a different path — same panel, same hand-marking, same EDGAR links.
+async function openFilingDoc(hit,withPreview){
   const panel=document.getElementById('docPanel');
   panel.style.display='block';
   panel.innerHTML='<div class="loading">fetching the filing…</div>';
@@ -3918,6 +3923,277 @@ async function renderToolFreeResearch(){
   stopPolling();
   const t=await toolEntry('free-research');
   v.innerHTML=runnerBanner()+toolHeader(t)+`<div id="toolPanel" style="display:none"></div>`;
+}
+
+// ── Research assistant: ask, review a proposed batch, approve, read results ──
+// The assistant (local Ollama) PROPOSES EDGAR full-text searches; nothing runs
+// until the user clicks "Run N searches". A turn is one question and the batch
+// the planner returned for it; a proposed batch's rows are editable in place and
+// saved with PUT /batch/{id} before the single approve that runs them. A ran
+// batch is read-only and shows its hits grouped by search (#280/#285/#288).
+let RESEARCH={chatId:null,turns:[],sending:false};
+
+async function renderToolResearch(){
+  const v=document.getElementById('view');
+  stopPolling();
+  if(!RESEARCH.chatId) RESEARCH={chatId:'chat-'+Date.now(),turns:[],sending:false};
+  const header=`<div class="card" style="margin-bottom:14px">
+    <div class="name" style="font-size:16px">Research assistant</div>
+    <div class="muted" style="font-size:12px;line-height:1.5;margin-top:6px">
+      Ask a question about SEC filings. The assistant (local Ollama) proposes EDGAR full-text searches as an editable batch — nothing touches the SEC until you approve it with one click.</div></div>`;
+  const panel=`<div class="card">
+    <div id="researchLog"></div>
+    <div class="err" id="researchSendErr" style="margin:8px 0"></div>
+    <div style="display:flex;gap:8px;align-items:flex-end;margin-top:10px">
+      <textarea id="researchInput" rows="2" placeholder="e.g. Which issuers filed autocallable notes this year?"
+        onkeydown="if(event.key==='Enter'&&(event.metaKey||event.ctrlKey)){event.preventDefault();sendResearch();}"
+        style="flex:1;background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:8px 10px;font-size:12.5px;resize:vertical"></textarea>
+      <button id="researchSendBtn" onclick="sendResearch()"
+        style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer">Ask</button>
+    </div>
+    <div class="muted" style="font-size:11px;margin-top:4px">Ctrl/⌘ + Enter to send</div>
+  </div>
+  <div id="docPanel" style="display:none"></div>`;
+  v.innerHTML=runnerBanner()+header+panel;
+  renderResearchLog();
+}
+
+function renderResearchLog(){
+  const log=document.getElementById('researchLog');
+  if(!log) return;
+  log.innerHTML = RESEARCH.turns.length
+    ? RESEARCH.turns.map((t,i)=>researchTurnHtml(t,i)).join('')
+    : `<div class="muted" style="font-size:12px;padding:6px 0">Ask a question about SEC filings — the assistant proposes EDGAR searches you can edit and run. Nothing runs until you click Run.</div>`;
+}
+
+function researchTurnHtml(turn,ti){
+  const you=`<div style="margin:12px 0 6px"><span class="muted" style="font-size:11px">you</span>
+     <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 11px;font-size:12.5px;white-space:pre-wrap">${esc(turn.question)}</div></div>`;
+  let assistant='';
+  if(turn.error){
+    assistant=`<div class="err" style="margin:6px 0">${esc(turn.error)}</div>`;
+  }else if(turn.batch){
+    const reply=turn.batch.reply?`<div style="font-size:12.5px;margin:4px 0 8px">${esc(turn.batch.reply)}</div>`:'';
+    assistant=`<div><span class="muted" style="font-size:11px">assistant</span>${reply}
+      <div class="card" id="batchCard_${ti}" style="margin:0">${batchCardInner(turn.batch,ti)}</div></div>`;
+  }else{
+    assistant=`<div class="loading" style="padding:8px">planning searches…</div>`;
+  }
+  return you+assistant;
+}
+
+// The one batch card. Editable rows while "proposed", read-only results once
+// "ran". Re-rendered in place (into #batchCard_<ti>) by updateBatchCard so a row
+// edit elsewhere on the page is never disturbed.
+function batchCardInner(batch,ti){
+  if(!batch) return '';
+  const ran=batch.status==='ran';
+  const head=`<div class="name" style="font-size:13px">Proposed searches
+      <span class="muted" style="font-weight:400;font-size:11.5px">· ${batch.searches.length} search(es)${ran?' · <span style="color:var(--green)">ran</span>':''}</span></div>`;
+  if(ran) return head+researchResultsHtml(batch,ti);
+  const running=batch._running;
+  const rows=batch.searches.map((s,i)=>researchRowHtml(s,ti,i,batch._rowErrors||{})).join('');
+  const dropped=(batch.dropped&&batch.dropped.length)
+    ? `<div style="font-size:11px;margin:6px 0;color:#e3b341">The planner dropped: ${batch.dropped.map(esc).join('; ')}</div>`:'';
+  const gerr=batch._error?`<div class="err" style="margin:8px 0">${esc(batch._error)}</div>`:'';
+  const n=batch.searches.length;
+  const controls=`<div style="display:flex;gap:8px;margin-top:10px">
+      <button onclick="runBatch(${ti})" ${running||!n?'disabled':''}
+        style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">
+        ${running?'running…':`Run ${n} search${n===1?'':'es'}`}</button>
+      <button onclick="discardBatch(${ti})" ${running?'disabled':''}
+        style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px 12px;font-size:12.5px;cursor:pointer">
+        Discard</button>
+    </div>`;
+  return head+dropped
+    +`<div style="margin-top:8px">${rows||'<div class="muted" style="font-size:12px">No searches left — discard this batch.</div>'}</div>`
+    +gerr+controls;
+}
+
+function researchRowHtml(s,ti,i,errs){
+  const inp='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:4px 7px;font-size:12px';
+  const err=errs[i];
+  return `<div style="border:1px solid var(--border);border-radius:6px;padding:9px;margin-bottom:8px">
+    <div style="display:flex;gap:8px;align-items:baseline">
+      <span class="muted" style="font-size:11px">#${i+1}</span>
+      <input id="rs_q_${ti}_${i}" value="${esc(s.q||'')}" placeholder="full-text query" style="${inp};flex:1">
+      <button onclick="deleteSearchRow(${ti},${i})" title="remove this search"
+        style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">delete</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+      <label class="muted" style="font-size:11px">forms <input id="rs_forms_${ti}_${i}" value="${esc((s.forms||[]).join(', '))}" placeholder="10-K, 424B2" style="${inp};width:150px"></label>
+      <label class="muted" style="font-size:11px">issuer <input id="rs_ciks_${ti}_${i}" value="${esc((s.ciks||[]).join(', '))}" placeholder="AAPL, 320193" style="${inp};width:140px"></label>
+      <label class="muted" style="font-size:11px">from <input id="rs_start_${ti}_${i}" value="${esc(s.startdt||'')}" placeholder="YYYY-MM-DD" style="${inp};width:110px"></label>
+      <label class="muted" style="font-size:11px">to <input id="rs_end_${ti}_${i}" value="${esc(s.enddt||'')}" placeholder="YYYY-MM-DD" style="${inp};width:110px"></label>
+    </div>
+    <input id="rs_rat_${ti}_${i}" value="${esc(s.rationale||'')}" placeholder="why this search helps" style="${inp};width:100%;margin-top:6px">
+    ${err?`<div class="err" style="margin-top:6px;font-size:11.5px">${esc(err)}</div>`:''}
+  </div>`;
+}
+
+// Read every row's inputs back into the batch's model, so a delete, a re-render,
+// or a run carries the user's edits — the DOM is the source of truth while the
+// batch is proposed. A row not currently in the DOM (none should be) is kept.
+function readBatchRows(batch,ti){
+  const splitList=v=>(v||'').split(',').map(x=>x.trim()).filter(Boolean);
+  const g=id=>{const el=document.getElementById(id);return el?el.value:undefined;};
+  batch.searches=batch.searches.map((s,i)=>{
+    const q=g(`rs_q_${ti}_${i}`);
+    if(q===undefined) return s;
+    return {q:q.trim(),
+      forms:splitList(g(`rs_forms_${ti}_${i}`)),
+      ciks:splitList(g(`rs_ciks_${ti}_${i}`)),
+      startdt:(g(`rs_start_${ti}_${i}`)||'').trim(),
+      enddt:(g(`rs_end_${ti}_${i}`)||'').trim(),
+      rationale:(g(`rs_rat_${ti}_${i}`)||'').trim()};
+  });
+}
+
+function syncAllProposedBatches(){
+  RESEARCH.turns.forEach((t,i)=>{ if(t.batch&&t.batch.status==='proposed') readBatchRows(t.batch,i); });
+}
+
+function updateBatchCard(ti){
+  const el=document.getElementById('batchCard_'+ti);
+  if(el) el.innerHTML=batchCardInner(RESEARCH.turns[ti].batch,ti);
+}
+
+function deleteSearchRow(ti,i){
+  const batch=RESEARCH.turns[ti].batch;
+  readBatchRows(batch,ti);
+  batch.searches.splice(i,1);
+  batch._rowErrors={};
+  updateBatchCard(ti);
+}
+
+function discardBatch(ti){
+  // Drop the proposal from the chat. The stored batch is left untouched on the
+  // server — it simply never gets approved; nothing ran, so there is nothing to
+  // undo. Sync siblings first so a full re-render keeps their edits.
+  syncAllProposedBatches();
+  RESEARCH.turns.splice(ti,1);
+  renderResearchLog();
+}
+
+async function sendResearch(){
+  const inp=document.getElementById('researchInput');
+  const errEl=document.getElementById('researchSendErr');
+  const btn=document.getElementById('researchSendBtn');
+  const msg=(inp.value||'').trim();
+  if(errEl) errEl.textContent='';
+  if(!msg){ if(errEl) errEl.textContent='Type a question first.'; return; }
+  if(RESEARCH.sending) return;
+  syncAllProposedBatches();
+  RESEARCH.sending=true; btn.disabled=true; btn.textContent='asking…';
+  const ti=RESEARCH.turns.length;
+  RESEARCH.turns.push({question:msg,batch:null,error:null});
+  renderResearchLog();
+  try{
+    const r=await fetch('/api/tools/research/plan',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({chat_id:RESEARCH.chatId,message:msg,provider:'ollama'})});
+    const data=await r.json();
+    if(!r.ok) throw new Error(data.error||`HTTP ${r.status}`);
+    data._rowErrors={}; data._error=null; data._running=false;
+    RESEARCH.turns[ti].batch=data;
+    inp.value='';
+  }catch(e){
+    RESEARCH.turns[ti].error='Could not plan searches: '+e.message;
+  }finally{
+    RESEARCH.sending=false; btn.disabled=false; btn.textContent='Ask';
+    renderResearchLog();
+  }
+}
+
+async function runBatch(ti){
+  const turn=RESEARCH.turns[ti], batch=turn.batch;
+  readBatchRows(batch,ti);
+  batch._rowErrors={}; batch._error=null; batch._running=true;
+  updateBatchCard(ti);
+  try{
+    // PUT the edited searches BEFORE approve, so what runs is exactly what the
+    // user sees. A single invalid row rejects the whole edit (400); its message
+    // lands on that row, never a quietly-dropped search.
+    const put=await fetch('/api/tools/research/batch/'+encodeURIComponent(batch.batch_id),{
+      method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({searches:batch.searches})});
+    const pd=await put.json();
+    if(!put.ok){
+      batch._running=false;
+      applyEditErrors(batch,pd);
+      updateBatchCard(ti);
+      return;
+    }
+    // Edits saved. One approve runs every stored search and returns the ran
+    // batch, with its hits grouped by search.
+    const ap=await fetch('/api/tools/research/batch/'+encodeURIComponent(batch.batch_id)+'/approve',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const ad=await ap.json();
+    if(!ap.ok){
+      batch._running=false;
+      batch._error=ad.error||`HTTP ${ap.status}`;
+      updateBatchCard(ti);
+      return;
+    }
+    ad._rowErrors={}; ad._error=null; ad._running=false;
+    turn.batch=ad;
+  }catch(e){
+    batch._running=false;
+    batch._error='Run failed: '+e.message;
+  }
+  updateBatchCard(ti);
+}
+
+// Map the server's `dropped` reasons ("search 2: invalid form code 'FORM!'") to
+// the rows they name; anything unparseable (or a bare `error`) shows card-wide.
+function applyEditErrors(batch,pd){
+  batch._rowErrors={}; batch._error=null;
+  const dropped=(pd&&pd.dropped)||[];
+  let landed=false;
+  dropped.forEach(d=>{
+    const m=/^search\s+(\d+)\s*:\s*(.*)$/i.exec(d);
+    if(m){ batch._rowErrors[parseInt(m[1],10)-1]=m[2]||d; landed=true; }
+    else batch._error=(batch._error?batch._error+' · ':'')+d;
+  });
+  if(!landed && !batch._error) batch._error=(pd&&pd.error)||'Edit rejected.';
+}
+
+function researchResultsHtml(batch,ti){
+  const groups=(batch.hits||[]).map((grp,gi)=>{
+    const q=grp.query||{}, res=grp.result||{};
+    const hits=res.hits||[];
+    const meta=[q.forms&&q.forms.length?`forms ${esc(q.forms.join(', '))}`:'',
+                q.ciks&&q.ciks.length?`issuer ${esc(q.ciks.join(', '))}`:'',
+                (q.startdt||q.enddt)?`${esc(q.startdt||'…')} → ${esc(q.enddt||'…')}`:''].filter(Boolean).join(' · ');
+    const rows=hits.length?hits.map((h,hi)=>{
+      const link=h.document_url||h.filing_url;
+      return `<tr>
+        <td class="muted">${esc(h.file_date||'')}</td>
+        <td class="muted">${esc(h.form||'')}</td>
+        <td>${esc(h.issuer||'')}${(h.tickers&&h.tickers.length)?` <span class="muted">(${esc(h.tickers.join(', '))})</span>`:''}</td>
+        <td style="white-space:nowrap">
+          <button onclick="openResearchFiling(${ti},${gi},${hi})" style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:2px 8px;font-size:11.5px;cursor:pointer">Open in scrubber</button>
+          ${link?`<a href="${esc(link)}" target="_blank" rel="noopener" style="margin-left:6px;font-size:11.5px;color:var(--accent)">sec.gov ↗</a>`:''}
+        </td></tr>`;}).join('')
+      : `<tr><td colspan="4" class="muted" style="font-size:12px">No filings matched.</td></tr>`;
+    const count=res.total!=null?res.total:hits.length;
+    return `<div style="margin-top:12px">
+      <div style="font-size:12.5px"><strong>${esc(q.q||'(no phrase)')}</strong>
+        <span class="muted" style="font-size:11px">· ${res.saturated?'at least ':''}${count} match(es), showing ${hits.length}</span></div>
+      ${meta?`<div class="muted" style="font-size:11px;margin-top:2px">${meta}</div>`:''}
+      ${q.rationale?`<div class="muted" style="font-size:11px;margin-top:2px">${esc(q.rationale)}</div>`:''}
+      <div class="scroll" style="max-height:240px;border:1px solid var(--border);border-radius:6px;margin-top:6px">
+        <table><tr><th>Filed</th><th>Form</th><th>Filer</th><th>Read</th></tr>${rows}</table></div>
+      ${res.search_url?`<a href="${esc(res.search_url)}" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent)">this search on EDGAR ↗</a>`:''}
+    </div>`;
+  }).join('');
+  return groups||'<div class="muted" style="font-size:12px">This batch ran with no searches.</div>';
+}
+
+function openResearchFiling(ti,gi,hi){
+  const grp=((((RESEARCH.turns[ti]||{}).batch||{}).hits)||[])[gi]||{};
+  const hit=((grp.result||{}).hits||[])[hi];
+  if(hit) openFilingDoc(hit);
 }
 
 // A model tool is a pipeline field, not something you run: it has inputs, one
@@ -4985,6 +5261,7 @@ const SECTIONS={
   tools: {label:'Tools', icon:'🧰', desc:'One tab per tool — each does something different',
           tabs:[['edgar-scrubber','EDGAR Scrubber',renderToolEdgarScrubber],
                 ['edgar-results','EDGAR Results',()=>renderToolEdgarResults()],
+                ['research','Research',renderToolResearch],
                 ['free-research','Free Research',renderToolFreeResearch],
                 ['testing','Testing',renderToolTesting],
                 ['magic-formula','Magic Formula',()=>renderToolModel('magic-formula')],
