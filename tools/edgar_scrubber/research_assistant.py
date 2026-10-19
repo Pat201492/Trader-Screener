@@ -32,8 +32,10 @@ self-check:  python tools/edgar_scrubber/test_research_assistant.py
 import abc
 import datetime
 import json
+import math
 import os
 import re
+from pathlib import Path
 
 try:  # package import: tools.edgar_scrubber.research_assistant
     from . import ollama_client as _oc
@@ -47,6 +49,16 @@ MAX_SEARCHES = 5
 MAX_Q_CHARS = 200
 MAX_YEARS_BACK = 25
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5"
+
+# Cost estimation. Rough but honest: APIs bill by their own tokenizer, but 4
+# characters per token is the long-standing ballpark for English, and the point
+# here is an order-of-magnitude figure the user sees BEFORE approving a paid
+# call, not an invoice. The output allowance mirrors ClaudeProvider's max_tokens
+# -- the call could cost up to that many output tokens.
+CHARS_PER_TOKEN = 4
+OUTPUT_TOKEN_ALLOWANCE = 2048
+# The editable price table lives beside this module.
+PRICES_PATH = Path(__file__).resolve().parent / "research_prices.json"
 
 # A form type as EDGAR prints it: "424B2", "10-K", "SC 13D/A", "N-1A". Upper-cased
 # before the test, so "10-k" passes and normalizes; a leading space, a lowercase
@@ -365,6 +377,71 @@ def claude_available():
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return False, "ANTHROPIC_API_KEY is not set"
     return True, ""
+
+
+# -- cost estimate ------------------------------------------------------------
+
+def load_prices(path=None):
+    """The editable price table as {model_id: {input_per_mtok, output_per_mtok}}.
+
+    Reads research_prices.json beside this module (override with `path`). Keys
+    beginning with "_" are comments and are skipped. A missing or malformed file
+    is not fatal -- it just means no model has a known price, so every estimate
+    comes back in tokens with dollars=None (except Ollama, priced at 0)."""
+    path = Path(path) if path is not None else PRICES_PATH
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items()
+            if not k.startswith("_") and isinstance(v, dict)}
+
+
+def _count_tokens(text):
+    """Characters / CHARS_PER_TOKEN, rounded up so any non-empty text is >=1
+    token and a longer string is never estimated as fewer tokens."""
+    return math.ceil(len(text) / CHARS_PER_TOKEN)
+
+
+def estimate_cost(provider, message, history=None, prices=None):
+    """Estimate what the NEXT `plan()` call to `provider` would cost, so the user
+    can approve (or not) before any money is spent.
+
+    Returns a dict:
+      * `model`         -- the provider's model id (may be None).
+      * `input_tokens`  -- system prompt + history + message, at
+        CHARS_PER_TOKEN characters per token; grows with the history.
+      * `output_tokens` -- the OUTPUT_TOKEN_ALLOWANCE the call may use.
+      * `dollars`       -- input_tokens x input_per_mtok + output_tokens x
+        output_per_mtok (per million tokens) when the model has a price entry;
+        `None` when it does not; `0.0` for a local Ollama provider, which is
+        free regardless of the table.
+
+    No network, no provider call -- this only measures the text that WOULD be
+    sent. `prices` can be injected (the tests do) to avoid touching disk."""
+    history = history or []
+    parts = [SYSTEM_PROMPT, str(message)]
+    for m in history:
+        parts.append(str(m.get("content", "")) if isinstance(m, dict) else str(m))
+    input_tokens = _count_tokens("".join(parts))
+    output_tokens = OUTPUT_TOKEN_ALLOWANCE
+    model = getattr(provider, "model", None)
+
+    if isinstance(provider, OllamaProvider):
+        dollars = 0.0
+    else:
+        table = prices if prices is not None else load_prices()
+        entry = table.get(model)
+        if entry is None:
+            dollars = None
+        else:
+            dollars = (input_tokens * entry["input_per_mtok"]
+                       + output_tokens * entry["output_per_mtok"]) / 1_000_000
+
+    return {"model": model, "input_tokens": input_tokens,
+            "output_tokens": output_tokens, "dollars": dollars}
 
 
 # -- the one entry point -----------------------------------------------------

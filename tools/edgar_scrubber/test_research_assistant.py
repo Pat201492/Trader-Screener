@@ -213,6 +213,47 @@ def run_checks():
         else:
             os.environ["ANTHROPIC_RESEARCH_MODEL"] = saved
 
+    # -- estimate_cost: tokens for any provider, growing with history --------
+    # A fake price table so the test does not depend on the shipped JSON's
+    # editable numbers; the Claude path multiplies tokens by these.
+    prices = {"claude-sonnet-5-5": {"input_per_mtok": 2.0, "output_per_mtok": 10.0}}
+
+    claude = ra.ClaudeProvider(client=FakeAnthropicClient(), model="claude-sonnet-5-5")
+    e0 = ra.estimate_cost(claude, "find autocallable notes", prices=prices)
+    check("estimate: input and output token estimates present",
+          e0["input_tokens"] > 0 and e0["output_tokens"] == ra.OUTPUT_TOKEN_ALLOWANCE)
+    history = [{"role": "user", "content": "x" * 400},
+               {"role": "assistant", "content": "y" * 400}]
+    e1 = ra.estimate_cost(claude, "find autocallable notes", history=history,
+                          prices=prices)
+    check("estimate: input tokens grow with history length",
+          e1["input_tokens"] > e0["input_tokens"])
+
+    # -- estimate_cost: listed Claude model -> dollars = tokens x prices ------
+    expected_dollars = (e0["input_tokens"] * 2.0
+                        + e0["output_tokens"] * 10.0) / 1_000_000
+    check("estimate: listed Claude model dollars = tokens x listed prices",
+          e0["dollars"] is not None and abs(e0["dollars"] - expected_dollars) < 1e-12)
+
+    # -- estimate_cost: unlisted model -> dollars is null --------------------
+    other = ra.ClaudeProvider(client=FakeAnthropicClient(), model="claude-nonesuch-9")
+    eu = ra.estimate_cost(other, "q", prices=prices)
+    check("estimate: unlisted model has dollars = None",
+          eu["dollars"] is None and eu["input_tokens"] > 0)
+
+    # -- estimate_cost: Ollama provider -> dollars is 0 ----------------------
+    eo = ra.estimate_cost(ra.OllamaProvider(FakeOllamaClient()), "q", prices=prices)
+    check("estimate: Ollama provider dollars = 0", eo["dollars"] == 0)
+    check("estimate: Ollama still reports tokens", eo["input_tokens"] > 0)
+
+    # The shipped price table loads and prices the default model.
+    shipped = ra.load_prices()
+    check("estimate: shipped prices list the default Claude model",
+          ra.DEFAULT_CLAUDE_MODEL in shipped)
+    e_default = ra.estimate_cost(ra.ClaudeProvider(client=FakeAnthropicClient()), "q")
+    check("estimate: default model priced from the shipped table",
+          e_default["dollars"] is not None and e_default["dollars"] > 0)
+
     # -- claude_available() false with a reason when the key is unset --------
     saved_key = os.environ.get("ANTHROPIC_API_KEY")
     try:
