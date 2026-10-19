@@ -7,7 +7,7 @@
       "display_name": "10-K annual report",
       "purpose": "Annual report: audited full-year financials and business/risk disclosure.",
       "q": "",
-      "forms": ["10-K"],
+      "forms": ["10-K", "10-K/A"],
       "field_source": "taxonomy"
     },
     {
@@ -16,7 +16,7 @@
       "display_name": "10-Q quarterly report",
       "purpose": "Quarterly report: unaudited interim financials between annual reports.",
       "q": "",
-      "forms": ["10-Q"],
+      "forms": ["10-Q", "10-Q/A"],
       "field_source": "taxonomy"
     },
     {
@@ -25,7 +25,7 @@
       "display_name": "8-K current report",
       "purpose": "Current report: material events disclosed between periodic filings.",
       "q": "",
-      "forms": ["8-K"],
+      "forms": ["8-K", "8-K/A"],
       "field_source": "taxonomy"
     },
     {
@@ -34,7 +34,7 @@
       "display_name": "20-F foreign annual report",
       "purpose": "Foreign private issuer annual report: audited financials, usually tagged in ifrs-full.",
       "q": "",
-      "forms": ["20-F"],
+      "forms": ["20-F", "20-F/A"],
       "field_source": "taxonomy"
     },
     {
@@ -43,7 +43,7 @@
       "display_name": "40-F Canadian annual report",
       "purpose": "Canadian MJDS annual report: audited full-year financials carried as XBRL facts.",
       "q": "",
-      "forms": ["40-F"],
+      "forms": ["40-F", "40-F/A"],
       "field_source": "taxonomy"
     },
     {
@@ -52,7 +52,7 @@
       "display_name": "10-KT transition annual report",
       "purpose": "Transition-period annual report filed on a fiscal-year change; XBRL-tagged like a 10-K.",
       "q": "",
-      "forms": ["10-KT"],
+      "forms": ["10-KT", "10-KT/A"],
       "field_source": "taxonomy"
     },
     {
@@ -61,7 +61,7 @@
       "display_name": "10-QT transition quarterly report",
       "purpose": "Transition-period quarterly report filed on a fiscal-year change; XBRL-tagged like a 10-Q.",
       "q": "",
-      "forms": ["10-QT"],
+      "forms": ["10-QT", "10-QT/A"],
       "field_source": "taxonomy"
     },
     {
@@ -79,7 +79,7 @@
       "display_name": "Form 3 initial ownership",
       "purpose": "Initial statement of beneficial ownership by a company insider; a structured ownership XML document.",
       "q": "",
-      "forms": ["3"],
+      "forms": ["3", "3/A"],
       "field_source": "xml"
     },
     {
@@ -88,7 +88,7 @@
       "display_name": "Form 4 ownership change",
       "purpose": "Statement of changes in beneficial ownership by a company insider; a structured ownership XML document.",
       "q": "",
-      "forms": ["4"],
+      "forms": ["4", "4/A"],
       "field_source": "xml"
     },
     {
@@ -97,7 +97,7 @@
       "display_name": "Form 5 annual ownership",
       "purpose": "Annual statement of beneficial ownership by a company insider; a structured ownership XML document.",
       "q": "",
-      "forms": ["5"],
+      "forms": ["5", "5/A"],
       "field_source": "xml"
     },
     {
@@ -106,7 +106,7 @@
       "display_name": "13F-HR institutional holdings",
       "purpose": "Quarterly report of an institutional investment manager's holdings; a structured information-table XML document.",
       "q": "",
-      "forms": ["13F-HR"],
+      "forms": ["13F-HR", "13F-HR/A"],
       "field_source": "xml"
     },
     {

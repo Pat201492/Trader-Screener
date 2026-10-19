@@ -428,7 +428,9 @@ def _related_person_name(person):
     parts = [_dtext(person, "firstName"),
              _dtext(person, "middleName"),
              _dtext(person, "lastName")]
-    name = " ".join(p for p in parts if p)
+    # An entity filer puts a placeholder in the person fields: "-" as the
+    # first name of "iCapital PE GP, LLC" read as "- iCapital PE GP, LLC".
+    name = " ".join(p for p in parts if p and p.strip() not in ("-", "--", "N/A", "n/a", "None"))
     return name or None
 
 
@@ -498,10 +500,16 @@ def read_form_d(xml_text):
 # when handed another form's XML. Codes are matched case-insensitively (see
 # `read_filing`).
 READERS = {
+    # Amendments (/A) carry the same schema; a live NVDA Form 4 search returned
+    # 4 and 4/A together, and the /A was unreadable (2026-10-19).
     "3": read_ownership,
+    "3/A": read_ownership,
     "4": read_ownership,
+    "4/A": read_ownership,
     "5": read_ownership,
+    "5/A": read_ownership,
     "13F-HR": read_13f,
+    "13F-HR/A": read_13f,
     "SCHEDULE 13D": read_schedule_13dg,
     "SCHEDULE 13D/A": read_schedule_13dg,
     "SCHEDULE 13G": read_schedule_13dg,

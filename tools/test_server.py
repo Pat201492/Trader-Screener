@@ -2002,6 +2002,58 @@ check("the unreadable filing is logged and skipped",
       any(_ACCN_BAD in l["message"] and "skipped" in l["message"]
           for l in _xrun["log"]))
 
+
+# A selection carries only {accession, cik}: the form and filed date come from
+# the filer's submissions feed (a SCHEDULE 13G was stored as "SCHEDULE 13D",
+# with filed=null, before this).
+class _SubsClient:
+    calls = 0
+
+    def submissions(self, cik):
+        _SubsClient.calls += 1
+        return {"filings": {"recent": {"accessionNumber": ["0002160411-26-000001", "x"],
+                                       "form": ["SCHEDULE 13G", "4"],
+                                       "filingDate": ["2026-10-02", "2026-10-03"]}}}
+
+
+class _BrokenSubsClient:
+    def submissions(self, cik):
+        raise OSError("SEC down")
+
+
+server._SUBMISSIONS_CACHE.clear()
+_sc = _SubsClient()
+check("filing_meta reads form and filed date from the submissions feed",
+      server.filing_meta(_sc, "2160411", "0002160411-26-000001") == ("SCHEDULE 13G", "2026-10-02"))
+check("filing_meta reads the feed once per filer",
+      server.filing_meta(_sc, "0002160411", "x") == ("4", "2026-10-03") and _SubsClient.calls == 1)
+check("an accession outside the feed gives (None, None)",
+      server.filing_meta(_sc, "2160411", "nope") == (None, None))
+server._SUBMISSIONS_CACHE.clear()
+check("a failed feed read gives (None, None) and is not cached",
+      server.filing_meta(_BrokenSubsClient(), "999", "a") == (None, None)
+      and "999" not in server._SUBMISSIONS_CACHE)
+check("the run reports rows_total beside rows_written", "rows_total" in _xrun)
+
+# The dashboard's Run sends ticked hits and no `forms`: route by the hits' own form.
+check("a selection of Form 4 hits routes to the xml extractor",
+      server.run_forms({"accessions": [{"accession": "a", "cik": "1", "form": "4"}]}) == ["4"]
+      and server.scrubber_for_forms(server.run_forms(
+          {"accessions": [{"accession": "a", "cik": "1", "form": "4"}]})).field_source == "xml")
+check("13G and 13D/A hits share one extractor and are allowed together",
+      server.run_forms({"accessions": [{"accession": "a", "form": "SCHEDULE 13G"},
+                                       {"accession": "b", "form": "SCHEDULE 13D/A"}]})
+      == ["SCHEDULE 13D/A", "SCHEDULE 13G"])
+try:
+    server.run_forms({"accessions": [{"accession": "a", "form": "4"}, {"accession": "b", "form": "10-K"}]})
+    _mixed = None
+except ValueError as _e:
+    _mixed = str(_e)
+check("a selection mixing two extractors is refused", bool(_mixed) and "mixes" in _mixed)
+check("explicit forms win, and no forms anywhere keeps the 424B2 default (empty list)",
+      server.run_forms({"forms": ["10-K"], "accessions": [{"accession": "a", "form": "4"}]}) == ["10-K"]
+      and server.run_forms({"accessions": [{"accession": "a", "cik": "1"}]}) == [])
+
 # The Results tab reads this endpoint.
 _grid = server.store_forms(form="4")
 check("store_forms returns the run's rows", len(_grid["rows"]) == 3)

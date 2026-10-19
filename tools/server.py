@@ -964,7 +964,7 @@ def scrubber_for_forms(forms):
     return None
 
 
-def taxonomy_run(run_id, targets, home):
+def taxonomy_run(run_id, targets, home, form_type=None):
     """Extract a taxonomy-sourced form: XBRL facts in, FactRecords out.
 
     Zero tokens and no model. `companyfacts` is fetched once per filer (the
@@ -996,7 +996,11 @@ def taxonomy_run(run_id, targets, home):
                 RUNS.log(run_id, "stop requested -- no further filings started")
                 break
             cik, accession = str(meta["cik"]), meta["accession"]
-            form = (meta.get("form") or meta.get("form_type") or "").upper()
+            # A bare {accession, cik} matched no fact at all: companyfacts is
+            # filtered on the form, and the form was "" (a 20-F read 0 facts
+            # of its 531, 2026-10-19). Same fallback as xml_run.
+            form = (meta.get("form") or meta.get("form_type")
+                    or filing_meta(client, cik, accession)[0] or form_type or "").upper()
             try:
                 if cik not in facts_cache:
                     facts_cache[cik] = client.company_facts(cik)
@@ -1127,6 +1131,28 @@ def pick_xml_rows(bundle, form):
     return None, None
 
 
+_SUBMISSIONS_CACHE = {}
+
+
+def filing_meta(client, cik, accession):
+    """(form, filing_date) for one accession from the filer's submissions feed
+    (data.sec.gov/submissions, recent filings), or (None, None) if the feed is
+    unavailable or the accession is not in its recent window. Cached per CIK
+    for the life of the process -- a run over one filer reads the feed once."""
+    key = str(cik).lstrip("0")
+    feed = _SUBMISSIONS_CACHE.get(key)
+    if feed is None:
+        try:
+            recent = (client.submissions(cik).get("filings") or {}).get("recent") or {}
+            feed = {a: (f, d) for a, f, d in zip(recent.get("accessionNumber") or [],
+                                                 recent.get("form") or [],
+                                                 recent.get("filingDate") or [])}
+        except Exception:
+            return (None, None)       # not cached: a transient failure retries next time
+        _SUBMISSIONS_CACHE[key] = feed
+    return feed.get(accession, (None, None))
+
+
 def xml_run(run_id, targets, home, form_type=None):
     """Read structured-XML filings (Forms 3/4/5 today) into FormsStore.
 
@@ -1154,7 +1180,7 @@ def xml_run(run_id, targets, home, form_type=None):
     RUNS.update(run_id, status="running")
 
     store = FormsStore(path=str(home / "store" / "forms.sqlite"))
-    written, skipped, stopped = 0, 0, False
+    written, skipped, stopped, rows_total = 0, 0, False, 0
     try:
         for meta in targets:
             if RUNS.stop_requested(run_id):
@@ -1163,9 +1189,15 @@ def xml_run(run_id, targets, home, form_type=None):
                 break
             accession = meta["accession"]
             cik = meta.get("cik")
-            form = (meta.get("form") or meta.get("form_type")
+            # A selection carries only {accession, cik}. Falling back to the
+            # scrubber's own form stamped a SCHEDULE 13G as "SCHEDULE 13D" (one
+            # entry owns all four 13D/G forms) and left every filed date null,
+            # so date filters on the forms API dropped the rows (2026-10-19).
+            # The filer's submissions feed states both for the accession.
+            sub_form, sub_filed = filing_meta(client, cik, accession) if cik else (None, None)
+            form = (meta.get("form") or meta.get("form_type") or sub_form
                     or form_type or "").strip().upper()
-            filed = meta.get("file_date") or meta.get("sample_day")
+            filed = meta.get("file_date") or meta.get("sample_day") or sub_filed
             RUNS.event(run_id, "doc_start", accession=accession,
                        issuer=meta.get("issuer"), filed=filed)
 
@@ -1197,6 +1229,7 @@ def xml_run(run_id, targets, home, form_type=None):
 
             store.put_filing(run_id, accession, form, cik, filed, rows)
             written += 1
+            rows_total += len(rows)
             RUNS.add_document(run_id, {
                 "accession": accession, "document": document,
                 "issuer": meta.get("issuer"), "filed": filed, "skipped": False,
@@ -1207,9 +1240,9 @@ def xml_run(run_id, targets, home, form_type=None):
 
         RUNS.update(run_id, status="stopped" if stopped else "done",
                     finished_at=utcnow(), rows_written=written,
-                    filings_skipped=skipped)
-        RUNS.log(run_id, "run complete -- %d filing(s) read, %d skipped"
-                         % (written, skipped))
+                    rows_total=rows_total, filings_skipped=skipped)
+        RUNS.log(run_id, "run complete -- %d filing(s) read (%d row(s)), %d skipped"
+                         % (written, rows_total, skipped))
     finally:
         store.close()
 
@@ -1298,6 +1331,28 @@ def accuracy_switches(params):
     return samples, bool(shadow), bool(cands)
 
 
+def run_forms(params):
+    """The form list a run is routed by: explicit `forms`, else the search's,
+    else the forms the selected hits name themselves.
+
+    The dashboard's Run sends the ticked search hits with no `forms`; each hit
+    carries its own `form`. Without that last step, ticking Form 4 or 10-K hits
+    and pressing Run took the 424B2 default -- the local model on a filing it
+    cannot read (found 2026-10-19). A selection spanning two extractors is
+    refused: one run reads one kind of filing."""
+    forms = params.get("forms") or (params.get("search") or {}).get("forms") or []
+    if isinstance(forms, str):
+        forms = [f.strip() for f in forms.split(",") if f.strip()]
+    if forms:
+        return forms
+    forms = sorted({str(a.get("form")).strip().upper()
+                    for a in (params.get("accessions") or [])
+                    if isinstance(a, dict) and a.get("form")})
+    if len({getattr(scrubber_for_forms([f]), "id", f) for f in forms}) > 1:
+        raise ValueError("one run per extractor: the selection mixes %s" % ", ".join(forms))
+    return forms
+
+
 def start_scrubber_run(params):
     home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
     fields = params.get("fields") or DEFAULT_FIELDS
@@ -1309,9 +1364,7 @@ def start_scrubber_run(params):
     # (10-K/10-Q/8-K) reads the filing's own XBRL tags and needs no model at
     # all. An empty form list keeps today's 424B2 default, because the saved
     # 424B2 queries carry no explicit `forms` here and rely on it.
-    forms = params.get("forms") or (params.get("search") or {}).get("forms") or []
-    if isinstance(forms, str):
-        forms = [f.strip() for f in forms.split(",") if f.strip()]
+    forms = run_forms(params)
     scrubber = scrubber_for_forms(forms)
     if scrubber is None and forms:
         raise ValueError("no scrubber extracts %s" % ", ".join(str(f) for f in forms))
@@ -1341,7 +1394,8 @@ def start_scrubber_run(params):
     def worker():
         try:
             if source == "taxonomy":
-                taxonomy_run(run_id, targets, home)
+                taxonomy_run(run_id, targets, home,
+                             form_type=getattr(scrubber, "form_type", None))
                 return
             if source == "xml":
                 xml_run(run_id, targets, home,
