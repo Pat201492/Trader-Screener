@@ -2414,6 +2414,166 @@ server.build_research_provider = _gr_prev_build
 server.RESEARCH = _gr_prev_research
 
 # --------------------------------------------------------------------------- #
+section("research assistant -- extraction follow-up proposals (#292)")
+# --------------------------------------------------------------------------- #
+# After a batch runs, the planner may propose extracting specific filings. That
+# proposal is stored on the same batch but has its OWN approval -- nothing scrubs
+# until /extract/{id}/approve -- because extraction spends GPU time on the spec
+# path. Exercised with a fake provider (no model), a stub search (no network) and
+# a stub start_scrubber_run that captures its params and mimics the run's own
+# refusal of a form no scrubber owns, so no SEC request or GPU time is spent.
+
+_ex_root = Path(tempfile.mkdtemp(prefix="research-extract-"))
+_ACC = "0001234567-25-000042"
+
+
+class _ExProvider:
+    def __init__(self):
+        self.payload = {"reply": "", "searches": [], "extract": None}
+        self.calls = 0
+
+    def complete(self, system, messages):
+        self.calls += 1
+        return json.dumps(self.payload)
+
+
+def _ex_search(params):
+    return {"returned": 1, "total": 1, "hits": [{
+        "accession": _ACC, "form": "424B2",
+        "issuer": "Example Structured Products Inc", "cik": "0001234567",
+        "file_date": "2025-06-10", "document": "d424b2.htm"}]}
+
+
+_captured_runs = []
+
+
+def _ex_start_run(params):
+    # Capture what a run would get, and refuse an unowned form exactly as the
+    # real start_scrubber_run does -- without touching the network or a model.
+    _captured_runs.append(json.loads(json.dumps(params)))
+    forms = params.get("forms") or []
+    if server.scrubber_for_forms(forms) is None and forms:
+        raise ValueError("no scrubber extracts %s"
+                         % ", ".join(str(f) for f in forms))
+    return "edgar-scrubber-777"
+
+
+_ex_prev_search = server.edgar_search
+_ex_prev_build = server.build_research_provider
+_ex_prev_research = server.RESEARCH
+_ex_prev_start = server.start_scrubber_run
+_ex_provider = _ExProvider()
+server.edgar_search = _ex_search
+server.build_research_provider = lambda name: _ex_provider
+server.RESEARCH = server.ResearchBatchStore(_ex_root)
+server.start_scrubber_run = _ex_start_run
+
+_ex_httpd = _THS(("127.0.0.1", 0), _partial(server.Handler, directory=str(server.REPO_ROOT)))
+threading.Thread(target=_ex_httpd.serve_forever, daemon=True).start()
+_ex_base = "http://127.0.0.1:%d" % _ex_httpd.server_address[1]
+
+
+def _ex_req(method, path, payload=None):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        _ex_base + "/api/tools/research" + path, data=data,
+        headers={"Content-Type": "application/json"}, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8") or "{}")
+
+
+def _ex_audit():
+    p = _ex_root / "audit.jsonl"
+    if not p.exists():
+        return []
+    return [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+# -- seed: run a search batch so the chat has a result an extract can name ----
+_ex_provider.payload = {"reply": "search", "searches": [
+    {"q": "contingent coupon", "forms": ["424B2"], "ciks": [], "startdt": "",
+     "enddt": "", "rationale": "r"}], "extract": None}
+_st, _b = _ex_req("POST", "/plan", {"provider": "ollama", "message": "find them",
+                                    "chat_id": "x1"})
+_seed_batch = _b["batch_id"]
+_st, _ = _ex_req("POST", "/batch/%s/approve" % _seed_batch, {})
+check("extract: the seeding search batch ran", _st == 200)
+
+# -- a plan with an extract proposal is stored, and starts no run ------------
+_ex_provider.payload = {"reply": "extract it", "searches": [
+    {"q": "ignored", "forms": ["424B2"], "ciks": [], "startdt": "", "enddt": "",
+     "rationale": "r"}], "extract": {"form": "424B2", "accessions": [_ACC],
+                                     "rationale": "read in full"}}
+_runs_before = len(_captured_runs)
+_st, _b = _ex_req("POST", "/plan", {"provider": "ollama", "message": "pull it",
+                                    "chat_id": "x1"})
+_ex_batch = _b["batch_id"]
+check("extract: a fake-provider plan with an extract proposal is stored",
+      _st == 200 and _b.get("extract") and _b["extract"]["accessions"] == [_ACC])
+check("extract: the proposal carries the extractor kind and the spec estimate",
+      _b["extract"]["kind"] == "spec" and _b["extract"]["estimate_seconds"] > 0
+      and _b["extract"]["fields"] > 0)
+check("extract: storing the plan starts NO run", len(_captured_runs) == _runs_before)
+
+# -- approve: starts exactly one run over exactly that accession -------------
+_st, _b = _ex_req("POST", "/extract/%s/approve" % _ex_batch, {})
+check("extract: approve starts a run and returns its run_id",
+      _st == 200 and _b.get("run_id") == "edgar-scrubber-777")
+check("extract: the run got exactly the proposed accession",
+      _captured_runs and [t["accession"] for t in _captured_runs[-1]["accessions"]] == [_ACC])
+check("extract: the run carries the CIK resolved from the chat's results",
+      _captured_runs[-1]["accessions"][0]["cik"] == "0001234567")
+check("extract: the run's form is the proposed form",
+      _captured_runs[-1]["forms"] == ["424B2"])
+
+_st, _ = _ex_req("POST", "/extract/%s/approve" % _ex_batch, {})
+check("extract: a second approve of the same proposal is a 409", _st == 409)
+
+# -- the approval is on the audit log ----------------------------------------
+_ex_events = [r for r in _ex_audit() if r.get("event") == "extract-approve"]
+check("extract: the approval is written to audit.jsonl",
+      any(r["batch_id"] == _ex_batch and r["accessions"] == [_ACC]
+          and r["run_id"] == "edgar-scrubber-777" for r in _ex_events))
+
+# -- a form no scrubber owns is refused with the run's own 400 ---------------
+_ex_provider.payload = {"reply": "extract", "searches": [
+    {"q": "ignored", "forms": ["424B2"], "ciks": [], "startdt": "", "enddt": "",
+     "rationale": "r"}], "extract": {"form": "S-1", "accessions": [_ACC],
+                                     "rationale": "r"}}
+_st, _b = _ex_req("POST", "/plan", {"provider": "ollama", "message": "pull s1",
+                                    "chat_id": "x1"})
+_s1_batch = _b["batch_id"]
+check("extract: a proposal for an unowned form stores with kind null",
+      _st == 200 and _b["extract"]["kind"] is None)
+_st, _b = _ex_req("POST", "/extract/%s/approve" % _s1_batch, {})
+check("extract: approving an unowned-form extraction is a 400 from the run",
+      _st == 400 and "no scrubber extracts S-1" in _b.get("error", ""))
+_st, _b = _ex_req("GET", "/batch/%s" % _s1_batch, None)
+check("extract: a refused approval leaves the proposal approvable again",
+      _st == 200 and (_b.get("extract") or {}).get("status") == "proposed")
+
+# -- a plan naming an accession not in the results drops the extract ---------
+_ex_provider.payload = {"reply": "extract", "searches": [
+    {"q": "ignored", "forms": ["424B2"], "ciks": [], "startdt": "", "enddt": "",
+     "rationale": "r"}], "extract": {"form": "424B2",
+                                     "accessions": ["9999999999-99-999999"],
+                                     "rationale": "r"}}
+_st, _b = _ex_req("POST", "/plan", {"provider": "ollama", "message": "pull ghost",
+                                    "chat_id": "x1"})
+check("extract: an accession not in the chat's results is dropped with a reason",
+      _st == 200 and not _b.get("extract")
+      and any("did not appear" in d for d in _b.get("dropped", [])))
+
+_ex_httpd.shutdown()
+server.edgar_search = _ex_prev_search
+server.build_research_provider = _ex_prev_build
+server.RESEARCH = _ex_prev_research
+server.start_scrubber_run = _ex_prev_start
+
+# --------------------------------------------------------------------------- #
 if failures:
     print(f"\n{len(failures)} FAILURE(S):")
     for f in failures:
