@@ -2133,7 +2133,7 @@ check("a holding carries its lifted numeric values",
           and r.get("shares_or_principal") == 915560382
           for r in _13f_grid["rows"]))
 check("every holding carries the cover fields from primary_doc.xml",
-      all(r.get("report_period") == "06-30-2026"
+      all(r.get("report_period") == "2026-06-30"
           and r.get("manager_name") == "BERKSHIRE HATHAWAY INC"
           for r in _13f_grid["rows"]))
 check("a holding with no putCall reads back null",

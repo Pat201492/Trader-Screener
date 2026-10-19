@@ -38,7 +38,7 @@ _F13F_ROW_KEYS = {
 
 _ROW_KEYS = {
     "issuer_cik", "issuer_ticker", "owner_name", "owner_cik", "is_director",
-    "is_officer", "officer_title", "is_ten_pct_owner", "table",
+    "is_officer", "officer_title", "is_ten_pct_owner", "table", "row_kind",
     "security_title", "transaction_date", "transaction_code", "shares",
     "price", "acquired_disposed", "shares_owned_after", "direct_indirect",
 }
@@ -51,6 +51,8 @@ def test_form4_rows_carry_every_key_with_numeric_amounts():
     assert len(rows) == 3
     for row in rows:
         assert set(row) == _ROW_KEYS
+    # The holding line says it is a holding, not a trade with null fields.
+    assert [r["row_kind"] for r in rows] == ["transaction", "holding", "transaction"]
 
     tx = rows[0]
     assert tx["table"] == "non_derivative"
@@ -129,7 +131,7 @@ def test_13f_rows_one_per_holding_with_every_key_and_numbers():
     assert apple["sh_prn_type"] == "SH"
     assert apple["investment_discretion"] == "DFND"
     # Cover fields from primary_doc.xml are stamped on every row.
-    assert apple["report_period"] == "06-30-2026"
+    assert apple["report_period"] == "2026-06-30"
     assert apple["manager_name"] == "BERKSHIRE HATHAWAY INC"
     # Numeric fields are numbers, not strings.
     assert apple["value"] == 91000000 and isinstance(apple["value"], int)
@@ -195,7 +197,7 @@ def test_schedule_13d_one_row_per_person_with_every_key_and_numbers():
     assert row["reporting_person"] == "JEFFREY E. EBERWEIN"
     assert row["citizenship_or_organization"] == "X1"
     assert row["type_of_reporting_person"] == "IN"
-    assert row["event_date"] == "06/25/2026"
+    assert row["event_date"] == "2026-06-25"
     assert row["is_amendment"] is False
     # Numeric boxes are numbers, not strings; percent_of_class is a number.
     assert row["sole_voting_power"] == 1149289
@@ -220,7 +222,7 @@ def test_schedule_13g_amendment_one_row_per_person_with_every_key():
         assert row["issuer_cik"] == "0001308648"
         assert row["issuer_cusip"] == "32076V103"
         assert row["class_title"] == "Common Shares, no par value"
-        assert row["event_date"] == "01/16/2025"
+        assert row["event_date"] == "2025-01-16"
 
     first = rows[0]
     assert first["reporting_person"] == "Electrum Silver US LLC"
