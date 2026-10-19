@@ -1616,6 +1616,13 @@ _r3 = server.start_local_model(up=lambda base: {"models": [{"name": "other:1b"}]
 check("model not downloaded: reported with the pull command, nothing loaded",
       not _r3["ok"] and _r3["state"] == "model-missing" and f"ollama pull {_ms_model}" in _r3["message"])
 
+# 3b) Ollama lists "<name>:latest"; OLLAMA_MODEL is usually bare. Same model.
+check("a bare model name matches its :latest tag (health and the start button)",
+      server.model_pulled("edgar-qwen7b", ["qwen2.5-coder:7b", "edgar-qwen7b:latest"])
+      and server.model_pulled("edgar-qwen7b:latest", ["edgar-qwen7b"])
+      and not server.model_pulled("edgar-qwen7b", ["edgar-qwen7b:q8"])
+      and not server.model_pulled("qwen2.5:7b", ["qwen2.5:7b-instruct-q4_K_M"]))
+
 # 4) No ollama installed.
 _r4 = server.start_local_model(up=lambda base: None, find=lambda: None,
                                launch=lambda e: None, warm=lambda: None, sleep=lambda s: None)
