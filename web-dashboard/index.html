@@ -1131,6 +1131,91 @@ function setSort(k){ if(sortKey===k)sortAsc=!sortAsc; else{sortKey=k;sortAsc=tru
 // liquidity gate (passesLiquidityFloor / LIQ_FLOOR) as the Screener tab — never surfaces a
 // name below the $ vol floor, ETFs judged on basket liquidity same as everywhere else.
 let smRows=[], smSortKey='smart_money_score', smSortAsc=false;
+// ── Insider Trades (#314) ─────────────────────────────────────────────────────
+// Every insider trade in a date range across the whole market -- what EDGAR
+// keyword search cannot give (100-result cap). Served by the pipeline's
+// /api/insider-trades and /api/insider-trades/rollups (Stock-Data-Pipeline #57,
+// #58; pipeline-mock implements the same contract).
+let INS={rows:[],total:0,offset:0,sort:'date',f:null};
+const INS_PAGE=200;
+function insDefaults(){
+  const to=new Date(), from=new Date(Date.now()-30*864e5);
+  return {from:from.toISOString().slice(0,10),to:to.toISOString().slice(0,10),type:'P',role:'',ticker:'',min:''};
+}
+function insQuery(extra){
+  const f=INS.f, p=new URLSearchParams();
+  p.set('from',f.from); p.set('to',f.to);
+  if(f.type) p.set('type',f.type);
+  if(f.role) p.set('role',f.role);
+  if(f.ticker) p.set('ticker',f.ticker.trim().toUpperCase());
+  if(f.min) p.set('min_value',f.min);
+  for(const [k,v] of Object.entries(extra||{})) p.set(k,v);
+  return p.toString();
+}
+async function renderInsiderTrades(){
+  const v=document.getElementById('view');
+  if(!INS.f) INS.f=insDefaults();
+  const f=INS.f;
+  const sel=(id,opts,cur)=>`<select id="${id}">${opts.map(([val,lab])=>`<option value="${val}" ${val===cur?'selected':''}>${lab}</option>`).join('')}</select>`;
+  v.innerHTML=`<div class="controls">
+      <label class="muted" style="font-size:12px">From <input type="date" id="insFrom" value="${f.from}"></label>
+      <label class="muted" style="font-size:12px">To <input type="date" id="insTo" value="${f.to}"></label>
+      ${sel('insType',[['P','Buys'],['S','Sells'],['','All']],f.type)}
+      ${sel('insRole',[['','Any role'],['officer','Officers'],['director','Directors'],['ten_pct','10% owners']],f.role)}
+      <input type="text" id="insTicker" placeholder="Ticker" value="${esc(f.ticker)}" style="width:80px">
+      <input type="number" id="insMin" placeholder="Min $" value="${esc(f.min)}" style="width:100px">
+      <span class="muted" id="insCount"></span></div>
+    <div class="lqnote">Market-wide insider trades (Form 4) in the date range, from the pipeline's insider table — every trade, not a keyword search. Impossible source rows (e.g. a $2M-per-share "purchase") are hidden. Insider buys are rarer and more informative than sells; <b>cluster buys</b> (3+ insiders buying the same stock within 14 days) are the classic signal.</div>
+    <div class="grid" id="insRollups" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:14px"><div class="loading">Loading…</div></div>
+    <div id="insTbl"><div class="loading">Loading…</div></div>`;
+  const reload=()=>{ INS.f={from:document.getElementById('insFrom').value,to:document.getElementById('insTo').value,
+      type:document.getElementById('insType').value,role:document.getElementById('insRole').value,
+      ticker:document.getElementById('insTicker').value,min:document.getElementById('insMin').value};
+    loadInsiders(true); };
+  ['insFrom','insTo','insType','insRole'].forEach(id=>document.getElementById(id).onchange=reload);
+  ['insTicker','insMin'].forEach(id=>document.getElementById(id).onkeydown=e=>{ if(e.key==='Enter') reload(); });
+  await loadInsiders(true);
+}
+async function loadInsiders(fresh){
+  const tbl=document.getElementById('insTbl');
+  if(fresh){ INS.rows=[]; INS.offset=0; }
+  try{
+    const page=await jget('/api/insider-trades?'+insQuery({sort:INS.sort,limit:INS_PAGE,offset:INS.offset}));
+    INS.rows=INS.rows.concat(page.rows||[]); INS.total=page.total||0; INS.offset+=(page.rows||[]).length;
+    drawInsiders();
+    if(fresh) loadInsiderRollups();
+  }catch(e){ if(tbl) tbl.innerHTML=`<div class="err">Insider trades unavailable: ${esc(e.message)}. The pipeline serves them at /api/insider-trades (Stock-Data-Pipeline #57).</div>`; }
+}
+function drawInsiders(){
+  const tbl=document.getElementById('insTbl'); if(!tbl) return;
+  const cnt=document.getElementById('insCount'); if(cnt) cnt.textContent=`${INS.total.toLocaleString()} trades`;
+  const th=(key,lab)=>`<th style="cursor:pointer" onclick="sortInsiders('${key}')">${lab}${INS.sort===key?' ▼':''}</th>`;
+  const rows=INS.rows.map(r=>`<tr>
+      <td class="muted">${esc(r.transaction_date||'')}</td>
+      <td><b>${esc(r.ticker||'')}</b><div class="muted" style="font-size:10.5px">${esc(r.company_name||'')}</div></td>
+      <td>${esc(r.insider_name||'')}</td><td class="muted" style="font-size:11.5px">${esc(r.insider_title||'')}</td>
+      <td>${esc(r.transaction_type||'')}</td>
+      <td class="num">${fmt(r.shares,0)}</td><td class="num">${r.price_per_share!=null?'$'+fmt(r.price_per_share,2):'–'}</td>
+      <td class="num">${r.total_value!=null?'$'+compact(r.total_value):'–'}</td>
+      <td>${r.sec_url?`<a href="${esc(r.sec_url)}" target="_blank" rel="noopener" style="color:var(--accent);font-size:11.5px">SEC ↗</a>`:''}</td></tr>`).join('');
+  const more=INS.rows.length<INS.total?`<button onclick="loadInsiders(false)" style="margin-top:8px">Load more (${(INS.total-INS.rows.length).toLocaleString()} left)</button>`:'';
+  tbl.innerHTML=INS.rows.length?`<div class="scroll"><table><tr>${th('date','Date')}<th>Ticker</th><th>Insider</th><th>Title</th><th>Type</th><th>Shares</th><th>Price</th>${th('value','Value')}<th></th></tr>${rows}</table></div>${more}`
+    :'<div class="muted" style="padding:10px">No insider trades match these filters.</div>';
+}
+function sortInsiders(key){ if(INS.sort===key) return; INS.sort=key; loadInsiders(true); }
+async function loadInsiderRollups(){
+  const el=document.getElementById('insRollups'); if(!el) return;
+  try{
+    const f=INS.f, p=new URLSearchParams({from:f.from,to:f.to}); if(f.role) p.set('role',f.role);
+    const r=await jget('/api/insider-trades/rollups?'+p.toString());
+    const card=(title,body)=>`<div class="card" style="margin:0"><div class="name" style="font-size:13px;margin-bottom:6px">${title}</div>${body}</div>`;
+    const list=(items,fn)=>items&&items.length?`<table>${items.slice(0,8).map(fn).join('')}</table>`:'<div class="muted" style="font-size:12px">None in this range.</div>';
+    el.innerHTML=card('Top buys',list(r.top_buys,t=>`<tr><td><b>${esc(t.ticker)}</b></td><td class="muted" style="font-size:11px">${esc(t.insider_name||'')}</td><td class="num">$${compact(t.total_value)}</td></tr>`))
+      +card('Most sold',list(r.most_sold,t=>`<tr><td><b>${esc(t.ticker)}</b></td><td class="muted" style="font-size:11px">${t.sell_count} sale(s), ${t.insiders} insider(s)</td><td class="num">$${compact(t.sell_value)}</td></tr>`))
+      +card('Cluster buys <span class="muted" style="font-weight:400;font-size:11px">· 3+ insiders within 14 days</span>',list(r.clusters,c=>`<tr><td><b>${esc(c.ticker)}</b></td><td class="muted" style="font-size:11px">${c.insiders} insiders · ${esc(c.first_date)} → ${esc(c.last_date)}</td><td class="num">$${compact(c.buy_value)}</td></tr>`));
+  }catch(e){ el.innerHTML=`<div class="muted" style="font-size:12px">Rollups unavailable: ${esc(e.message)}</div>`; }
+}
+
 async function renderSmartMoney(){
   const v=document.getElementById('view');
   v.innerHTML=`<div class="controls">
@@ -5634,7 +5719,7 @@ const SECTIONS={
   trader:{label:'Trader',icon:'📊', desc:'Commodities, options, commodity drivers',
           tabs:[['commodities','Commodities',renderCommodities],['options','Options',renderOptions],['drivers','Drivers',renderDrivers]]},
   stock: {label:'Stock', icon:'🏢', desc:'Equity screener + per-stock detail + smart-money moat',
-          tabs:[['screener','Screener',renderScreener],['smartmoney','Smart Money',renderSmartMoney],['discipline','Discipline',renderDiscipline]]},
+          tabs:[['screener','Screener',renderScreener],['smartmoney','Smart Money',renderSmartMoney],['insiders','Insider Trades',renderInsiderTrades],['discipline','Discipline',renderDiscipline]]},
   macro: {label:'Macro', icon:'🌡️', desc:'VIX regime + yield-curve recession probability — soft-gates the screener defaults',
           tabs:[['regime','Regime',renderMacro]]},
   education:{label:'Education', icon:'🎓', desc:'Learning the business of trading — metric significance, source overlap, example signals',

@@ -305,6 +305,79 @@
     ];
   }
 
+  // Insider trades (#314): the /api/insider-trades and /rollups contract
+  // (Stock-Data-Pipeline #57/#58, pipeline-mock/insider.py), over synthetic rows
+  // dated relative to today, with a 3-insider cluster and one hidden bad row.
+  const INSIDERS = (function () {
+    const people = [['Jane Rivera', 'Chief Executive Officer'], ['Tom Okafor', 'Director'], ['Ana Petrov', 'CFO'],
+      ['Lee Wong', 'Director'], ['Sam Patel', '10% Owner'], ['Kim Duarte', 'EVP, General Counsel']];
+    const tks = [['AAPL', 'Apple Inc.'], ['NVDA', 'NVIDIA Corporation'], ['MSFT', 'Microsoft Corp'],
+      ['AMZN', 'Amazon.com, Inc.'], ['TSLA', 'Tesla, Inc.']];
+    const day = (n) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
+    const rows = [];
+    for (let i = 0; i < 40; i++) {
+      const [t, co] = tks[i % tks.length], [nm, ti] = people[(i * 7) % people.length];
+      const code = ['S', 'S', 'P', 'S', 'A', 'P', 'M'][i % 7], sh = 500 + ((i * 1237) % 50000), px = 20 + ((i * 53) % 800);
+      const acc = `0000${100000 + i}-26-${String(i).padStart(6, '0')}`;
+      rows.push({ filing_id: acc, ticker: t, company_name: co, insider_name: nm, insider_title: ti,
+        transaction_date: day(i % 40), transaction_type: code, shares: sh, price_per_share: px,
+        total_value: sh * px, sec_url: `https://www.sec.gov/Archives/edgar/data/1/${acc.replace(/-/g, '')}/${acc}-index.html`, suspect: false });
+    }
+    people.slice(0, 3).forEach(([nm, ti], j) => rows.push({ filing_id: `0000200000-26-00000${j}`, ticker: 'CLST',
+      company_name: 'Cluster Holdings Inc.', insider_name: nm, insider_title: ti, transaction_date: day(4 + j * 3),
+      transaction_type: 'P', shares: 10000, price_per_share: 12.5, total_value: 125000, sec_url: '', suspect: false }));
+    rows.push({ filing_id: '0000300000-26-000001', ticker: 'SLBT', company_name: 'Suspect Data Co.',
+      insider_name: 'Ching-Dong Wang', insider_title: 'Chief Executive Officer', transaction_date: day(2),
+      transaction_type: 'P', shares: 4545306, price_per_share: 2272653, total_value: 10329903316818, sec_url: '', suspect: true });
+    return rows;
+  })();
+  function insiderQuery(path) {
+    const q = new URLSearchParams(path.split('?')[1] || '');
+    const to = q.get('to') || new Date().toISOString().slice(0, 10);
+    const from = q.get('from') || new Date(Date.parse(to) - 30 * 864e5).toISOString().slice(0, 10);
+    const types = (q.get('type') || '').split(',').filter(Boolean), tk = (q.get('ticker') || '').toUpperCase();
+    const role = q.get('role'), min = Number(q.get('min_value') || 0), inc = q.get('include_suspect') === '1';
+    const roleWords = { officer: ['officer', 'chief', 'cfo', 'evp', 'svp', 'president'], director: ['director'], ten_pct: ['10%'] };
+    return INSIDERS.filter(r => r.transaction_date >= from && r.transaction_date <= to && (inc || !r.suspect)
+      && (!types.length || types.includes(r.transaction_type)) && (!tk || r.ticker === tk)
+      && (!role || (roleWords[role] || [role]).some(w => r.insider_title.toLowerCase().includes(w)))
+      && (r.total_value || 0) >= min);
+  }
+  function insiderTrades(path) {
+    const q = new URLSearchParams(path.split('?')[1] || '');
+    const rows = insiderQuery(path).slice().sort(q.get('sort') === 'value'
+      ? (a, b) => b.total_value - a.total_value : (a, b) => b.transaction_date.localeCompare(a.transaction_date));
+    const off = Number(q.get('offset') || 0), lim = Math.min(Number(q.get('limit') || 200), 2000);
+    const page = rows.slice(off, off + lim);
+    return { count: page.length, total: rows.length, rows: page };
+  }
+  function insiderRollups(path) {
+    const rows = insiderQuery(path.replace(/([?&])(type|ticker|min_value)=[^&]*/g, '$1'));
+    const buys = rows.filter(r => r.transaction_type === 'P');
+    const sold = {};
+    rows.filter(r => r.transaction_type === 'S').forEach(r => { const s = sold[r.ticker] ||= { ticker: r.ticker, company_name: r.company_name, sell_value: 0, sell_count: 0, insiders: new Set() };
+      s.sell_value += r.total_value; s.sell_count++; s.insiders.add(r.insider_name); });
+    const byT = {}; buys.forEach(r => (byT[r.ticker] ||= []).push(r));
+    // 3+ DISTINCT insiders within any 14-day window (same rule as the pipeline).
+    const clusters = [];
+    Object.entries(byT).forEach(([t, rs]) => {
+      rs = rs.slice().sort((a, b) => a.transaction_date.localeCompare(b.transaction_date));
+      let best = null;
+      rs.forEach((a, i) => {
+        const end = new Date(Date.parse(a.transaction_date) + 14 * 864e5).toISOString().slice(0, 10);
+        const win = rs.slice(i).filter(b => b.transaction_date <= end);
+        const n = new Set(win.map(b => b.insider_name)).size;
+        if (n >= 3 && (!best || n > best.n)) best = { n, win };
+      });
+      if (best) clusters.push({ ticker: t, company_name: best.win[0].company_name, insiders: best.n,
+        buy_value: best.win.reduce((s, r) => s + r.total_value, 0), first_date: best.win[0].transaction_date,
+        last_date: best.win[best.win.length - 1].transaction_date });
+    });
+    return { top_buys: buys.slice().sort((a, b) => b.total_value - a.total_value).slice(0, 25),
+      most_sold: Object.values(sold).map(s => ({ ...s, insiders: s.insiders.size })).sort((a, b) => b.sell_value - a.sell_value).slice(0, 25),
+      clusters };
+  }
+
   // Route a jget() path to a synthetic response. Unknown paths → {} (renders as
   // empty/– rather than throwing).
   window.__DEMO__ = function demoGet(path) {
@@ -313,6 +386,8 @@
     if (path.indexOf('/api/stocks?') === 0) return { stocks: STOCKS };
     if (path === '/api/integrity') return integrity();
     if (path === '/api/commodities') return { commodities: [] };
+    if (path.indexOf('/api/insider-trades/rollups') === 0) return insiderRollups(path);
+    if (path.indexOf('/api/insider-trades') === 0) return insiderTrades(path);
     let m;
     if ((m = path.match(/^\/api\/stocks\/([^/]+)\/commodities$/))) return { ticker: decodeURIComponent(m[1]), exposures: [] };
     if ((m = path.match(/^\/api\/stocks\/([^/]+)$/))) { const r = byTicker(decodeURIComponent(m[1])); return r ? Object.assign({}, r) : {}; }

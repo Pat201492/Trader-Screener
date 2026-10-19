@@ -293,3 +293,56 @@ def build_universe():
 
 
 STOCKS, OPTIONS, MACRO = build_universe()
+
+
+# Insider trades (#314): the shape of Stock-Data-Pipeline's insider_trades rows
+# (InsiderTrade in politicians_database.py), dated relative to today so the
+# dashboard's default 30-day window always has data. Includes a 3-insider
+# cluster buy (CLST) and one impossible row (a "$2.27M per share" purchase,
+# modelled on the live SLBT 2026-09-29 record) that the bad-row guard hides.
+def build_insider_trades(today=None):
+    from datetime import date
+    rng = random.Random(314)
+    today = today or date.today()
+    people = [("Jane Rivera", "Chief Executive Officer"), ("Tom Okafor", "Director"),
+              ("Ana Petrov", "CFO"), ("Lee Wong", "Director"), ("Sam Patel", "10% Owner"),
+              ("Kim Duarte", "EVP, General Counsel"), ("Max Weber", "Director"),
+              ("Ivy Chen", "SVP, Operations")]
+    tickers = [("AAPL", "Apple Inc."), ("NVDA", "NVIDIA Corporation"), ("MSFT", "Microsoft Corp"),
+               ("AMZN", "Amazon.com, Inc."), ("TSLA", "Tesla, Inc."), ("JPM", "JPMorgan Chase & Co.")]
+    rows = []
+    for i in range(40):
+        t, co = tickers[i % len(tickers)]
+        name, title = people[rng.randrange(len(people))]
+        code = rng.choice(["S", "S", "S", "P", "A", "M", "F"])
+        shares = float(rng.randrange(500, 60000))
+        price = round(rng.uniform(20, 900), 2)
+        d = (today - timedelta(days=rng.randrange(0, 45))).isoformat()
+        acc = f"0000{100000 + i:06d}-26-{i:06d}"
+        rows.append({"filing_id": acc, "ticker": t, "company_name": co, "insider_name": name,
+                     "insider_title": title, "transaction_date": d, "transaction_type": code,
+                     "shares": shares, "price_per_share": price, "total_value": round(shares * price, 2),
+                     "shares_owned_after": shares * 3, "form_type": "4",
+                     "filed_date": d, "source_url": f"mirror:https://www.sec.gov/Archives/edgar/data/1/{acc.replace('-', '')}/{acc}-index.html",
+                     "ingested_at": today.isoformat()})
+    for j, (name, title) in enumerate(people[:3]):
+        d = (today - timedelta(days=4 + j * 3)).isoformat()
+        acc = f"0000200000-26-{j:06d}"
+        rows.append({"filing_id": acc, "ticker": "CLST", "company_name": "Cluster Holdings Inc.",
+                     "insider_name": name, "insider_title": title, "transaction_date": d,
+                     "transaction_type": "P", "shares": 10000.0, "price_per_share": 12.5,
+                     "total_value": 125000.0, "shares_owned_after": 50000.0, "form_type": "4",
+                     "filed_date": d, "source_url": f"https://www.sec.gov/Archives/edgar/data/2/{acc.replace('-', '')}/{acc}-index.html",
+                     "ingested_at": today.isoformat()})
+    d = (today - timedelta(days=2)).isoformat()
+    rows.append({"filing_id": "0000300000-26-000001", "ticker": "SLBT", "company_name": "Suspect Data Co.",
+                 "insider_name": "Ching-Dong Wang", "insider_title": "Chief Executive Officer",
+                 "transaction_date": d, "transaction_type": "P", "shares": 4545306.0,
+                 "price_per_share": 2272653.0, "total_value": 10329903316818.0,
+                 "shares_owned_after": 4545306.0, "form_type": "4", "filed_date": d,
+                 "source_url": "https://www.sec.gov/Archives/edgar/data/3/000030000026000001/0000300000-26-000001-index.html",
+                 "ingested_at": today.isoformat()})
+    return rows
+
+
+INSIDER_TRADES = build_insider_trades()
