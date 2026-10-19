@@ -376,6 +376,40 @@ try:
     _r_m = server.edgar_search({"forms": ["4"], "max_results": 10})
     check("stopping at max_results with more hits waiting is truncated",
           _r_m["truncated"] is True and _r_m["returned"] == 10)
+
+    # #321: 8-K hits carry their item codes; `items` filters on them.
+    class _EightKClient(_TruncClient):
+        def full_text_search(self, **kw):
+            items = [["2.02", "9.01"], ["5.02"], ["5.02", "9.01"], ["1.01"]]
+            hits = [{"_id": f"0000000000-26-{i:06d}:d{i}.htm",
+                     "_source": {"adsh": f"0000000000-26-{i:06d}", "ciks": ["0000000001"],
+                                 "display_names": ["X Co (CIK 0000000001)"], "form": "8-K",
+                                 "file_date": "2026-10-15", "items": it, "sics": ["7372"]}}
+                    for i, it in enumerate(items)]
+            return {"hits": {"total": {"value": 4, "relation": "eq"}, "hits": hits}}
+
+    _ec_t.EdgarClient = lambda **kw: _EightKClient(4, 4)
+    _r_8 = server.edgar_search({"forms": ["8-K"]})
+    check("8-K hits carry their items and sics",
+          [h["items"] for h in _r_8["hits"]][0] == ["2.02", "9.01"]
+          and _r_8["hits"][0]["sics"] == ["7372"] and _r_8["items_filtered"] is False)
+    check("EIGHT_K_ITEMS names every current 8-K item",
+          all(c in server.EIGHT_K_ITEMS and server.EIGHT_K_ITEMS[c] for c in (
+              "1.01", "1.02", "1.03", "1.04", "1.05", "2.01", "2.02", "2.03", "2.04",
+              "2.05", "2.06", "3.01", "3.02", "3.03", "4.01", "4.02", "5.01", "5.02",
+              "5.03", "5.04", "5.05", "5.06", "5.07", "5.08", "6.01", "6.02", "6.03",
+              "6.04", "6.05", "6.06", "6.10", "7.01", "8.01", "9.01")))
+    _r_8f = server.edgar_search({"forms": ["8-K"], "items": ["5.02"]})
+    check("items: [5.02] keeps only hits reporting 5.02 and sets items_filtered",
+          len(_r_8f["hits"]) == 2 and all("5.02" in h["items"] for h in _r_8f["hits"])
+          and _r_8f["items_filtered"] is True and _r_8f["query"]["items"] == ["5.02"])
+    try:
+        server.edgar_search({"forms": ["8-K"], "items": ["5.99"]})
+        _bad_item = None
+    except ValueError as _e:
+        _bad_item = str(_e)
+    check("an unknown item code is refused (the route answers 400)",
+          bool(_bad_item) and "5.99" in _bad_item)
 finally:
     _ec_t.EdgarClient = _real_ec_t
     if _saved_ua_t is None:

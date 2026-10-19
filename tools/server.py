@@ -38,6 +38,7 @@ from urllib.parse import urlparse, parse_qs, quote
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRUBBER = REPO_ROOT / "tools" / "edgar_scrubber"
 sys.path.insert(0, str(SCRUBBER))
+from eight_k_items import EIGHT_K_ITEMS, normalize_items  # noqa: E402  (#321)
 
 DEFAULT_HOME = Path.home() / ".edgar-scrubber"
 DEFAULT_FIELDS = [
@@ -300,6 +301,8 @@ def edgar_search(params):
     if isinstance(ciks, str):
         ciks = [c.strip() for c in ciks.split(",") if c.strip()]
     exclude = set(params.get("excludeCiks") or [])
+    # 8-K item filter (#321): an unknown code is the caller's error (400).
+    items = normalize_items(params.get("items"))
     if not q and not forms and not ciks:
         raise ValueError("give at least a search phrase, a form type, or a CIK")
 
@@ -342,10 +345,18 @@ def edgar_search(params):
             continue
         if exclude & set(info.get("ciks") or []):
             continue
+        src = h.get("_source") or {}
+        hit_items = [str(i) for i in (src.get("items") or [])]
+        if items and not set(items) & set(hit_items):
+            continue
         seen.add(info["accession"])
         row = {k: info.get(k) for k in
                ("accession", "document", "issuer", "cik", "form",
                 "file_date", "tickers")}
+        # An 8-K's item codes say what happened (2.02 earnings, 5.02 officer
+        # change); the industry codes ride along for the same no-read screening.
+        row["items"] = hit_items
+        row["sics"] = [str(s) for s in (src.get("sics") or [])]
         row.update(edgar_urls(row.get("cik"), row.get("accession"), row.get("document")))
         hits.append(row)
 
@@ -358,10 +369,13 @@ def edgar_search(params):
     dates = [h["file_date"] for h in hits if h.get("file_date")]
     return {"total": total, "saturated": saturated, "returned": len(hits),
             "truncated": truncated, "oldest_returned": min(dates) if dates else None,
+            # The item filter applies to the hits EDGAR returned, so a truncated
+            # page stays truncated: older matching 8-Ks may not be shown.
+            "items_filtered": bool(items),
             "hits": hits,
             "search_url": edgar_search_url(q, forms, ciks,
                                             params.get("startdt"), params.get("enddt")),
-            "query": {"q": q, "forms": forms, "ciks": ciks,
+            "query": {"q": q, "forms": forms, "ciks": ciks, "items": items,
                       "startdt": params.get("startdt"), "enddt": params.get("enddt")}}
 
 
@@ -2812,15 +2826,17 @@ def summarize_hits_for_history(results):
         q = item.get("query", {}) or {}
         hits = res.get("hits", []) or []
         total = res.get("total") if res.get("total") is not None else len(hits)
-        per_search.append("- q=%r forms=%s ciks=%s: %s hit(s)%s" % (
-            q.get("q") or "", q.get("forms") or [], q.get("ciks") or [], total,
+        per_search.append("- q=%r forms=%s ciks=%s%s: %s hit(s)%s" % (
+            q.get("q") or "", q.get("forms") or [], q.get("ciks") or [],
+            " items=%s" % q.get("items") if q.get("items") else "", total,
             " (TRUNCATED: only the newest %d shown)" % len(hits) if res.get("truncated") else ""))
         for h in hits:
             lines.append(
-                "- %s | %s | CIK %s | filed %s | %s" % (
+                "- %s | %s | CIK %s | filed %s | %s%s" % (
                     h.get("form") or "?", h.get("issuer") or "?",
                     h.get("cik") or "?", h.get("file_date") or "?",
-                    h.get("accession") or "?"))
+                    h.get("accession") or "?",
+                    " | items %s" % ",".join(h["items"]) if h.get("items") else ""))
     head = "EDGAR results (metadata only). Searches:\n" + "\n".join(per_search)
     if not lines:
         return {"role": "user", "content": head + "\nNo hits."}
@@ -3013,7 +3029,7 @@ def approve_research_batch(batch_id):
             # Only the efts fields, and max_results pinned to the 20-hit cap: an
             # approval runs the searches the user saw, at a bounded size, never a
             # larger query the stored batch could carry.
-            p = {k: s.get(k) for k in ("q", "forms", "ciks", "startdt", "enddt")}
+            p = {k: s.get(k) for k in ("q", "forms", "ciks", "items", "startdt", "enddt")}
             p["max_results"] = RESEARCH_MAX_RESULTS
             results.append({"query": s, "result": edgar_search(p)})
     except Exception:
@@ -4508,6 +4524,9 @@ class Handler(SimpleHTTPRequestHandler):
                             "ciks": list(sq.ciks or []), "startdt": sq.startdt,
                             "enddt": sq.enddt})
             return self._json(out)
+        if path == "/api/tools/edgar-scrubber/8k-items":
+            # Item code -> official title (#321): the 8-K chips and picker.
+            return self._json({"items": EIGHT_K_ITEMS})
         if path == "/api/tools/edgar-scrubber/forms":
             try:
                 import scrubbers as scrubbers_mod

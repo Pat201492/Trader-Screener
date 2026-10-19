@@ -2742,6 +2742,7 @@ async function openAnyFormSearch(){
     EXTRACTABLE_FORMS=Array.isArray(data.forms)
       ? new Set(data.forms.map(f=>String(f).trim().toUpperCase())) : new Set();
   }catch(e){ EXTRACTABLE_FORMS=new Set(); }
+  await loadEightKItems();
   panel.innerHTML=`
     <div class="card" style="margin-top:16px">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
@@ -2754,7 +2755,7 @@ async function openAnyFormSearch(){
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-top:10px">
         <label style="font-size:11.5px;color:var(--muted)">Form code
-          <input id="sq_forms" style="${inp};width:100%;margin-top:3px" placeholder="S-1" value="">
+          <input id="sq_forms" style="${inp};width:100%;margin-top:3px" placeholder="S-1" value="" oninput="toggleItemPicker()">
           <span id="sq_form_err" style="display:block;color:var(--red);font-size:11px;margin-top:3px;min-height:1px"></span></label>
         <label style="font-size:11.5px;color:var(--muted)">Issuer — ticker or CIK (optional)
           <input id="sq_ciks" style="${inp};width:100%;margin-top:3px" placeholder="AAPL or 0000320193"></label>
@@ -2764,6 +2765,12 @@ async function openAnyFormSearch(){
           <input id="sq_end" type="date" style="${inp};width:100%;margin-top:3px"></label>
         <label style="font-size:11.5px;color:var(--muted)">Full-text query (optional)
           <input id="sq_q" style="${inp};width:100%;margin-top:3px" placeholder="words that must appear in the filing"></label>
+      </div>
+      <div id="sq_items_wrap" style="display:none;margin-top:10px">
+        <label style="font-size:11.5px;color:var(--muted)">8-K items — keep filings reporting any of these (ctrl/cmd-click for several; none = any)
+          <select id="sq_items" multiple size="6" style="${inp};width:100%;margin-top:3px">
+            ${Object.entries(EIGHT_K_ITEMS).map(([c,t])=>`<option value="${esc(c)}">${esc(c)} — ${esc(t)}</option>`).join('')}
+          </select></label>
       </div>
       <input type="hidden" id="sq_max" value="25">
       <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap">
@@ -2782,6 +2789,31 @@ async function openAnyFormSearch(){
     </div>
     <div id="docPanel" style="display:none"></div>
     <div id="runPanel" style="display:none"></div>`;
+}
+
+// 8-K item codes -> official titles (#321), from the server's one table.
+let EIGHT_K_ITEMS={};
+async function loadEightKItems(){
+  if(Object.keys(EIGHT_K_ITEMS).length) return;
+  try{ EIGHT_K_ITEMS=(await (await fetch('/api/tools/edgar-scrubber/8k-items')).json()).items||{}; }
+  catch(e){ EIGHT_K_ITEMS={}; }
+}
+function toggleItemPicker(){
+  const f=document.getElementById('sq_forms'), w=document.getElementById('sq_items_wrap');
+  if(!f||!w) return;
+  const is8k=f.value.trim().toUpperCase()==='8-K';
+  w.style.display=is8k?'block':'none';
+  if(!is8k){ const s=document.getElementById('sq_items'); if(s) Array.from(s.options).forEach(o=>o.selected=false); }
+}
+// The selected 8-K items, only while the picker is showing (form is 8-K).
+function chosenItems(){
+  const w=document.getElementById('sq_items_wrap'), s=document.getElementById('sq_items');
+  if(!w||!s||w.style.display==='none') return [];
+  return Array.from(s.selectedOptions).map(o=>o.value);
+}
+// One chip per item code, its official title on hover.
+function itemChips(items){
+  return (items||[]).map(c=>`<span title="${esc(EIGHT_K_ITEMS[c]||'8-K item '+c)}" style="display:inline-block;border:1px solid var(--border);border-radius:10px;padding:0 6px;margin:1px 3px 1px 0;font-size:10.5px;cursor:help">${esc(c)}</span>`).join('');
 }
 
 // Validate the form code locally before spending a request, then hand off to the
@@ -2848,6 +2880,8 @@ async function runSearch(errTargetId){
     ciks:document.getElementById('sq_ciks').value.trim(),
     max_results:parseInt(document.getElementById('sq_max').value,10)||25,
   };
+  const items=chosenItems();
+  if(items.length) body.items=items;
   const out=document.getElementById('searchResults');
   const errEl=errTargetId?document.getElementById(errTargetId):null;
   if(errEl) errEl.textContent='';
@@ -2877,6 +2911,7 @@ async function runSearch(errTargetId){
     ? `<strong>${data.days_covered}</strong> day(s) with filings · ${data.returned} sampled `
       +`(${data.per_day}/day) · ${data.days_scanned} day(s) scanned, ${data.days_empty} empty`
     : `${data.saturated?'at least ':''}<strong>${data.total}</strong> filing(s) match · showing ${data.returned}`
+      +(data.items_filtered?` <span class="muted">(only those reporting item ${esc((data.query.items||[]).join(', '))} — filtered from the returned page)</span>`:'')
       +truncatedNote(data);
   renderHits();
 }
@@ -2949,7 +2984,7 @@ function renderHits(){
     ${vis.map(i=>SEARCH.hits[i]).map((h,n)=>{const i=vis[n];const ex=isExtractableHit(h);return `<tr>
       <td>${ex?`<input type="checkbox" ${SEARCH.selected.has(i)?'checked':''} onchange="toggleHit(${i},this.checked)">`:''}</td>
       <td class="muted">${esc(h.file_date||h.sample_day||'')}</td>
-      <td class="muted">${esc(h.form||'')}</td>
+      <td class="muted">${esc(h.form||'')}${(h.items&&h.items.length)?`<div>${itemChips(h.items)}</div>`:''}</td>
       <td>${esc(h.issuer||'')}${(h.tickers&&h.tickers.length)?` <span class="muted">(${esc(h.tickers.join(', '))})</span>`:''}</td>
       <td class="muted" style="font-family:ui-monospace,Consolas,monospace;font-size:11.5px">${esc(h.accession)}</td>
       <td style="white-space:nowrap">
@@ -4269,6 +4304,7 @@ function researchRowHtml(s,ti,i,errs){
       <label class="muted" style="font-size:11px">issuer <input id="rs_ciks_${ti}_${i}" value="${esc((s.ciks||[]).join(', '))}" placeholder="AAPL, 320193" style="${inp};width:140px"></label>
       <label class="muted" style="font-size:11px">from <input id="rs_start_${ti}_${i}" value="${esc(s.startdt||'')}" placeholder="YYYY-MM-DD" style="${inp};width:110px"></label>
       <label class="muted" style="font-size:11px">to <input id="rs_end_${ti}_${i}" value="${esc(s.enddt||'')}" placeholder="YYYY-MM-DD" style="${inp};width:110px"></label>
+      <label class="muted" style="font-size:11px" title="8-K item codes, e.g. 5.02 = officer/director change">8-K items <input id="rs_items_${ti}_${i}" value="${esc((s.items||[]).join(', '))}" placeholder="5.02, 2.02" style="${inp};width:100px"></label>
     </div>
     <input id="rs_rat_${ti}_${i}" value="${esc(s.rationale||'')}" placeholder="why this search helps" style="${inp};width:100%;margin-top:6px">
     ${err?`<div class="err" style="margin-top:6px;font-size:11.5px">${esc(err)}</div>`:''}
@@ -4289,6 +4325,7 @@ function readBatchRows(batch,ti){
       ciks:splitList(g(`rs_ciks_${ti}_${i}`)),
       startdt:(g(`rs_start_${ti}_${i}`)||'').trim(),
       enddt:(g(`rs_end_${ti}_${i}`)||'').trim(),
+      items:splitList(g(`rs_items_${ti}_${i}`)),
       rationale:(g(`rs_rat_${ti}_${i}`)||'').trim()};
   });
   if(batch.insider_query){
@@ -4412,6 +4449,7 @@ async function submitPlan(msg,provider,estimateId){
   if(errEl) errEl.textContent='';
   if(RESEARCH.sending) return;
   syncAllProposedBatches();
+  loadEightKItems();   // titles for the 8-K item chips on results (#321)
   RESEARCH.sending=true; if(btn){ btn.disabled=true; btn.textContent='asking…'; }
   const ti=RESEARCH.turns.length;
   RESEARCH.turns.push({question:msg,batch:null,error:null});
@@ -4535,12 +4573,13 @@ function researchResultsHtml(batch,ti){
     const hits=res.hits||[];
     const meta=[q.forms&&q.forms.length?`forms ${esc(q.forms.join(', '))}`:'',
                 q.ciks&&q.ciks.length?`issuer ${esc(q.ciks.join(', '))}`:'',
+                q.items&&q.items.length?`8-K items ${esc(q.items.join(', '))}`:'',
                 (q.startdt||q.enddt)?`${esc(q.startdt||'…')} → ${esc(q.enddt||'…')}`:''].filter(Boolean).join(' · ');
     const rows=hits.length?hits.map((h,hi)=>{
       const link=h.document_url||h.filing_url;
       return `<tr>
         <td class="muted">${esc(h.file_date||'')}</td>
-        <td class="muted">${esc(h.form||'')}</td>
+        <td class="muted">${esc(h.form||'')}${(h.items&&h.items.length)?`<div>${itemChips(h.items)}</div>`:''}</td>
         <td>${esc(h.issuer||'')}${(h.tickers&&h.tickers.length)?` <span class="muted">(${esc(h.tickers.join(', '))})</span>`:''}</td>
         <td style="white-space:nowrap">
           <button onclick="openResearchFiling(${ti},${gi},${hi})" style="background:transparent;border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:2px 8px;font-size:11.5px;cursor:pointer">Open in scrubber</button>
