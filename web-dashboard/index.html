@@ -3907,6 +3907,12 @@ async function renderToolEdgarResults(form){
     await loadFacts(null,'annual',s.form_type);
     return;
   }
+  if((s.field_source||'spec')==='xml'){
+    FORMS=null;
+    document.getElementById('tool_results').innerHTML='<div id="formsView"><div class="loading">Reading the local forms store…</div></div>';
+    await loadForms(s.form_type);
+    return;
+  }
   await renderToolsResults('tool_results');
   await renderToolsCoverage(undefined,'tool_coverage');
 }
@@ -4414,6 +4420,53 @@ function renderFacts(data,keepFocus){
       <div class="muted" style="font-size:11px;margin-top:6px">Latest version of each period. <span style="color:#e3b341">r</span> = restated by a later filing. Hover a cell for the raw value and accession.</div>
     </div>`;
   if(keepFocus){ const s=document.getElementById('factsSearch'); if(s){ s.focus(); s.setSelectionRange(s.value.length,s.value.length); } }
+}
+
+// ── structured-XML forms (#286) ──────────────────────────────────────
+// Forms 3/4/5 are neither prose nor XBRL facts: an XML run lifts the filing's
+// own XML into FormsStore, one row per transaction or holding. The Results tab
+// renders those rows as a plain table, one column per row key, read per form
+// from /api/store/forms.
+let FORMS=null;
+async function loadForms(form){
+  const qs=new URLSearchParams();
+  if(form) qs.set('form',form);
+  try{ const d=await (await fetch('/api/store/forms?'+qs)).json(); renderForms(d); }
+  catch(e){ const b=document.getElementById('formsView'); if(b) b.innerHTML=`<div class="err">${esc(e.message)}</div>`; }
+}
+function renderForms(data){
+  const box=document.getElementById('formsView');
+  if(!box||!data) return;
+  FORMS=data;
+  if(data.error){ box.innerHTML=`<div class="err">${esc(data.error)}</div>`; return; }
+  const cols=data.columns||[], rows=data.rows||[];
+  if(!rows.length){
+    box.innerHTML=`<div style="padding:26px"><div class="muted">No ${esc(data.form||'')} results yet — open the ${esc(data.form||'')} scrubber in the EDGAR Scrubber tab, search, and run.</div>
+      <div class="muted" style="font-size:11px;margin-top:6px">store: <code>${esc(data.store||'')}</code></div></div>`;
+    return;
+  }
+  // A cell may hold a scalar, null (an element the filer omitted) or a nested
+  // object; show a dash for the gap and JSON for the rare object so nothing is
+  // silently dropped.
+  const fmt=v=>v==null?'–':(typeof v==='object'?esc(JSON.stringify(v)):esc(String(v)));
+  box.innerHTML=`
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <div class="name">${esc(data.form||'')} form rows (XML)</div>
+        <span class="muted" style="font-size:11px;margin-left:auto">filer-tagged, zero tokens · ${(data.documents||[]).length} filing(s) · store <code>${esc(data.store)}</code></span>
+      </div>
+      <div class="scroll" style="border:1px solid var(--border);border-radius:6px;max-height:520px;margin-top:10px">
+        <table style="font-size:12px">
+          <tr><th style="white-space:nowrap">Filed</th><th style="white-space:nowrap">Accession</th>
+            ${cols.map(c=>`<th style="white-space:nowrap">${esc(c)}</th>`).join('')}</tr>
+          ${rows.map(r=>`<tr>
+            <td style="white-space:nowrap">${esc(r._filed||'')}</td>
+            <td style="white-space:nowrap">${esc(r._accession||'')}</td>
+            ${cols.map(c=>`<td>${fmt(r[c])}</td>`).join('')}
+          </tr>`).join('')}
+        </table></div>
+      <div class="muted" style="font-size:11px;margin-top:6px">One row per transaction or holding, lifted from the filing's own XML — no model.</div>
+    </div>`;
 }
 
 // ── standardized + compare views over the canonical layer (#240) ─────

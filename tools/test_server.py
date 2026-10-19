@@ -1895,6 +1895,152 @@ finally:
     server._FILER_NAMES.clear()
 
 # --------------------------------------------------------------------------- #
+section("structured-XML forms: xml_run routing + /api/store/forms (#286)")
+# --------------------------------------------------------------------------- #
+# Drive the whole XML path offline: the committed Form 4 fixture through a fake
+# client (filing_index + archive_document, no network), into a temp FormsStore.
+# A model call or an OutputStore write here would be a routing bug.
+from forms_store import FormsStore as _FormsStore
+
+_FORM4_FIX = (server.REPO_ROOT / "tools" / "edgar_scrubber" / "tests"
+              / "fixtures" / "form4_cook.xml")
+_form4_bytes = _FORM4_FIX.read_bytes()
+_ACCN_OK = "0000320193-26-000031"       # a readable ownership XML
+_ACCN_BAD = "0000000000-26-000099"      # only a wrong-schema XML -> skipped
+
+
+class _FakeXmlClient:
+    """Serves one filing index + its documents per accession, no network. A
+    `company_facts` call would mean the run took the taxonomy path by mistake,
+    so it fails loudly rather than returning data."""
+
+    def __init__(self, filings):
+        self.filings = filings
+        self.facts_calls = 0
+
+    def filing_index(self, cik, accession):
+        return {"directory": {"name": accession,
+                              "item": self.filings[accession]["items"]}}
+
+    def archive_document(self, cik, accession, name):
+        return self.filings[accession]["docs"][name]
+
+    def company_facts(self, cik):
+        self.facts_calls += 1
+        raise AssertionError("xml_run must never fetch companyfacts")
+
+
+_xml_filings = {
+    _ACCN_OK: {"items": [{"name": "form4.xml", "type": "4", "size": "1"}],
+               "docs": {"form4.xml": _form4_bytes}},
+    # A lone XBRL-shaped instance doc: read_ownership rejects it (root is not
+    # ownershipDocument), so pick_xml_rows finds nothing readable.
+    _ACCN_BAD: {"items": [{"name": "inst_htm.xml", "type": "XML", "size": "1"}],
+                "docs": {"inst_htm.xml": b"<xbrl><context/></xbrl>"}},
+}
+
+_xml_home = Path(tempfile.mkdtemp(prefix="xmlrun-gate-"))
+_xprev_home = os.environ.get("EDGAR_SCRUBBER_HOME")
+_xprev_ua = os.environ.get("EDGAR_USER_AGENT")
+os.environ["EDGAR_SCRUBBER_HOME"] = str(_xml_home)
+os.environ["EDGAR_USER_AGENT"] = "Test Tester test@example.com"
+
+# The registry must own forms 3/4/5 on the xml path.
+check("form 4 resolves to the xml path",
+      server.scrubber_for_forms(["4"]) is not None
+      and server.scrubber_for_forms(["4"]).field_source == "xml")
+check("forms 3 and 5 also resolve to the xml path",
+      all((server.scrubber_for_forms([f]) or None)
+          and server.scrubber_for_forms([f]).field_source == "xml"
+          for f in ("3", "5")))
+
+import edgar_client as _ecx
+_real_ecx = _ecx.EdgarClient
+_fake_xml = _FakeXmlClient(_xml_filings)
+_ecx.EdgarClient = lambda **kw: _fake_xml
+try:
+    # The acceptance path: POST /run with forms ["4"] and an accession. Routed
+    # through start_scrubber_run, which spawns the worker thread.
+    import threading as _threading
+    _xrid = server.start_scrubber_run({
+        "forms": ["4"],
+        "accessions": [{"accession": _ACCN_OK, "cik": "320193",
+                        "file_date": "2026-03-03"},
+                       {"accession": _ACCN_BAD, "cik": "320193",
+                        "file_date": "2026-03-04"}],
+        "limit": 2,
+    })
+    for _th in _threading.enumerate():
+        if _th.name == "run-%s" % _xrid:
+            _th.join(timeout=20)
+finally:
+    _ecx.EdgarClient = _real_ecx
+
+_xrun = server.RUNS.get(_xrid)
+check("a form-4 run is routed to the xml field_source",
+      _xrun["params"].get("field_source") == "xml")
+check("the xml run completes", _xrun["status"] == "done")
+check("no companyfacts fetch -- the run did not take the taxonomy path",
+      _fake_xml.facts_calls == 0)
+check("no OutputStore write -- extractions.sqlite is never created",
+      not (_xml_home / "store" / "extractions.sqlite").exists())
+check("no facts store write either", not (_xml_home / "store" / "facts.sqlite").exists())
+check("one filing read, one skipped",
+      _xrun.get("rows_written") == 1 and _xrun.get("filings_skipped") == 1)
+check("the unreadable filing is logged and skipped",
+      any(_ACCN_BAD in l["message"] and "skipped" in l["message"]
+          for l in _xrun["log"]))
+
+# The Results tab reads this endpoint.
+_grid = server.store_forms(form="4")
+check("store_forms returns the run's rows", len(_grid["rows"]) == 3)
+check("columns are the union of row keys",
+      "shares" in _grid["columns"] and "security_title" in _grid["columns"]
+      and "table" in _grid["columns"])
+check("a transaction row carries its lifted values",
+      any(r.get("shares") == 511000 and r.get("price") == 170.0
+          for r in _grid["rows"]))
+check("every flattened row is tagged with its filing",
+      all(r.get("_accession") == _ACCN_OK for r in _grid["rows"]))
+check("one document, from the readable filing only",
+      [d["accession"] for d in _grid["documents"]] == [_ACCN_OK])
+
+check("a cik filter keeps that filer",
+      len(server.store_forms(form="4", cik="320193")["rows"]) == 3)
+check("a cik filter excludes other filers",
+      server.store_forms(form="4", cik="999")["rows"] == [])
+check("a date range that spans the filing keeps it",
+      len(server.store_forms(form="4", date_from="2026-01-01",
+                             date_to="2026-12-31")["rows"]) == 3)
+check("a date range after the filing excludes it",
+      server.store_forms(form="4", date_from="2027-01-01")["rows"] == [])
+check("a form with nothing stored is empty, not another form's rows",
+      server.store_forms(form="3")["rows"] == []
+      and server.store_forms(form="3")["documents"] == [])
+
+# xml_run skips a selection with no CIK and still finishes.
+_nrid = server.RUNS.create("edgar-scrubber", {"limit": 1, "fields": []})
+_ecx.EdgarClient = lambda **kw: _FakeXmlClient(_xml_filings)
+try:
+    server.xml_run(_nrid, [{"accession": _ACCN_OK, "file_date": "2026-03-03"}],
+                   _xml_home, form_type="4")
+finally:
+    _ecx.EdgarClient = _real_ecx
+_nxrun = server.RUNS.get(_nrid)
+check("a selection with no CIK is skipped and the run still finishes",
+      _nxrun["status"] == "done" and _nxrun.get("filings_skipped") == 1
+      and _nxrun.get("rows_written") == 0)
+
+if _xprev_home is None:
+    os.environ.pop("EDGAR_SCRUBBER_HOME", None)
+else:
+    os.environ["EDGAR_SCRUBBER_HOME"] = _xprev_home
+if _xprev_ua is None:
+    os.environ.pop("EDGAR_USER_AGENT", None)
+else:
+    os.environ["EDGAR_USER_AGENT"] = _xprev_ua
+
+# --------------------------------------------------------------------------- #
 section("research assistant -- proposal batches (plan, edit, approve, caps)")
 # --------------------------------------------------------------------------- #
 # Nothing the assistant proposes may run without the user approving THAT batch
