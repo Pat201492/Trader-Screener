@@ -2123,6 +2123,20 @@ _bid = _b["batch_id"]
 _st, _b = _rb_req("POST", "/plan", {"provider": "fake", "message": "", "chat_id": "c1"})
 check("POST /plan with an empty message is a 400", _st == 400)
 
+# -- providers: what the picker may offer, and why Claude is disabled --------
+import research_assistant as _ra
+_st, _b = _rb_req("GET", "/providers", None)
+_provs = {p["name"]: p for p in _b.get("providers", [])}
+check("GET /providers lists ollama and claude", _st == 200
+      and set(_provs) == {"ollama", "claude"})
+check("ollama is always available", _provs["ollama"]["available"] is True
+      and _provs["ollama"]["reason"] == "")
+_claude_ok, _claude_reason = _ra.claude_available()
+check("claude availability matches claude_available()",
+      _provs["claude"]["available"] is bool(_claude_ok))
+check("an unavailable claude carries the server's reason",
+      bool(_claude_ok) or _provs["claude"]["reason"] == _claude_reason)
+
 # -- edit: validated, proposed-only -----------------------------------------
 _st, _b = _rb_req("PUT", "/batch/%s" % _bid,
                   {"searches": [{"q": "x", "forms": ["FORM!"], "ciks": [],
