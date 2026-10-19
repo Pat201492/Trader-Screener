@@ -2057,6 +2057,156 @@ server.build_research_provider = _prev_build
 server.RESEARCH = _prev_research
 
 # --------------------------------------------------------------------------- #
+section("research assistant -- cost gate, metadata-only history, audit, persist")
+# --------------------------------------------------------------------------- #
+# The guardrails that make the assistant safe to leave running (#287): no paid
+# Claude call before the user has seen a cost, no filing text ever fed back to
+# the model, every decision on the audit log, and chats/batches that survive a
+# restart. Exercised with a fake provider (no key, no network) and a stub search
+# over a disk root under tempfile.
+
+_gr_root = Path(tempfile.mkdtemp(prefix="research-guard-"))
+
+
+# A fake provider that records the conversation it was handed, so the history
+# fed to plan() can be inspected. `model` lets estimate_cost price it (or not).
+class _GateProvider:
+    def __init__(self, payload):
+        self.payload, self.calls, self.last_messages = payload, 0, None
+        self.model = "fake-model"
+
+    def complete(self, system, messages):
+        self.calls += 1
+        self.last_messages = list(messages)
+        return json.dumps(self.payload)
+
+
+# A stub search whose hit carries BOTH metadata and a filing-text body, so the
+# "metadata only" claim is testable: the body must never reach the history.
+_SECRET = "SECRET FILING BODY: contingent coupon mechanics in full"
+
+
+def _gr_search(params):
+    return {"returned": 1, "total": 1, "hits": [{
+        "accession": "0001234567-25-000042", "form": "424B2",
+        "issuer": "Example Structured Products Inc", "cik": "0001234567",
+        "file_date": "2025-06-10", "document": "d424b2.htm",
+        "body": _SECRET, "text": _SECRET}]}
+
+
+_gr_payload = {
+    "reply": "One search proposed.",
+    "searches": [{"q": "contingent coupon", "forms": ["424B2"], "ciks": [],
+                  "startdt": "", "enddt": "", "rationale": "coupon terms"}],
+}
+
+_gr_prev_search = server.edgar_search
+_gr_prev_build = server.build_research_provider
+_gr_prev_research = server.RESEARCH
+_gr_provider = _GateProvider(_gr_payload)
+server.edgar_search = _gr_search
+server.build_research_provider = lambda name: _gr_provider
+server.RESEARCH = server.ResearchBatchStore(_gr_root)
+
+_gr_httpd = _THS(("127.0.0.1", 0), _partial(server.Handler, directory=str(server.REPO_ROOT)))
+threading.Thread(target=_gr_httpd.serve_forever, daemon=True).start()
+_gr_base = "http://127.0.0.1:%d" % _gr_httpd.server_address[1]
+
+
+def _gr_req(method, path, payload=None):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        _gr_base + "/api/tools/research" + path, data=data,
+        headers={"Content-Type": "application/json"}, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8") or "{}")
+
+
+def _audit_lines():
+    p = _gr_root / "audit.jsonl"
+    if not p.exists():
+        return []
+    return [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+# -- cost gate: a paid plan needs an estimate the chat has seen --------------
+_st, _b = _gr_req("POST", "/plan", {"provider": "claude", "message": "coupons?",
+                                    "chat_id": "g1"})
+check("POST /plan claude with no estimate_id is a 409", _st == 409)
+check("...and did NOT call the provider", _gr_provider.calls == 0)
+
+_st, _b = _gr_req("POST", "/estimate", {"provider": "claude", "message": "coupons?",
+                                        "chat_id": "g1"})
+check("POST /estimate returns a cost and an estimate_id",
+      _st == 200 and _b.get("estimate_id") and _b.get("input_tokens", 0) > 0)
+check("...without calling the provider (text measured, not sent)",
+      _gr_provider.calls == 0)
+_eid = _b["estimate_id"]
+
+_st, _b = _gr_req("POST", "/plan", {"provider": "claude", "message": "coupons?",
+                                    "chat_id": "g1", "estimate_id": _eid})
+check("POST /plan claude WITH a valid estimate_id proceeds (200)",
+      _st == 200 and _b["status"] == "proposed")
+check("...and now the provider was called exactly once", _gr_provider.calls == 1)
+_g1_batch = _b["batch_id"]
+
+# The estimate is spent: a second paid plan reusing it is gated again.
+_st, _b = _gr_req("POST", "/plan", {"provider": "claude", "message": "again?",
+                                    "chat_id": "g1", "estimate_id": _eid})
+check("a spent estimate_id no longer unlocks a paid plan (409)", _st == 409)
+
+# -- metadata-only history: a run's hits summarise to metadata, no body ------
+_st, _approved = _gr_req("POST", "/batch/%s/approve" % _g1_batch, {})
+check("approving the batch runs it and stores hits", _st == 200 and _approved["hits"])
+
+_gr_provider.calls = 0
+_st, _est = _gr_req("POST", "/estimate", {"provider": "claude", "message": "more?",
+                                          "chat_id": "g1"})
+_st, _b = _gr_req("POST", "/plan", {"provider": "claude", "message": "more?",
+                                    "chat_id": "g1", "estimate_id": _est["estimate_id"]})
+_hist = json.dumps(_gr_provider.last_messages or [])
+check("the history fed to the next plan carries each hit's metadata",
+      all(s in _hist for s in ("424B2", "Example Structured Products Inc",
+                               "0001234567", "2025-06-10", "0001234567-25-000042")))
+check("the history carries NO filing text", _SECRET not in _hist)
+
+# -- audit: one line per estimate, plan, edit, approval ----------------------
+_st, _ = _gr_req("POST", "/estimate", {"provider": "claude", "message": "audit?",
+                                       "chat_id": "aud"})
+_eid2 = _["estimate_id"]
+_st, _b = _gr_req("POST", "/plan", {"provider": "claude", "message": "audit?",
+                                    "chat_id": "aud", "estimate_id": _eid2})
+_aud_batch = _b["batch_id"]
+_st, _ = _gr_req("PUT", "/batch/%s" % _aud_batch,
+                 {"searches": [{"q": "edited", "forms": ["10-K"], "ciks": [],
+                                "startdt": "", "enddt": "", "rationale": "r"}]})
+_st, _ = _gr_req("POST", "/batch/%s/approve" % _aud_batch, {})
+_events = [r["event"] for r in _audit_lines() if r["chat_id"] == "aud"]
+check("the audit log holds exactly one line per decision, in order",
+      _events == ["estimate", "plan", "edit", "approve"])
+_approve_rec = next(r for r in _audit_lines()
+                    if r["chat_id"] == "aud" and r["event"] == "approve")
+check("the approval line records batch_id, provider and the searches as approved",
+      _approve_rec["batch_id"] == _aud_batch
+      and _approve_rec["provider"] == "claude"
+      and _approve_rec["searches"][0]["q"] == "edited")
+
+# -- persistence: a batch survives a server restart --------------------------
+_restarted = server.ResearchBatchStore(_gr_root)
+_reloaded = _restarted.get(_aud_batch)
+check("a batch created before a restart is returned after it, with its status",
+      _reloaded is not None and _reloaded["status"] == "ran"
+      and _reloaded["searches"][0]["q"] == "edited")
+
+_gr_httpd.shutdown()
+server.edgar_search = _gr_prev_search
+server.build_research_provider = _gr_prev_build
+server.RESEARCH = _gr_prev_research
+
+# --------------------------------------------------------------------------- #
 if failures:
     print(f"\n{len(failures)} FAILURE(S):")
     for f in failures:
