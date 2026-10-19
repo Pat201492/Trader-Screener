@@ -331,6 +331,50 @@ check("an unknown saved query is refused",
 check("a search with no phrase, form, or CIK is refused before any request",
       raises(lambda: server.edgar_search({}), ValueError))
 
+# #313: say when the search was cut off. EDGAR returns one page, newest first.
+import edgar_client as _ec_t
+_real_ec_t = _ec_t.EdgarClient
+
+
+class _TruncClient:
+    def __init__(self, total, n_hits, **kw):
+        self.total, self.n = total, n_hits
+
+    def ticker_to_cik(self, t):
+        return "1"
+
+    def full_text_search(self, **kw):
+        hits = [{"_id": f"0000000000-26-{i:06d}:d{i}.htm",
+                 "_source": {"adsh": f"0000000000-26-{i:06d}", "ciks": ["0000000001"],
+                             "display_names": ["X Co (CIK 0000000001)"], "form": "4",
+                             "root_forms": ["4"], "file_date": f"2026-10-{16 - (i % 5):02d}"}}
+                for i in range(self.n)]
+        return {"hits": {"total": {"value": self.total, "relation": "eq"}, "hits": hits}}
+
+
+_saved_ua_t = os.environ.get("EDGAR_USER_AGENT")
+os.environ["EDGAR_USER_AGENT"] = "test admin@example.com"
+try:
+    _ec_t.EdgarClient = lambda **kw: _TruncClient(9671, 100)
+    _r_t = server.edgar_search({"forms": ["4"], "max_results": 100})
+    check("a search matching more than it returned is truncated, with the oldest date shown",
+          _r_t["truncated"] is True and _r_t["oldest_returned"] == "2026-10-12"
+          and _r_t["total"] == 9671)
+    check("...and `saturated` still means only EDGAR's 10,000 cap", _r_t["saturated"] is False)
+    _ec_t.EdgarClient = lambda **kw: _TruncClient(9, 9)
+    _r_f = server.edgar_search({"forms": ["4"], "max_results": 100})
+    check("a fully returned search is not truncated", _r_f["truncated"] is False and _r_f["returned"] == 9)
+    _ec_t.EdgarClient = lambda **kw: _TruncClient(30, 30)
+    _r_m = server.edgar_search({"forms": ["4"], "max_results": 10})
+    check("stopping at max_results with more hits waiting is truncated",
+          _r_m["truncated"] is True and _r_m["returned"] == 10)
+finally:
+    _ec_t.EdgarClient = _real_ec_t
+    if _saved_ua_t is None:
+        os.environ.pop("EDGAR_USER_AGENT", None)
+    else:
+        os.environ["EDGAR_USER_AGENT"] = _saved_ua_t
+
 # Issuer resolution reuses ticker_to_cik: a bare CIK passes through, a ticker is
 # resolved before the query is built, and there is no second ticker->CIK map.
 _fake_t2c = lambda t: {"AAPL": "0000320193", "CSCO": "0000858877"}[t]
