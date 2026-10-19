@@ -2364,6 +2364,29 @@ check("a plan proposing 6 searches stores only the 5-search cap",
       _st == 200 and len(_b["searches"]) == server.ResearchBatchStore.MAX_SEARCHES)
 check("...and records the dropped 6th", bool(_b["dropped"]))
 
+# #317: approving a batch stores a no-model digest of the found filings and adds
+# exactly one "EXTRACTED DATA" history turn (parsed values, no prose).
+_prev_digest = server.research_digest_for
+_digest_calls = []
+server.research_digest_for = lambda results: (_digest_calls.append(results) or
+    [{"accession": "a-1", "form": "424B2", "issuer": "X", "filed": "2026-10-01",
+      "kind": "key_terms", "data": {"barrier_pct": 60.0}}])
+server.build_research_provider = lambda name, chat_id=None: _FakeResearchProvider(_two_plan)
+_st, _b = _rb_req("POST", "/plan", {"chat_id": "chat-dig", "message": "go", "provider": "ollama"})
+_st, _ran = _rb_req("POST", "/batch/%s/approve" % _b["batch_id"], {})
+_dig_hist = server.RESEARCH.history("chat-dig")
+check("approval stores the digest on the batch",
+      _st == 200 and (_ran.get("digest") or [{}])[0].get("data") == {"barrier_pct": 60.0})
+check("...and appends exactly one EXTRACTED DATA turn",
+      sum(1 for m in _dig_hist if (m.get("content") or "").startswith("EXTRACTED DATA")) == 1)
+check("...built from the batch's own results", len(_digest_calls) == 1 and _digest_calls[0])
+server.research_digest_for = lambda results: (_ for _ in ()).throw(RuntimeError("SEC down"))
+_st, _b2 = _rb_req("POST", "/plan", {"chat_id": "chat-dig2", "message": "go", "provider": "ollama"})
+_st, _ran2 = _rb_req("POST", "/batch/%s/approve" % _b2["batch_id"], {})
+check("a digest failure leaves the approval a 200, with the error recorded",
+      _st == 200 and _ran2.get("status") == "ran" and "SEC down" in (_ran2.get("digest_error") or ""))
+server.research_digest_for = _prev_digest
+
 # #315: a conversation turn with no searches is stored without a batch.
 _reply_provider = _FakeResearchProvider({
     "reply": "Happy to help -- which issuer?", "searches": [],
