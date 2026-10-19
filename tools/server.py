@@ -2633,6 +2633,17 @@ class ResearchBatchStore:
         finally:
             self._running.release()
 
+    def set_digest(self, batch_id, digest):
+        """Store the no-model digest of a ran batch's filings (#317) and return
+        the updated batch copy (None for an unknown batch)."""
+        with self._lock:
+            b = self._batches.get(batch_id)
+            if b is None:
+                return None
+            b["digest"] = digest
+            self._persist_batch(batch_id)
+            return self._copy(batch_id)
+
     def abort_approve(self, batch_id):
         """A run failed before it finished: return the batch to "proposed" so it
         can be approved again, and release the run lock."""
@@ -2959,9 +2970,34 @@ def approve_research_batch(batch_id):
     # Fold a metadata-only summary of what was found back into the chat, so the
     # next plan() reasons from the results without ever seeing filing text.
     if batch is not None:
-        RESEARCH.append_history(batch["chat_id"],
-                                [summarize_hits_for_history(results)])
+        turns = [summarize_hits_for_history(results)]
+        # ...and the found filings' extracted DATA (#317): key terms, XML rows,
+        # XBRL headline facts -- parsed values from the no-model readers, never
+        # prose. A digest failure leaves the batch approved; it is just absent.
+        try:
+            digest = research_digest_for(results)
+            if digest:
+                import research_digest as rd
+                batch = RESEARCH.set_digest(batch_id, digest) or batch
+                turns.append(rd.digest_history_turn(digest))
+        except Exception as exc:
+            batch["digest_error"] = "%s: %s" % (type(exc).__name__, exc)
+        RESEARCH.append_history(batch["chat_id"], turns)
     return 200, batch
+
+
+def research_digest_for(results):
+    """The no-model digest of every hit across a batch's results (a seam: the
+    tests replace it, so approval stays network-free there)."""
+    import research_digest as rd
+    from edgar_client import EdgarClient
+    ua = os.environ.get("EDGAR_USER_AGENT", "").strip()
+    if not ua:
+        return []
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    client = EdgarClient(user_agent=ua, cache_dir=str(home / "cache"))
+    hits = [h for item in results or [] for h in ((item.get("result") or {}).get("hits") or [])]
+    return rd.build_digest(hits, client, scrubber_for_forms, pick_xml_rows)
 
 
 def approve_research_extract(batch_id):
