@@ -395,6 +395,23 @@ def test_underlyings_from_tables():
     assert _und(t) == ["D.R. Horton, Inc.", "PulteGroup, Inc."]
 
 
+def test_jpmorgan_reference_stocks_table():
+    # 0001213900-26-096395: a table, names wrapped across lines.
+    t = ("Reference Stocks:: As specified under “Key Terms Relating to the Reference Stocks” in this "
+         "pricing supplement\n\nReference Stock \n\nBloomberg Ticker \n\nSymbol \n\nRelevant \n\nExchange "
+         "\n\nCommon stock of NVIDIA Corporation, par value \n\n$0.001 per share \n\nNVDA \n\nThe Nasdaq "
+         "Stock \n\nMarket \n\nClass A common stock of Palantir Technologies \n\nInc., par value $0.001 per "
+         "share \n\nPLTR \n\nCommon stock of Advanced Micro Devices, Inc., \n\npar value $0.01 per share "
+         "\n\nAMD \n\nAccording to publicly available filings of the relevant Reference Stock issuer")
+    assert _und(t) == ["NVIDIA Corporation", "Palantir Technologies Inc.", "Advanced Micro Devices, Inc."]
+    # 0001918704-26-031358: same table on one line, "Reference Stock:" with a colon.
+    t2 = ("Reference Stock: Bloomberg Ticker Symbol Initial Value Interest Barrier/Trigger Value Class A "
+          "common stock of Alphabet Inc., par value $0.001 per share: GOOGL $ $ Common stock of "
+          "Amazon.com, Inc., par value $0.01 per share: AMZN $ $ Common stock of NVIDIA Corporation, par "
+          "value $0.001 per share: NVDA $ $\n(1) Subject to adjustment")
+    assert _und(t2) == ["Alphabet Inc.", "Amazon.com, Inc.", "NVIDIA Corporation"]
+
+
 def test_least_performing_definition_is_not_an_underlying():
     t = "Least Performing Index:: The Index with the Least Performing Index Return Agent:: X"
     assert "underlyings" not in extract_key_terms(t)

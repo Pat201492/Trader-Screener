@@ -1863,6 +1863,14 @@ def locate_value(text, value, hint_span=None, near=None):
             if best is None or rank < best[0]:
                 best = (rank, span)
             start = at + len(cand)
+    if best is None and isinstance(value, str) and re.search(r"\s", raw):
+        # A name a table wraps across lines ("Palantir Technologies \n\nInc.",
+        # JPMorgan's Reference Stocks table) is still stated: match it with any
+        # whitespace between its words. Prose matches stay exact above.
+        pattern = r"\s+".join(re.escape(w) for w in raw.split())
+        m = re.search(pattern, text, re.I)
+        if m:
+            return (m.start(), m.end()), "value-match-ws"
     return (best[1], "value-match") if best else (None, None)
 
 

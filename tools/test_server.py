@@ -331,6 +331,14 @@ check("an unknown saved query is refused",
 check("a search with no phrase, form, or CIK is refused before any request",
       raises(lambda: server.edgar_search({}), ValueError))
 
+_wrapped = "Class A common stock of Palantir Technologies \n\nInc., par value"
+_span, _how = server.locate_value(_wrapped, "Palantir Technologies Inc.")
+check("a name a table wraps across lines is still located (whitespace-tolerant)",
+      _span is not None and _how == "value-match-ws"
+      and _wrapped[_span[0]:_span[1]].split() == ["Palantir", "Technologies", "Inc."])
+check("an exact match is still preferred and named as before",
+      server.locate_value("x NVIDIA Corporation y", "NVIDIA Corporation")[1] == "value-match")
+
 # #313: say when the search was cut off. EDGAR returns one page, newest first.
 import edgar_client as _ec_t
 _real_ec_t = _ec_t.EdgarClient
