@@ -319,6 +319,38 @@ def run_checks():
         if saved_key is not None:
             os.environ["ANTHROPIC_API_KEY"] = saved_key
 
+    # -- live failures, 2026-10-19: no date in the prompt; a recalled CIK ------
+    one = json.dumps({"reply": "r", "searches": [
+        {"q": "contingent coupon NVIDIA", "forms": ["424B2"], "ciks": ["320193", "JPM"],
+         "startdt": "2026-07-21", "enddt": "2026-10-18", "rationale": "x"}]})
+    fp = FakeProvider(one)
+    pd = ra.plan(fp, "NVIDIA notes from JPMorgan, last 90 days", today=TODAY)
+    check("plan: the system prompt states today's date", "2026-10-18" in fp.last[0])
+    check("plan: the system prompt says ciks are the filer and to use tickers",
+          "FILED" in fp.last[0] and "ticker" in fp.last[0])
+    check("plan: a numeric CIK the user never typed is removed, with a reason",
+          pd.searches[0].ciks == ["JPM"]
+          and any("320193" in d and "not given by the user" in d for d in pd.dropped))
+    pk = ra.plan(FakeProvider(one), "filings by CIK 0000320193", today=TODAY)
+    check("plan: a numeric CIK the user typed (zero-padded) is kept",
+          pk.searches[0].ciks == ["320193", "JPM"])
+
+    # "insider sales NVIDIA" on Form 4 matched 0 of NVIDIA's 17 Form 4s live.
+    f4 = json.dumps({"reply": "r", "searches": [
+        {"q": "insider sales NVIDIA", "forms": ["4", "4/A"], "ciks": ["NVDA"],
+         "startdt": "", "enddt": "", "rationale": "x"},
+        {"q": "\"contingent coupon\" NVIDIA", "forms": ["424B2"], "ciks": ["JPM"],
+         "startdt": "", "enddt": "", "rationale": "y"}]})
+    pf = ra.plan(FakeProvider(f4), "NVDA insiders and JPM notes", today=TODAY)
+    check("plan: q is cleared on a structured-data-only search, with a reason",
+          pf.searches[0].q == "" and any("structured" in d for d in pf.dropped))
+    check("plan: q is kept on a prose form", pf.searches[1].q == "\"contingent coupon\" NVIDIA")
+    kept, why = ra.validate_searches([{"q": "", "forms": ["4"], "ciks": ["NVDA"]}], today=TODAY)
+    check("validate: an empty q with forms or ciks is a valid filter-only search", len(kept) == 1)
+    kept, why = ra.validate_searches([{"q": "", "forms": [], "ciks": []}], today=TODAY)
+    check("validate: a search with no q, forms or ciks is dropped",
+          not kept and any("match everything" in w for w in why))
+
 
 def test_research_assistant():
     """pytest entrypoint: run every check and fail on the first problem."""

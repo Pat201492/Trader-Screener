@@ -292,8 +292,10 @@ def _validate_one(raw, *, today=None):
         return None, "search entry was not an object"
 
     q = raw.get("q")
-    if not isinstance(q, str) or not q.strip():
-        return None, "search has an empty or non-string q"
+    if q is None:
+        q = ""
+    if not isinstance(q, str):
+        return None, "search has a non-string q"
     if len(q) > MAX_Q_CHARS:
         return None, f"q is {len(q)} characters (limit {MAX_Q_CHARS})"
 
@@ -315,6 +317,11 @@ def _validate_one(raw, *, today=None):
             ciks.append(cu)
         else:
             return None, f"invalid ticker or CIK {c!r}"
+
+    # An empty q is a filter-only search (Form 4 by ticker), which is right for
+    # the structured-data forms. A search with nothing at all to match is not.
+    if not q.strip() and not forms and not ciks:
+        return None, "search has no q, forms or ciks -- it would match everything"
 
     startdt = (raw.get("startdt") or "").strip() or None
     enddt = (raw.get("enddt") or "").strip() or None
@@ -544,7 +551,7 @@ def estimate_cost(provider, message, history=None, prices=None):
     No network, no provider call -- this only measures the text that WOULD be
     sent. `prices` can be injected (the tests do) to avoid touching disk."""
     history = history or []
-    parts = [SYSTEM_PROMPT, str(message)]
+    parts = [system_prompt(), str(message)]
     for m in history:
         parts.append(str(m.get("content", "")) if isinstance(m, dict) else str(m))
     input_tokens = _count_tokens("".join(parts))
@@ -568,7 +575,73 @@ def estimate_cost(provider, message, history=None, prices=None):
 
 # -- the one entry point -----------------------------------------------------
 
-def plan(provider, message, history=None, known_accessions=None):
+# Two failures seen live on 2026-10-19 (qwen2.5 7B): with no date in the prompt,
+# "the last 90 days" became 2023-05-01..2023-07-31; and asked about NVIDIA it
+# wrote CIK 320193 (Apple). A model's recall of CIKs is not evidence.
+_CONTEXT = """
+
+Today's date is {today}. Resolve every relative window ("the last 90 days", \
+"this year", "recent") against it, and never propose a window that ends before \
+the user asked about.
+
+`ciks` restricts a search to the company that FILED the document. Write tickers \
+(for example "NVDA", "JPM"), never a numeric CIK unless the user typed that \
+number -- a CIK you recall may belong to another company. For structured notes \
+(424B2) the filer is the issuing bank; the underlying stock or index goes in \
+`q`, not in `ciks`. For Form 3/4/5 the filer list includes the issuer, so the \
+company's ticker belongs in `ciks`.
+
+`q` is matched against the filing's own text and EVERY word must appear, so \
+describing what you want finds nothing. Use one to three short phrases the \
+filings themselves print, in double quotes, plus a name: write \
+"\\"contingent coupon\\" NVIDIA", not "autocallable contingent coupon notes \
+NVIDIA" (filings print "Auto Callable", and no filing says "notes NVIDIA"). \
+Forms 3, 4, 5, 13F-HR, SCHEDULE 13D/13G and D are structured data with no \
+prose: leave `q` empty for them and filter with `forms` and `ciks`."""
+
+
+def system_prompt(today=None):
+    """The system prompt with today's date and the filer/CIK rules appended."""
+    today = today or datetime.date.today()
+    return SYSTEM_PROMPT + _CONTEXT.format(today=today.isoformat())
+
+
+def _drop_unsourced_ciks(searches, texts):
+    """Numeric CIKs the user never typed are removed (tickers are kept: the
+    server resolves them). Returns the reasons, one per removed CIK."""
+    said = " ".join(str(t) for t in texts)
+    reasons = []
+    for s in searches:
+        kept = []
+        for c in s.ciks:
+            if _CIK_RE.match(c) and not re.search(rf"(?<!\d)0*{int(c)}(?!\d)", said):
+                reasons.append(f"ciks: numeric CIK {c!r} was not given by the user "
+                               f"(removed; use a ticker)")
+            else:
+                kept.append(c)
+        s.ciks = kept
+    return reasons
+
+
+def _clear_q_on_data_forms(searches):
+    """A search whose forms are ALL structured-XML forms gets an empty `q`:
+    those filings hold data, not prose, and a descriptive query ("insider sales
+    NVIDIA" on Form 4) matched 0 of NVIDIA's 17 Form 4s live. Returns reasons."""
+    try:
+        from xml_forms import READERS
+    except ImportError:
+        return []
+    data_forms = {f.upper() for f in READERS}
+    reasons = []
+    for s in searches:
+        if s.q and s.forms and all(f in data_forms for f in s.forms):
+            reasons.append(f"q: cleared {s.q!r} -- {', '.join(s.forms)} are structured "
+                           f"data with no prose to match; filtering by forms and ciks")
+            s.q = ""
+    return reasons
+
+
+def plan(provider, message, history=None, known_accessions=None, today=None):
     """Ask `provider` to turn `message` (with optional `history`) into a Plan.
 
     Makes exactly one provider call. The reply is parsed and every proposed
@@ -578,7 +651,7 @@ def plan(provider, message, history=None, known_accessions=None):
     reply that is not a JSON object yields a Plan with no searches and a recorded
     reason. Nothing from the model path raises to the caller."""
     messages = list(history or []) + [{"role": "user", "content": message}]
-    raw_text = provider.complete(SYSTEM_PROMPT, messages)
+    raw_text = provider.complete(system_prompt(today), messages)
 
     try:
         data = json.loads(raw_text)
@@ -591,7 +664,11 @@ def plan(provider, message, history=None, known_accessions=None):
 
     reply = data.get("reply")
     reply = reply if isinstance(reply, str) else ""
-    searches, dropped = validate_searches(data.get("searches"))
+    searches, dropped = validate_searches(data.get("searches"), today=today)
+    dropped += _drop_unsourced_ciks(
+        searches, [message] + [m.get("content", "") for m in (history or [])
+                               if isinstance(m, dict) and m.get("role") == "user"])
+    dropped += _clear_q_on_data_forms(searches)
     extract, extract_dropped = validate_extract(
         data.get("extract"), known_accessions=known_accessions)
     return Plan(reply=reply, searches=searches, dropped=dropped + extract_dropped,
