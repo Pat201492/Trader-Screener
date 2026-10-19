@@ -1074,6 +1074,132 @@ def taxonomy_run(run_id, targets, home):
         store.close()
 
 
+# --------------------------------------------------------------------------- #
+# Structured-XML forms (#286, built on #283's xml_forms + FormsStore)
+#
+# A third `field_source`, alongside `spec` and `taxonomy`. Forms 3/4/5 (insider
+# ownership) are neither prose a model reads nor XBRL-tagged financials -- they
+# are a dedicated XML form document whose own schema names every field, so
+# `xml_forms.read_filing` lifts them exactly, with no model and no field spec.
+# The rows land in FormsStore (#283), which is keyed by the filing they came
+# from, not by period (facts) or document+field (extractions).
+# --------------------------------------------------------------------------- #
+
+def pick_xml_rows(bundle, form):
+    """The first XML document in `bundle` that `xml_forms.read_filing` accepts
+    for `form`, as `(document_name, rows)`; `(None, None)` when the filing
+    carries no XML this form's reader can read.
+
+    The ownership forms ship their data as the primary `.xml` document, but the
+    same loop also handles a form whose data lives in a separate XML exhibit:
+    every `.xml` item is tried until one reads. A wrong-schema document (an XBRL
+    instance or a calc/label sidecar) raises `XmlFormError` and is skipped, as
+    does any item that is not well-formed XML."""
+    import xml_forms
+    for doc in bundle.documents:
+        name = doc.name or ""
+        if not name.lower().endswith(".xml"):
+            continue
+        raw = doc.raw_bytes
+        if raw is None:
+            continue
+        text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        try:
+            rows = xml_forms.read_filing(form, text)
+        except Exception:
+            # Not this form's schema, or not well-formed -- try the next item.
+            continue
+        return name, rows
+    return None, None
+
+
+def xml_run(run_id, targets, home, form_type=None):
+    """Read structured-XML filings (Forms 3/4/5 today) into FormsStore.
+
+    No model, no field spec and no OutputStore write: each accession is
+    expanded, its XML form document is picked out (`pick_xml_rows`) and handed to
+    `xml_forms.read_filing`, and the resulting rows are written to the local
+    FormsStore keyed by the filing. A filing carrying no XML any reader accepts
+    is logged and skipped; the run still finishes.
+
+    `form_type` is the scrubber's own form (e.g. "4"), used as the reader form
+    when a target carries no `form` of its own -- a selection out of the search
+    UI sends `{accession, cik}` objects with no form on them.
+    """
+    from edgar_client import EdgarClient
+    from document_expand import expand_accession
+    from forms_store import FormsStore
+
+    ua = os.environ.get("EDGAR_USER_AGENT", "").strip()
+    if not ua:
+        raise RuntimeError(
+            "EDGAR_USER_AGENT is not set. The SEC fair-access policy requires a "
+            "contactable '<name> <email>' on every request; see SETUP.md."
+        )
+    client = EdgarClient(user_agent=ua, cache_dir=str(home / "cache"))
+    RUNS.update(run_id, status="running")
+
+    store = FormsStore(path=str(home / "store" / "forms.sqlite"))
+    written, skipped, stopped = 0, 0, False
+    try:
+        for meta in targets:
+            if RUNS.stop_requested(run_id):
+                stopped = True
+                RUNS.log(run_id, "stop requested -- no further filings started")
+                break
+            accession = meta["accession"]
+            cik = meta.get("cik")
+            form = (meta.get("form") or meta.get("form_type")
+                    or form_type or "").strip().upper()
+            filed = meta.get("file_date") or meta.get("sample_day")
+            RUNS.event(run_id, "doc_start", accession=accession,
+                       issuer=meta.get("issuer"), filed=filed)
+
+            def skip(reason):
+                RUNS.log(run_id, "%s: %s -- skipped" % (accession, reason))
+                RUNS.add_document(run_id, {
+                    "accession": accession, "document": None,
+                    "issuer": meta.get("issuer"), "filed": filed,
+                    "skipped": True, "fields": []})
+                RUNS.event(run_id, "doc_done", accession=accession,
+                           written=False, reason=reason[:160])
+
+            if not cik:
+                skipped += 1
+                skip("no CIK on the selection")
+                continue
+            try:
+                bundle = expand_accession(client, cik, accession)
+            except Exception as exc:
+                skipped += 1
+                skip("%s: %s" % (type(exc).__name__, exc))
+                continue
+
+            document, rows = pick_xml_rows(bundle, form)
+            if document is None:
+                skipped += 1
+                skip("no readable XML for form %s" % (form or "?"))
+                continue
+
+            store.put_filing(run_id, accession, form, cik, filed, rows)
+            written += 1
+            RUNS.add_document(run_id, {
+                "accession": accession, "document": document,
+                "issuer": meta.get("issuer"), "filed": filed, "skipped": False,
+                "fields": [{"field": "rows", "value": len(rows), "rung": "xml"}]})
+            RUNS.log(run_id, "%s: %s -> %d row(s)" % (accession, document, len(rows)))
+            RUNS.event(run_id, "doc_done", accession=accession, document=document,
+                       fields=len(rows), kept=len(rows), written=True)
+
+        RUNS.update(run_id, status="stopped" if stopped else "done",
+                    finished_at=utcnow(), rows_written=written,
+                    filings_skipped=skipped)
+        RUNS.log(run_id, "run complete -- %d filing(s) read, %d skipped"
+                         % (written, skipped))
+    finally:
+        store.close()
+
+
 def resolve_targets(params):
     """What to extract, from any of the three ways a caller can say it:
 
@@ -1193,11 +1319,19 @@ def start_scrubber_run(params):
         RUNS.log(run_id, "%s is taxonomy-sourced -- reading the filing's own XBRL "
                          "tags, no model and no field spec"
                          % getattr(scrubber, "form_type", "this form"))
+    elif source == "xml":
+        RUNS.log(run_id, "%s is a structured-XML form -- lifting its own XML "
+                         "document, no model and no field spec"
+                         % getattr(scrubber, "form_type", "this form"))
 
     def worker():
         try:
             if source == "taxonomy":
                 taxonomy_run(run_id, targets, home)
+                return
+            if source == "xml":
+                xml_run(run_id, targets, home,
+                        form_type=getattr(scrubber, "form_type", None))
                 return
             scrubber_run(run_id, targets, fields, home,
                          self_consistency=samples, shadow_external=shadow,
@@ -2538,6 +2672,52 @@ def facts_path():
     return home / "store" / "facts.sqlite"
 
 
+# The structured-XML path (#286) writes to forms.sqlite -- a row store keyed by
+# the filing (FormsStore, #283), not a period (facts) or a document+field
+# (extractions). The Results tab reads this per form; without a reader an XML run
+# would complete and then show nothing in the dashboard.
+
+def forms_path():
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    return home / "store" / "forms.sqlite"
+
+
+def store_forms(form=None, cik=None, date_from=None, date_to=None):
+    """Structured-XML filing rows from FormsStore, for one form type, optionally
+    narrowed by filer (`cik`) and by a filed-date range (`date_from`/`date_to`,
+    inclusive ISO ``YYYY-MM-DD``).
+
+    Read-only. Returns the matching `documents` (each with its decoded reader
+    rows) plus a flattened `rows` list for the table -- every row tagged with the
+    filing it came from -- and `columns`, the union of row keys in first-seen
+    order, so the Results tab can render one column per key with a stable header.
+    """
+    from forms_store import FormsStore
+    p = forms_path()
+    form = (form or "").strip().upper() or None
+    if not p.exists() or form is None:
+        return {"store": str(p), "exists": p.exists(), "form": form,
+                "documents": [], "columns": [], "rows": []}
+
+    store = FormsStore(path=str(p), readonly=True)
+    try:
+        docs = store.query(form, cik=cik, date_from=date_from, date_to=date_to)
+    finally:
+        store.close()
+
+    columns, seen, flat = [], set(), []
+    for d in docs:
+        for r in d["rows"]:
+            for k in r:
+                if k not in seen:
+                    seen.add(k)
+                    columns.append(k)
+            flat.append({**r, "_accession": d["accession"],
+                         "_cik": d["cik"], "_filed": d["filed"]})
+    return {"store": str(p), "exists": True, "form": form,
+            "documents": docs, "columns": columns, "rows": flat}
+
+
 # Statement headliners first, so the top of the grid is the income statement a
 # reader expects rather than whatever sorts first alphabetically. Anything else
 # the filing tags follows, alphabetically.
@@ -3541,6 +3721,15 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(store_facts((qs.get("cik") or [None])[0],
                                               (qs.get("period") or ["annual"])[0],
                                               (qs.get("form") or [None])[0]))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/store/forms":
+            try:
+                return self._json(store_forms(
+                    (qs.get("form") or [None])[0],
+                    (qs.get("cik") or [None])[0],
+                    (qs.get("from") or [None])[0],
+                    (qs.get("to") or [None])[0]))
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
         if path == "/api/store/standardized":

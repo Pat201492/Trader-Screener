@@ -72,6 +72,33 @@
       "q": "\"contingent coupon\"",
       "forms": ["424B2"],
       "field_source": "spec"
+    },
+    {
+      "id": "form-3",
+      "form_type": "3",
+      "display_name": "Form 3 initial ownership",
+      "purpose": "Initial statement of beneficial ownership by a company insider; a structured ownership XML document.",
+      "q": "",
+      "forms": ["3"],
+      "field_source": "xml"
+    },
+    {
+      "id": "form-4",
+      "form_type": "4",
+      "display_name": "Form 4 ownership change",
+      "purpose": "Statement of changes in beneficial ownership by a company insider; a structured ownership XML document.",
+      "q": "",
+      "forms": ["4"],
+      "field_source": "xml"
+    },
+    {
+      "id": "form-5",
+      "form_type": "5",
+      "display_name": "Form 5 annual ownership",
+      "purpose": "Annual statement of beneficial ownership by a company insider; a structured ownership XML document.",
+      "q": "",
+      "forms": ["5"],
+      "field_source": "xml"
     }
   ]
 }
