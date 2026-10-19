@@ -44,6 +44,7 @@
   .rangebar{height:5px;background:#21262d;border-radius:3px;margin-top:8px;position:relative}
   .rangebar i{position:absolute;top:-2px;width:9px;height:9px;border-radius:50%;background:var(--accent);transform:translateX(-50%)}
   .muted{color:var(--muted)} .big{font-size:18px;font-weight:600}
+.warn{color:#d29922;border-left:3px solid #d29922;padding:3px 8px;background:#d299220f;border-radius:4px}
   .pill{display:inline-block;padding:2px 8px;border-radius:20px;background:#21262d;font-size:12px;margin-right:6px}
   .loading{color:var(--muted);padding:30px;text-align:center}
   .err{color:var(--red);padding:18px;border:1px solid var(--red);border-radius:8px;background:#f8514911}
@@ -2790,8 +2791,18 @@ async function runSearch(errTargetId){
   document.getElementById('searchNote').innerHTML= data.mode==='daily'
     ? `<strong>${data.days_covered}</strong> day(s) with filings · ${data.returned} sampled `
       +`(${data.per_day}/day) · ${data.days_scanned} day(s) scanned, ${data.days_empty} empty`
-    : `${data.saturated?'at least ':''}<strong>${data.total}</strong> filing(s) match · showing ${data.returned}`;
+    : `${data.saturated?'at least ':''}<strong>${data.total}</strong> filing(s) match · showing ${data.returned}`
+      +truncatedNote(data);
   renderHits();
+}
+
+// EDGAR search hands back at most one page, newest first. When more matched than
+// came back, say so -- otherwise a 30-day market-wide search showing only the
+// newest day reads as "the date range is ignored" (#313).
+function truncatedNote(res){
+  if(!res||!res.truncated) return '';
+  const older=res.oldest_returned?` (before ${esc(res.oldest_returned)})`:'';
+  return `<div class="warn" style="font-size:11.5px;margin-top:4px">Showing the newest ${res.returned!=null?res.returned:''} of ${res.saturated?'at least ':''}${res.total!=null?res.total:'?'} matching — older filings${older} are not shown. Narrow the date range or add an issuer.</div>`;
 }
 function renderHits(){
   const out=document.getElementById('searchResults');
@@ -4366,6 +4377,7 @@ function researchResultsHtml(batch,ti){
     return `<div style="margin-top:12px">
       <div style="font-size:12.5px"><strong>${esc(q.q||'(no phrase)')}</strong>
         <span class="muted" style="font-size:11px">· ${res.saturated?'at least ':''}${count} match(es), showing ${hits.length}</span></div>
+      ${truncatedNote({...res,returned:hits.length})}
       ${meta?`<div class="muted" style="font-size:11px;margin-top:2px">${meta}</div>`:''}
       ${q.rationale?`<div class="muted" style="font-size:11px;margin-top:2px">${esc(q.rationale)}</div>`:''}
       <div class="scroll" style="max-height:240px;border:1px solid var(--border);border-radius:6px;margin-top:6px">

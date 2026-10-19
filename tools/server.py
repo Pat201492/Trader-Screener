@@ -331,7 +331,12 @@ def edgar_search(params):
     total, saturated = search_total(page)
 
     hits, seen = [], set()
-    for h in ((page.get("hits", {}) or {}).get("hits", []) or []):
+    raw_hits = ((page.get("hits", {}) or {}).get("hits", []) or [])
+    stopped_early = False
+    for h in raw_hits:
+        if len(hits) >= max_results:
+            stopped_early = True        # more hits on this page than asked for
+            break
         info = parse_hit(h)
         if not info.get("accession") or info["accession"] in seen:
             continue
@@ -343,10 +348,16 @@ def edgar_search(params):
                 "file_date", "tickers")}
         row.update(edgar_urls(row.get("cik"), row.get("accession"), row.get("document")))
         hits.append(row)
-        if len(hits) >= max_results:
-            break
 
+    # `saturated` only means EDGAR's own 10,000 cap. The cap that actually bites
+    # is ours and EDGAR's page: a 30-day market-wide Form 4 search matched 9,671
+    # and showed only the newest day, which read as "the dates are ignored"
+    # (2026-10-19). `truncated` says older matches were not shown, and
+    # `oldest_returned` says from when.
+    truncated = bool(stopped_early or total > len(raw_hits))
+    dates = [h["file_date"] for h in hits if h.get("file_date")]
     return {"total": total, "saturated": saturated, "returned": len(hits),
+            "truncated": truncated, "oldest_returned": min(dates) if dates else None,
             "hits": hits,
             "search_url": edgar_search_url(q, forms, ciks,
                                             params.get("startdt"), params.get("enddt")),
@@ -401,7 +412,8 @@ def edgar_search_daily(params):
             h["sample_day"] = day
         hits.extend(page["hits"])
         by_day.append({"day": day, "sampled": len(page["hits"]),
-                       "available": page["total"], "saturated": page["saturated"]})
+                       "available": page["total"], "saturated": page["saturated"],
+                       "truncated": page.get("truncated", False)})
 
     by_day.reverse()
     hits.reverse()
@@ -414,6 +426,7 @@ def edgar_search_daily(params):
         "mode": "daily", "hits": hits, "returned": len(hits),
         "total": sum(d["available"] for d in by_day),
         "saturated": any(d["saturated"] for d in by_day),
+        "truncated": any(d.get("truncated") for d in by_day),
         "days": by_day, "days_covered": len(by_day),
         "days_scanned": scanned, "days_empty": empty_days,
         "per_day": per_day,
