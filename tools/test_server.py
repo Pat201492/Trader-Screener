@@ -2196,7 +2196,7 @@ _prev_build = server.build_research_provider
 _prev_research = server.RESEARCH
 _fake_provider = _FakeResearchProvider(_two_plan)
 server.edgar_search = _stub_search
-server.build_research_provider = lambda name: _fake_provider
+server.build_research_provider = lambda name, chat_id=None: _fake_provider
 server.RESEARCH = server.ResearchBatchStore()      # this test's counts only
 
 _rb_httpd = _THS(("127.0.0.1", 0), _partial(server.Handler, directory=str(server.REPO_ROOT)))
@@ -2236,8 +2236,8 @@ check("POST /plan with an empty message is a 400", _st == 400)
 import research_assistant as _ra
 _st, _b = _rb_req("GET", "/providers", None)
 _provs = {p["name"]: p for p in _b.get("providers", [])}
-check("GET /providers lists ollama and claude", _st == 200
-      and set(_provs) == {"ollama", "claude"})
+check("GET /providers lists ollama, claude-code (the user's plan) and claude (API key)",
+      _st == 200 and set(_provs) == {"ollama", "claude-code", "claude"})
 check("ollama is always available", _provs["ollama"]["available"] is True
       and _provs["ollama"]["reason"] == "")
 _claude_ok, _claude_reason = _ra.claude_available()
@@ -2325,6 +2325,25 @@ server.edgar_search = _prev_search
 server.build_research_provider = _prev_build
 server.RESEARCH = _prev_research
 
+# Claude on the user's plan: a provider entry, per-chat sessions, a reset route.
+_provs = {p["name"]: p for p in server.research_providers()["providers"]}
+check("providers offer Claude on the user's plan beside the API-key option",
+      "claude-code" in _provs and _provs["claude-code"]["label"] == "Claude (your plan)"
+      and _provs["claude"]["label"] == "Claude (API key)")
+import research_assistant as _ra_cc
+_ccp = server.build_research_provider("claude-code", "chat-xyz")
+check("claude-code builds a per-chat Claude Code provider",
+      isinstance(_ccp, _ra_cc.ClaudeCodeProvider) and _ccp.chat_id == "chat-xyz")
+check("claude-code is not a paid provider (no cost gate)", not server._is_paid_provider("claude-code"))
+check("session reset for a chat with no session reports reset=false",
+      server.research_session_reset({"chat_id": "never-started"}) == {"reset": False, "chat_id": "never-started"})
+try:
+    server.research_session_reset({})
+    _rs_err = None
+except ValueError as _e:
+    _rs_err = str(_e)
+check("session reset needs a chat_id", _rs_err == "chat_id is required")
+
 # --------------------------------------------------------------------------- #
 section("research assistant -- cost gate, metadata-only history, audit, persist")
 # --------------------------------------------------------------------------- #
@@ -2374,7 +2393,7 @@ _gr_prev_build = server.build_research_provider
 _gr_prev_research = server.RESEARCH
 _gr_provider = _GateProvider(_gr_payload)
 server.edgar_search = _gr_search
-server.build_research_provider = lambda name: _gr_provider
+server.build_research_provider = lambda name, chat_id=None: _gr_provider
 server.RESEARCH = server.ResearchBatchStore(_gr_root)
 
 _gr_httpd = _THS(("127.0.0.1", 0), _partial(server.Handler, directory=str(server.REPO_ROOT)))
@@ -2526,7 +2545,7 @@ _ex_prev_research = server.RESEARCH
 _ex_prev_start = server.start_scrubber_run
 _ex_provider = _ExProvider()
 server.edgar_search = _ex_search
-server.build_research_provider = lambda name: _ex_provider
+server.build_research_provider = lambda name, chat_id=None: _ex_provider
 server.RESEARCH = server.ResearchBatchStore(_ex_root)
 server.start_scrubber_run = _ex_start_run
 
