@@ -254,6 +254,59 @@ def run_checks():
     check("estimate: default model priced from the shipped table",
           e_default["dollars"] is not None and e_default["dollars"] > 0)
 
+    # -- extract follow-up: validated like a search, against the chat's results
+    KNOWN = {"0001234567-25-000001", "0001234567-25-000002"}
+    good_ex = {"form": "424b2",
+               "accessions": ["0001234567-25-000001", "0001234567-25-000002"],
+               "rationale": "worth reading in full"}
+    e_ok, e_drop = ra.validate_extract(good_ex, known_accessions=KNOWN)
+    check("extract: a clean proposal validates with the form upper-cased",
+          e_ok is not None and e_ok.form == "424B2" and not e_drop)
+    check("extract: its accessions round-trip in order",
+          e_ok.accessions == ["0001234567-25-000001", "0001234567-25-000002"])
+
+    unknown = {"form": "424B2",
+               "accessions": ["0001234567-25-000001", "9999999999-99-999999"],
+               "rationale": "r"}
+    u_ok, u_drop = ra.validate_extract(unknown, known_accessions=KNOWN)
+    check("extract: an accession not in the results drops the whole proposal",
+          u_ok is None and any("did not appear" in d for d in u_drop))
+
+    too_many = {"form": "424B2",
+                "accessions": ["0001234567-25-000001"] * 51,
+                "rationale": "r"}
+    # Build 51 DISTINCT known accessions so the cap -- not the "unknown" check --
+    # is what trips: the count ceiling must fire on its own.
+    many = ["%010d-25-%06d" % (1, i) for i in range(51)]
+    tm_ok, tm_drop = ra.validate_extract(
+        {"form": "424B2", "accessions": many, "rationale": "r"},
+        known_accessions=set(many))
+    check("extract: more than 50 accessions drops the proposal with a reason",
+          tm_ok is None and any("limit 50" in d for d in tm_drop))
+
+    bad_form = {"form": "FORM!", "accessions": ["0001234567-25-000001"],
+                "rationale": "r"}
+    bf_ok, bf_drop = ra.validate_extract(bad_form, known_accessions=KNOWN)
+    check("extract: an invalid form code drops the proposal",
+          bf_ok is None and any("invalid form code" in d for d in bf_drop))
+
+    check("extract: no proposal is (None, []) -- never a drop reason",
+          ra.validate_extract(None, known_accessions=KNOWN) == (None, []))
+
+    # plan() threads known_accessions through and carries the extract.
+    plan_json = json.dumps({"reply": "extract these", "searches": [
+        {"q": "q", "forms": [], "ciks": [], "startdt": "", "enddt": "",
+         "rationale": "r"}], "extract": good_ex})
+    pe = ra.plan(FakeProvider(plan_json), "pull them",
+                 known_accessions=KNOWN)
+    check("plan: a valid extract proposal is carried on the Plan",
+          pe.extract is not None and pe.extract.form == "424B2")
+    check("plan: to_dict surfaces the extract",
+          pe.to_dict()["extract"]["accessions"] == good_ex["accessions"])
+    pe2 = ra.plan(FakeProvider(plan_json), "pull them", known_accessions=set())
+    check("plan: with no known accessions the extract is dropped, not carried",
+          pe2.extract is None and any("did not appear" in d for d in pe2.dropped))
+
     # -- claude_available() false with a reason when the key is unset --------
     saved_key = os.environ.get("ANTHROPIC_API_KEY")
     try:

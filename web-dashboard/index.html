@@ -4032,9 +4032,20 @@ function researchTurnHtml(turn,ti){
   if(turn.error){
     assistant=`<div class="err" style="margin:6px 0">${esc(turn.error)}</div>`;
   }else if(turn.batch){
-    const reply=turn.batch.reply?`<div style="font-size:12.5px;margin:4px 0 8px">${esc(turn.batch.reply)}</div>`:'';
-    assistant=`<div><span class="muted" style="font-size:11px">assistant</span>${reply}
-      <div class="card" id="batchCard_${ti}" style="margin:0">${batchCardInner(turn.batch,ti)}</div></div>`;
+    const b=turn.batch;
+    const reply=b.reply?`<div style="font-size:12.5px;margin:4px 0 8px">${esc(b.reply)}</div>`:'';
+    // A follow-up may be a search batch (the editable card) OR an extraction
+    // (its own card with its own approval), and a plan may carry either. Show
+    // the search card only when there are searches to show, so an extract-only
+    // follow-up does not render an empty "no searches" card above it.
+    const showSearches=(b.searches&&b.searches.length)||b.status==='ran';
+    const searchCard=showSearches
+      ? `<div class="card" id="batchCard_${ti}" style="margin:0">${batchCardInner(b,ti)}</div>`:'';
+    const extractCard=b.extract
+      ? `<div class="card" id="extractCard_${ti}" style="margin:${showSearches?'8px':'0'} 0 0">${extractCardInner(b,ti)}</div>`:'';
+    const nothing=(!showSearches&&!b.extract)
+      ? `<div class="muted" style="font-size:12px;padding:6px 0">The assistant proposed no next step.</div>`:'';
+    assistant=`<div><span class="muted" style="font-size:11px">assistant</span>${reply}${searchCard}${extractCard}${nothing}</div>`;
   }else{
     assistant=`<div class="loading" style="padding:8px">planning searches…</div>`;
   }
@@ -4333,6 +4344,100 @@ function openResearchFiling(ti,gi,hi){
   const grp=((((RESEARCH.turns[ti]||{}).batch||{}).hits)||[])[gi]||{};
   const hit=((grp.result||{}).hits||[])[hi];
   if(hit) openFilingDoc(hit);
+}
+
+// ── Research assistant: the extraction follow-up card ────────────────────────
+// After a batch runs, the planner may propose extracting specific filings with
+// the scrubber. Extraction spends GPU time on the spec path, so it is a SEPARATE
+// card with its own "Start extraction" — nothing runs until it is clicked.
+// `kind` is the extractor the server resolved (spec/taxonomy/xml, or none when
+// no scrubber owns the form); `estimate_seconds` is shown for spec only.
+const EXTRACT_KIND_TEXT={
+  spec:'prose field spec — local model',
+  taxonomy:'XBRL taxonomy — no model',
+  xml:'structured XML — no model'};
+
+function researchFmtDuration(sec){
+  sec=Math.max(0,Math.round(sec||0));
+  if(sec<60) return sec+'s';
+  const m=Math.round(sec/60);
+  if(m<60) return m+' min';
+  const h=Math.floor(m/60), mm=m%60;
+  return h+'h'+(mm?(' '+mm+'m'):'');
+}
+
+function extractCardInner(batch,ti){
+  const ex=batch&&batch.extract;
+  if(!ex) return '';
+  const n=(ex.accessions||[]).length;
+  const kindText=EXTRACT_KIND_TEXT[ex.kind]||'no scrubber owns this form';
+  const head=`<div class="name" style="font-size:13px">Extract filings
+      <span class="muted" style="font-weight:400;font-size:11.5px">· ${esc(ex.form||'?')} · ${n} filing(s)</span></div>`;
+  const rationale=ex.rationale?`<div style="font-size:12.5px;margin:4px 0 6px">${esc(ex.rationale)}</div>`:'';
+  const kindLine=`<div class="muted" style="font-size:11.5px;margin-top:4px">Extractor: ${esc(kindText)}</div>`;
+  let estLine='';
+  if(ex.kind==='spec'&&ex.estimate_seconds!=null){
+    estLine=`<div class="muted" style="font-size:11.5px;margin-top:2px">Estimated model time ~${researchFmtDuration(ex.estimate_seconds)}
+      (${n} × ${ex.fields} field(s) × 30s)</div>`;
+  }
+  if(ex.status==='started'){
+    const rid=ex.run_id||'';
+    return head+rationale+kindLine+estLine
+      +`<div style="font-size:12.5px;margin-top:10px"><span style="color:var(--green)">Extraction started.</span>
+        <a href="#" onclick="openFeed('${esc(rid)}');return false"
+          style="margin-left:6px;color:var(--accent)">Follow it in the EDGAR Scrubber tab ↗</a></div>`;
+  }
+  const starting=ex._starting;
+  const err=ex._error?`<div class="err" style="margin:8px 0">${esc(ex._error)}</div>`:'';
+  const warn=ex.kind?'':`<div style="font-size:11.5px;margin:6px 0;color:#e3b341">No scrubber owns this form — starting it will be refused.</div>`;
+  const controls=`<div style="display:flex;gap:8px;margin-top:10px">
+      <button onclick="startExtraction(${ti})" ${starting?'disabled':''}
+        style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">
+        ${starting?'starting…':'Start extraction'}</button>
+      <button onclick="dismissExtract(${ti})" ${starting?'disabled':''}
+        style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px 12px;font-size:12.5px;cursor:pointer">
+        Dismiss</button>
+    </div>`;
+  return head+rationale+kindLine+estLine+warn+err+controls;
+}
+
+function updateExtractCard(ti){
+  const el=document.getElementById('extractCard_'+ti);
+  if(el) el.innerHTML=extractCardInner(RESEARCH.turns[ti].batch,ti);
+}
+
+// Drop the extraction proposal from this turn's card. The stored batch keeps it
+// on the server — it simply never gets approved, so nothing runs. Sync sibling
+// proposed batches first so the full re-render keeps their in-progress edits.
+function dismissExtract(ti){
+  const batch=RESEARCH.turns[ti].batch;
+  if(batch) batch.extract=null;
+  syncAllProposedBatches();
+  renderResearchLog();
+}
+
+async function startExtraction(ti){
+  const batch=RESEARCH.turns[ti].batch, ex=batch&&batch.extract;
+  if(!ex||ex._starting||ex.status==='started') return;
+  ex._starting=true; ex._error=null;
+  updateExtractCard(ti);
+  try{
+    const r=await fetch('/api/tools/research/extract/'+encodeURIComponent(batch.batch_id)+'/approve',
+      {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const data=await r.json();
+    if(!r.ok) throw new Error(data.error||`HTTP ${r.status}`);
+    // The server returns the updated batch; fall back to flipping the local
+    // proposal if it did not, so the card still shows "started" with the run_id.
+    batch.extract=(data.batch&&data.batch.extract)||ex;
+    batch.extract.status='started';
+    batch.extract.run_id=data.run_id;
+    batch.extract._starting=false;
+    updateExtractCard(ti);
+    if(data.run_id) openFeed(data.run_id);
+  }catch(e){
+    ex._starting=false; ex._error='Could not start extraction: '+e.message;
+    updateExtractCard(ti);
+  }
 }
 
 // A model tool is a pipeline field, not something you run: it has inputs, one

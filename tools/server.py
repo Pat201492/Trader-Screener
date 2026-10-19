@@ -2371,6 +2371,13 @@ class ResearchBatchStore:
             # approved again rather than sit wedged as "running" forever.
             if b.get("status") == "running":
                 b["status"] = "proposed"
+            # Likewise an extraction caught mid-start by a restart: its run began
+            # in a process that is gone, so return the proposal to "proposed"
+            # rather than leave it wedged as "starting" and un-approvable.
+            ex = b.get("extract")
+            if isinstance(ex, dict) and ex.get("status") == "starting":
+                ex["status"] = "proposed"
+                ex["run_id"] = None
             self._batches[bid] = b
             m = re.match(r"batch-(\d+)$", bid)
             if m:
@@ -2402,6 +2409,20 @@ class ResearchBatchStore:
         rec = {"ts": utcnow(), "event": event, "chat_id": chat_id,
                "batch_id": batch_id, "provider": provider,
                "searches": list(searches or [])}
+        with open(self._audit_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    def _audit_extract(self, chat_id, batch_id, provider, extract, run_id):
+        """Append one line recording an extraction approval: which form, which
+        accessions, and the run it started. Extraction spends GPU time on the
+        spec path, so it belongs on the same audit trail as a paid search."""
+        if self._root is None:
+            return
+        rec = {"ts": utcnow(), "event": "extract-approve", "chat_id": chat_id,
+               "batch_id": batch_id, "provider": provider,
+               "form": (extract or {}).get("form"),
+               "accessions": list((extract or {}).get("accessions") or []),
+               "run_id": run_id}
         with open(self._audit_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
 
@@ -2457,9 +2478,14 @@ class ResearchBatchStore:
 
     # -- batches --------------------------------------------------------------
 
-    def create(self, chat_id, provider, searches, reply="", dropped=None):
+    def create(self, chat_id, provider, searches, reply="", dropped=None,
+               extract=None):
         """Store a proposed batch. Raises ValueError (surfaced as 400) past the
-        per-chat cap, so a runaway planner cannot pile up batches forever."""
+        per-chat cap, so a runaway planner cannot pile up batches forever.
+
+        `extract` is the optional follow-up extraction proposal (already
+        augmented with its extractor kind and estimate); it rides on the same
+        batch as the searches but has its own approval and its own status."""
         with self._lock:
             n = sum(1 for b in self._batches.values() if b["chat_id"] == chat_id)
             if n >= self.MAX_BATCHES_PER_CHAT:
@@ -2473,6 +2499,7 @@ class ResearchBatchStore:
                 "searches": list(searches), "status": "proposed",
                 "reply": reply or "", "dropped": list(dropped or []),
                 "hits": None, "created_at": utcnow(), "ran_at": None,
+                "extract": extract,
             }
             self._persist_batch(batch_id)
             self._audit("plan", chat_id, batch_id, provider, searches)
@@ -2550,6 +2577,74 @@ class ResearchBatchStore:
                     self._persist_batch(batch_id)
         finally:
             self._running.release()
+
+    # -- extraction follow-ups ------------------------------------------------
+
+    def result_filings(self, chat_id):
+        """Every filing this chat's RAN batches surfaced, keyed by accession ->
+        {accession, cik, issuer, form, file_date}.
+
+        Two jobs in one place: it is the set an extract proposal's accessions
+        are validated against (a filing the user never saw cannot be scrubbed),
+        and it is where the CIK each approved accession needs to start a run
+        comes from -- the proposal itself carries only the accession string."""
+        with self._lock:
+            out = {}
+            for b in self._batches.values():
+                if b.get("chat_id") != chat_id:
+                    continue
+                for grp in (b.get("hits") or []):
+                    for h in ((grp.get("result") or {}).get("hits") or []):
+                        acc = h.get("accession")
+                        if acc and acc not in out:
+                            out[acc] = {k: h.get(k) for k in
+                                        ("accession", "cik", "issuer", "form",
+                                         "file_date")}
+            return json.loads(json.dumps(out))
+
+    def begin_extract(self, batch_id):
+        """Claim a batch's extract proposal for running, flipping it to
+        "starting". Returns (extract, chat_id, provider, None) on success; else
+        (None, None, None, 404) for an unknown batch or one with no extract
+        proposal, or (None, None, None, 409) once it has already been started.
+
+        Pair every success with exactly one finish_extract or abort_extract."""
+        with self._lock:
+            b = self._batches.get(batch_id)
+            if b is None:
+                return None, None, None, 404
+            ex = b.get("extract")
+            if not isinstance(ex, dict):
+                return None, None, None, 404
+            if ex.get("status") != "proposed":
+                return None, None, None, 409
+            ex["status"] = "starting"
+            self._persist_batch(batch_id)
+            return (json.loads(json.dumps(ex)), b.get("chat_id"),
+                    b.get("provider"), None)
+
+    def finish_extract(self, batch_id, run_id):
+        """Record the started run on the extract proposal and audit it."""
+        with self._lock:
+            b = self._batches.get(batch_id)
+            if b is not None and isinstance(b.get("extract"), dict):
+                b["extract"]["status"] = "started"
+                b["extract"]["run_id"] = run_id
+                self._persist_batch(batch_id)
+                self._audit_extract(b.get("chat_id"), batch_id,
+                                    b.get("provider"), b["extract"], run_id)
+            return self._copy(batch_id)
+
+    def abort_extract(self, batch_id):
+        """A start failed before the run began: return the proposal to
+        "proposed" so it can be approved again."""
+        with self._lock:
+            b = self._batches.get(batch_id)
+            if b is not None and isinstance(b.get("extract"), dict) \
+                    and b["extract"].get("status") == "starting":
+                b["extract"]["status"] = "proposed"
+                b["extract"]["run_id"] = None
+                self._persist_batch(batch_id)
 
 
 RESEARCH = ResearchBatchStore(research_home())
@@ -2638,6 +2733,36 @@ def research_estimate(params):
     return {**estimate, "estimate_id": estimate_id}
 
 
+# The spec ladder spends roughly this much local model time per field on an
+# average filing -- the figure the "Start extraction" card quotes so a user is
+# not surprised by a multi-hour run. Taxonomy and XML forms read the filing's
+# own structure and spend no model time, so only `spec` carries an estimate.
+EXTRACT_SECONDS_PER_FIELD = 30
+
+
+def describe_extract(extract):
+    """Augment a validated extract proposal with the extractor that would run it
+    and, for a `spec` form, the model-time estimate the card shows.
+
+    `kind` is the owning scrubber's field_source (`spec`, `taxonomy` or `xml`),
+    or None when no scrubber owns the form -- the proposal is still stored (the
+    card can say so), but its approval will 400 on the run's own refusal. The
+    estimate is accessions x fields x 30s, matching the issue's rule of thumb and
+    `start_scrubber_run`'s default field list."""
+    out = dict(extract)
+    scrubber = scrubber_for_forms([extract.get("form")])
+    kind = getattr(scrubber, "field_source", None) if scrubber else None
+    out["kind"] = kind
+    out["status"] = "proposed"
+    out["run_id"] = None
+    n = len(extract.get("accessions") or [])
+    if kind == "spec":
+        fields = len(DEFAULT_FIELDS)
+        out["fields"] = fields
+        out["estimate_seconds"] = n * fields * EXTRACT_SECONDS_PER_FIELD
+    return out
+
+
 def research_plan(params):
     """POST /plan: (status, body). Ask the chosen provider for a batch and STORE
     it, proposed. This spends a model call and nothing else -- the searches it
@@ -2660,9 +2785,14 @@ def research_plan(params):
     # questions, replies and metadata-only hit summaries -- never filing text.
     history = RESEARCH.history(chat_id)
     provider = build_research_provider(name)
-    result = ra.plan(provider, message, history=history)
+    # The accessions this chat has already surfaced: an extract proposal may name
+    # only these, so a filing the user never saw is dropped, not scrubbed.
+    known = RESEARCH.result_filings(chat_id)
+    result = ra.plan(provider, message, history=history, known_accessions=set(known))
+    extract = describe_extract(result.extract.to_dict()) if result.extract else None
     batch = RESEARCH.create(chat_id, name, [s.to_dict() for s in result.searches],
-                            reply=result.reply, dropped=result.dropped)
+                            reply=result.reply, dropped=result.dropped,
+                            extract=extract)
     RESEARCH.append_history(chat_id, [
         {"role": "user", "content": message},
         {"role": "assistant", "content": result.reply or ""},
@@ -2720,6 +2850,51 @@ def approve_research_batch(batch_id):
         RESEARCH.append_history(batch["chat_id"],
                                 [summarize_hits_for_history(results)])
     return 200, batch
+
+
+def approve_research_extract(batch_id):
+    """POST /extract/{id}/approve: (status, body). Start a scrubber run over the
+    exact accessions the batch's extract proposal named, through the same
+    `start_scrubber_run` the search UI uses.
+
+    A form no scrubber owns is refused with the run's own 400; an already-started
+    (or absent) proposal is a 404/409, never a second run. On success the body
+    carries the run_id so the browser can follow it in the EDGAR Scrubber tab."""
+    extract, chat_id, provider, err = RESEARCH.begin_extract(batch_id)
+    if err == 404:
+        return 404, {"error": "no such batch, or it carries no extract "
+                              "proposal: %r" % batch_id}
+    if err == 409:
+        return 409, {"error": "this extract proposal has already been started"}
+
+    # Resolve each accession back to the filing it came from: the run needs the
+    # CIK, which the proposal (accession-only) does not carry. Validation already
+    # guaranteed every accession appeared in this chat's results.
+    filings = RESEARCH.result_filings(chat_id)
+    targets = []
+    for acc in extract.get("accessions") or []:
+        f = filings.get(acc)
+        if f and f.get("cik"):
+            targets.append({"accession": acc, "cik": f.get("cik"),
+                            "issuer": f.get("issuer"),
+                            "file_date": f.get("file_date")})
+    if not targets:
+        RESEARCH.abort_extract(batch_id)
+        return 400, {"error": "none of the proposed accessions resolve to a "
+                              "filing with a CIK in this chat's results"}
+
+    try:
+        run_id = start_scrubber_run({"accessions": targets,
+                                     "forms": [extract.get("form")],
+                                     "limit": len(targets)})
+    except Exception as exc:
+        # A form no scrubber owns raises here (the run's own 400), before any
+        # SEC request -- return the proposal to "proposed" so it is not wedged.
+        RESEARCH.abort_extract(batch_id)
+        return 400, {"error": f"{type(exc).__name__}: {exc}"}
+
+    batch = RESEARCH.finish_extract(batch_id, run_id)
+    return 200, {"run_id": run_id, "batch": batch}
 
 
 def start_preview(params):
@@ -4310,6 +4485,15 @@ class Handler(SimpleHTTPRequestHandler):
         if m:
             try:
                 status, body = approve_research_batch(m.group(1))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+            return self._json(body, status)
+        m = re.fullmatch(r"/api/tools/research/extract/([\w.-]+)/approve", path)
+        if m:
+            # Starts a scrubber run over the proposal's accessions; a form no
+            # scrubber owns is the run's own 400 (see approve_research_extract).
+            try:
+                status, body = approve_research_extract(m.group(1))
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
             return self._json(body, status)
