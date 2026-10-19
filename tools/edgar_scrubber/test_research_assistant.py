@@ -380,6 +380,10 @@ def run_conversation_checks():
           "explain" in sp and "pushes back" in sp)
     check("conversation: the prompt still forbids claiming to have read a filing",
           "never claim to know what" in sp)
+    check("creative: the prompt asks for 2-3 phrasings as filings print them, with variants",
+          "2-3 phrasings" in sp and "Automatic Call" in sp and "Contingent Interest" in sp)
+    check("creative: the prompt says not to repeat a 0-hit search, and to narrow a truncated one",
+          "0 hits" in sp and "TRUNCATED" in sp)
     check("conversation: the schema allows zero searches and requires `question`",
           ra.PLAN_SCHEMA["properties"]["searches"]["minItems"] == 0
           and "question" in ra.PLAN_SCHEMA["required"])

@@ -2770,20 +2770,29 @@ def summarize_hits_for_history(results):
     -- as a single `user` turn to fold back into the chat history. Deliberately
     NOT the filing text: the planner proposes queries from what was found, and
     the document bodies are never fed to the model."""
-    lines = []
+    # One line per SEARCH first -- its query, hit count (zero included) and
+    # whether it was cut off -- so the next turn sees which wordings failed and
+    # can try others (#316). Then one line per hit.
+    per_search, lines = [], []
     for item in results or []:
-        for h in (item.get("result", {}) or {}).get("hits", []) or []:
+        res = item.get("result", {}) or {}
+        q = item.get("query", {}) or {}
+        hits = res.get("hits", []) or []
+        total = res.get("total") if res.get("total") is not None else len(hits)
+        per_search.append("- q=%r forms=%s ciks=%s: %s hit(s)%s" % (
+            q.get("q") or "", q.get("forms") or [], q.get("ciks") or [], total,
+            " (TRUNCATED: only the newest %d shown)" % len(hits) if res.get("truncated") else ""))
+        for h in hits:
             lines.append(
                 "- %s | %s | CIK %s | filed %s | %s" % (
                     h.get("form") or "?", h.get("issuer") or "?",
                     h.get("cik") or "?", h.get("file_date") or "?",
                     h.get("accession") or "?"))
+    head = "EDGAR results (metadata only). Searches:\n" + "\n".join(per_search)
     if not lines:
-        return {"role": "user",
-                "content": "EDGAR results (metadata only): no hits."}
+        return {"role": "user", "content": head + "\nNo hits."}
     return {"role": "user",
-            "content": "EDGAR results (metadata only), one line per hit:\n"
-                       + "\n".join(lines)}
+            "content": head + "\nOne line per hit:\n" + "\n".join(lines)}
 
 
 def research_providers():
