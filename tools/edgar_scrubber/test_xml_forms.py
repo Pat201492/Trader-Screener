@@ -331,3 +331,15 @@ def test_form_d_rejects_other_edgar_submissions():
         read_filing("D", FORM4)
     with pytest.raises(XmlFormError):
         read_filing("D", "<not-xml>")
+
+
+def test_form_d_entity_placeholder_is_not_part_of_a_related_name():
+    # Live 0002160607-26-000001: firstName "-" before an entity's name.
+    import xml.etree.ElementTree as ET
+    from xml_forms import _related_person_name
+    p = ET.fromstring("<relatedPersonName><firstName>-</firstName>"
+                      "<lastName>iCapital PE GP, LLC</lastName></relatedPersonName>")
+    assert _related_person_name(p) == "iCapital PE GP, LLC"
+    q = ET.fromstring("<relatedPersonName><firstName>Jane</firstName>"
+                      "<lastName>Doe</lastName></relatedPersonName>")
+    assert _related_person_name(q) == "Jane Doe"
