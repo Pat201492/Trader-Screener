@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from datetime import datetime, timezone
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -2286,33 +2287,164 @@ def start_fr_brief(params):
 RESEARCH_MAX_RESULTS = 20
 
 
-class ResearchBatchStore:
-    """Proposed search batches, held under an id until the user approves one.
+def research_home():
+    """`~/.edgar-scrubber/research/` (honouring EDGAR_SCRUBBER_HOME), the one
+    place the assistant's chats, batches and audit log live."""
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    return home / "research"
 
-    Thread-safe, in-memory. A batch is `{batch_id, chat_id, searches, status}`
+
+def _atomic_write_json(path, obj):
+    """Write JSON through a temp file and rename, so a crash mid-write never
+    leaves a half-written record that a restart would choke on."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+class ResearchBatchStore:
+    """Proposed search batches and their chats, kept so a restart loses nothing.
+
+    Thread-safe. A batch is `{batch_id, chat_id, provider, searches, status}`
     where `status` walks "proposed" -> "running" -> "ran" (and back to
     "proposed" if a run errors, so a transient failure is retryable). Only a
     "proposed" batch may be edited or approved; everything else is a 409.
-    """
+
+    A chat holds the running `history` fed back to the planner -- metadata-only
+    summaries of past hits (form, filer, CIK, filed date, accession), never any
+    filing text -- plus the cost `estimates` the user has seen, each of which is
+    the gate on a paid Claude plan: no estimate, no paid call.
+
+    With `root` set every batch and chat is written under it and reloaded on
+    construction, and every estimate/plan/edit/approval appends one line to
+    `audit.jsonl`; with `root` None the store is pure in-memory (the
+    proposal-batch tests use that to count without touching disk)."""
 
     MAX_SEARCHES = 5
     MAX_BATCHES_PER_CHAT = 20
 
-    def __init__(self):
+    def __init__(self, root=None):
         self._lock = threading.Lock()
         self._batches = {}
+        self._chats = {}
         self._seq = 0
         # One batch may run at a time per server: an approval spends SEC
         # requests, and two approvals racing would blow the rate budget. A
         # non-blocking acquire means a second approve is refused (409), not
         # queued behind the first.
         self._running = threading.Lock()
+        self._root = Path(root) if root is not None else None
+        if self._root is not None:
+            self._batches_dir = self._root / "batches"
+            self._chats_path = self._root / "chats.json"
+            self._audit_path = self._root / "audit.jsonl"
+            self._load()
+
+    # -- persistence ----------------------------------------------------------
+
+    def _load(self):
+        """Reload batches and chats written by an earlier process."""
+        self._batches_dir.mkdir(parents=True, exist_ok=True)
+        for p in sorted(self._batches_dir.glob("batch-*.json")):
+            try:
+                b = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            bid = b.get("batch_id")
+            if not bid:
+                continue
+            # A batch caught mid-run by a restart never finished and never took
+            # the run lock in this process: return it to "proposed" so it can be
+            # approved again rather than sit wedged as "running" forever.
+            if b.get("status") == "running":
+                b["status"] = "proposed"
+            self._batches[bid] = b
+            m = re.match(r"batch-(\d+)$", bid)
+            if m:
+                self._seq = max(self._seq, int(m.group(1)))
+        try:
+            chats = json.loads(self._chats_path.read_text(encoding="utf-8"))
+            if isinstance(chats, dict):
+                self._chats = chats
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    def _persist_batch(self, batch_id):
+        if self._root is None:
+            return
+        b = self._batches.get(batch_id)
+        if b is not None:
+            _atomic_write_json(self._batches_dir / ("%s.json" % batch_id), b)
+
+    def _persist_chats(self):
+        if self._root is None:
+            return
+        _atomic_write_json(self._chats_path, dict(self._chats))
+
+    def _audit(self, event, chat_id, batch_id, provider, searches):
+        """Append exactly one line recording a decision: estimate, plan, edit or
+        approval, with the searches as they stood at that moment."""
+        if self._root is None:
+            return
+        rec = {"ts": utcnow(), "event": event, "chat_id": chat_id,
+               "batch_id": batch_id, "provider": provider,
+               "searches": list(searches or [])}
+        with open(self._audit_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
 
     def _copy(self, batch_id):
         b = self._batches.get(batch_id)
         return json.loads(json.dumps(b)) if b else None
 
-    def create(self, chat_id, searches, reply="", dropped=None):
+    def _new_chat(self, chat_id):
+        return {"chat_id": chat_id, "history": [], "estimates": {}}
+
+    # -- chats: history and cost estimates ------------------------------------
+
+    def history(self, chat_id):
+        """The running transcript for `chat_id` (metadata only), for the next
+        plan/estimate call. Empty for a chat with no turns yet."""
+        with self._lock:
+            c = self._chats.get(chat_id)
+            return json.loads(json.dumps(c["history"])) if c else []
+
+    def append_history(self, chat_id, messages):
+        with self._lock:
+            c = self._chats.setdefault(chat_id, self._new_chat(chat_id))
+            c["history"].extend(messages)
+            self._persist_chats()
+
+    def record_estimate(self, chat_id, provider, estimate):
+        """Record a cost estimate the user has now seen, returning its id. A paid
+        Claude plan must quote one of these, so a cost is shown before a spend."""
+        with self._lock:
+            c = self._chats.setdefault(chat_id, self._new_chat(chat_id))
+            estimate_id = "est-" + uuid.uuid4().hex[:12]
+            c["estimates"][estimate_id] = {
+                "estimate_id": estimate_id, "provider": provider,
+                "created_at": utcnow(),
+                **{k: estimate.get(k) for k in
+                   ("model", "input_tokens", "output_tokens", "dollars")}}
+            self._persist_chats()
+            self._audit("estimate", chat_id, None, provider, [])
+            return estimate_id
+
+    def has_estimate(self, chat_id, estimate_id):
+        with self._lock:
+            c = self._chats.get(chat_id)
+            return bool(c and estimate_id in c["estimates"])
+
+    def consume_estimate(self, chat_id, estimate_id):
+        """Spend a recorded estimate so it cannot gate a second paid call."""
+        with self._lock:
+            c = self._chats.get(chat_id)
+            if c and estimate_id in c["estimates"]:
+                del c["estimates"][estimate_id]
+                self._persist_chats()
+
+    # -- batches --------------------------------------------------------------
+
+    def create(self, chat_id, provider, searches, reply="", dropped=None):
         """Store a proposed batch. Raises ValueError (surfaced as 400) past the
         per-chat cap, so a runaway planner cannot pile up batches forever."""
         with self._lock:
@@ -2324,11 +2456,13 @@ class ResearchBatchStore:
             self._seq += 1
             batch_id = "batch-%04d" % self._seq
             self._batches[batch_id] = {
-                "batch_id": batch_id, "chat_id": chat_id,
+                "batch_id": batch_id, "chat_id": chat_id, "provider": provider,
                 "searches": list(searches), "status": "proposed",
                 "reply": reply or "", "dropped": list(dropped or []),
                 "hits": None, "created_at": utcnow(), "ran_at": None,
             }
+            self._persist_batch(batch_id)
+            self._audit("plan", chat_id, batch_id, provider, searches)
             return self._copy(batch_id)
 
     def get(self, batch_id):
@@ -2348,6 +2482,8 @@ class ResearchBatchStore:
             if b["status"] != "proposed":
                 return None, 409
             b["searches"] = list(searches)
+            self._persist_batch(batch_id)
+            self._audit("edit", b["chat_id"], batch_id, b.get("provider"), searches)
             return self._copy(batch_id), None
 
     def begin_approve(self, batch_id):
@@ -2367,13 +2503,15 @@ class ResearchBatchStore:
                     self._running.release()
                     return None, 409
                 b["status"] = "running"
+                self._persist_batch(batch_id)
                 return list(b["searches"]), None
         except BaseException:
             self._running.release()
             raise
 
     def finish_approve(self, batch_id, hits):
-        """Record the hits and mark the batch "ran", then release the run lock."""
+        """Record the hits and mark the batch "ran", audit the approval, then
+        release the run lock."""
         try:
             with self._lock:
                 b = self._batches.get(batch_id)
@@ -2381,6 +2519,9 @@ class ResearchBatchStore:
                     b["hits"] = hits
                     b["status"] = "ran"
                     b["ran_at"] = utcnow()
+                    self._persist_batch(batch_id)
+                    self._audit("approve", b["chat_id"], batch_id,
+                                b.get("provider"), b["searches"])
                 return self._copy(batch_id)
         finally:
             self._running.release()
@@ -2393,11 +2534,12 @@ class ResearchBatchStore:
                 b = self._batches.get(batch_id)
                 if b is not None and b["status"] == "running":
                     b["status"] = "proposed"
+                    self._persist_batch(batch_id)
         finally:
             self._running.release()
 
 
-RESEARCH = ResearchBatchStore()
+RESEARCH = ResearchBatchStore(research_home())
 
 
 def build_research_provider(name):
@@ -2415,23 +2557,91 @@ def build_research_provider(name):
     raise ValueError("unknown research provider: %r" % name)
 
 
-def research_plan(params):
-    """POST /plan: ask the chosen provider for a batch and STORE it, proposed.
-
-    This spends a model call and nothing else -- the searches it proposes do not
-    touch the SEC until the batch is approved by id. Raises ValueError (400) for
-    a missing field or past the per-chat cap."""
-    import research_assistant as ra
+def _require_chat_and_message(params):
+    """(chat_id, message), both stripped and present, or ValueError (400)."""
     chat_id = (params.get("chat_id") or "").strip()
     message = params.get("message")
     if not chat_id:
         raise ValueError("chat_id is required")
     if not isinstance(message, str) or not message.strip():
         raise ValueError("message is required")
-    provider = build_research_provider(params.get("provider"))
-    result = ra.plan(provider, message)
-    return RESEARCH.create(chat_id, [s.to_dict() for s in result.searches],
-                           reply=result.reply, dropped=result.dropped)
+    return chat_id, message
+
+
+def _is_paid_provider(name):
+    """True for a provider that bills per call -- Claude today. Keyed on the
+    NAME, not an instance, so the gate never has to build (let alone call) the
+    provider to decide a paid plan needs an estimate first."""
+    return (name or "").strip().lower() == "claude"
+
+
+def summarize_hits_for_history(results):
+    """One metadata-only line per hit -- form, filer, CIK, filed date, accession
+    -- as a single `user` turn to fold back into the chat history. Deliberately
+    NOT the filing text: the planner proposes queries from what was found, and
+    the document bodies are never fed to the model."""
+    lines = []
+    for item in results or []:
+        for h in (item.get("result", {}) or {}).get("hits", []) or []:
+            lines.append(
+                "- %s | %s | CIK %s | filed %s | %s" % (
+                    h.get("form") or "?", h.get("issuer") or "?",
+                    h.get("cik") or "?", h.get("file_date") or "?",
+                    h.get("accession") or "?"))
+    if not lines:
+        return {"role": "user",
+                "content": "EDGAR results (metadata only): no hits."}
+    return {"role": "user",
+            "content": "EDGAR results (metadata only), one line per hit:\n"
+                       + "\n".join(lines)}
+
+
+def research_estimate(params):
+    """POST /estimate: what the NEXT plan() for this chat would cost, plus an
+    `estimate_id` the user's paid plan must quote. No provider CALL -- only the
+    text that would be sent is measured -- and no SEC request."""
+    import research_assistant as ra
+    chat_id, message = _require_chat_and_message(params)
+    name = params.get("provider")
+    provider = build_research_provider(name)
+    history = RESEARCH.history(chat_id)
+    estimate = ra.estimate_cost(provider, message, history=history)
+    estimate_id = RESEARCH.record_estimate(chat_id, name, estimate)
+    return {**estimate, "estimate_id": estimate_id}
+
+
+def research_plan(params):
+    """POST /plan: (status, body). Ask the chosen provider for a batch and STORE
+    it, proposed. This spends a model call and nothing else -- the searches it
+    proposes do not touch the SEC until the batch is approved by id.
+
+    A paid provider (Claude) is GATED: without an `estimate_id` this chat has
+    already seen, the call is refused 409 before any provider is built or asked,
+    so no money is ever spent on a cost the user has not been shown. Ollama is
+    free and needs no estimate. Raises ValueError (400) for a missing field or
+    past the per-chat cap."""
+    import research_assistant as ra
+    chat_id, message = _require_chat_and_message(params)
+    name = params.get("provider")
+    if _is_paid_provider(name):
+        estimate_id = params.get("estimate_id")
+        if not estimate_id or not RESEARCH.has_estimate(chat_id, estimate_id):
+            return 409, {"error": "a paid Claude plan needs an estimate_id this "
+                                  "chat has seen; POST /estimate first"}
+    # The history fed to the planner is the chat's running transcript -- past
+    # questions, replies and metadata-only hit summaries -- never filing text.
+    history = RESEARCH.history(chat_id)
+    provider = build_research_provider(name)
+    result = ra.plan(provider, message, history=history)
+    batch = RESEARCH.create(chat_id, name, [s.to_dict() for s in result.searches],
+                            reply=result.reply, dropped=result.dropped)
+    RESEARCH.append_history(chat_id, [
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": result.reply or ""},
+    ])
+    if _is_paid_provider(name):
+        RESEARCH.consume_estimate(chat_id, params.get("estimate_id"))
+    return 200, batch
 
 
 def research_edit(batch_id, params):
@@ -2475,7 +2685,13 @@ def approve_research_batch(batch_id):
     except Exception:
         RESEARCH.abort_approve(batch_id)
         raise
-    return 200, RESEARCH.finish_approve(batch_id, results)
+    batch = RESEARCH.finish_approve(batch_id, results)
+    # Fold a metadata-only summary of what was found back into the chat, so the
+    # next plan() reasons from the results without ever seeing filing text.
+    if batch is not None:
+        RESEARCH.append_history(batch["chat_id"],
+                                [summarize_hits_for_history(results)])
+    return 200, batch
 
 
 def start_preview(params):
@@ -3890,6 +4106,13 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(fr_brief_view(brief_id))
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 404)
+        m = re.fullmatch(r"/api/tools/research/batch/([\w.-]+)", path)
+        if m:
+            # Persisted, so a batch created before a restart answers here after
+            # it, with whatever status it left off at.
+            batch = RESEARCH.get(m.group(1))
+            return self._json(batch) if batch \
+                else self._json({"error": "no such batch: %r" % m.group(1)}, 404)
         if path == "/api/runs":
             return self._json(RUNS.list())
         # The activity feed. Incremental by design: `after` is the last event
@@ -4032,13 +4255,22 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"error": str(exc)}, 404)
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
-        if path == "/api/tools/research/plan":
-            # Stores a proposed batch; spends a model call, no SEC request. The
-            # searches do not run until the batch is approved by id below.
+        if path == "/api/tools/research/estimate":
+            # What the next plan() would cost, plus an estimate_id the user's
+            # paid plan must quote. Measures text only -- no provider call.
             try:
-                return self._json(research_plan(params), 200)
+                return self._json(research_estimate(params), 200)
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/tools/research/plan":
+            # Stores a proposed batch; spends a model call, no SEC request. A
+            # paid provider is refused 409 without an estimate_id (see the gate).
+            # The searches do not run until the batch is approved by id below.
+            try:
+                status, body = research_plan(params)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+            return self._json(body, status)
         m = re.fullmatch(r"/api/tools/research/batch/([\w.-]+)/approve", path)
         if m:
             try:
