@@ -12,6 +12,8 @@ F13F_INFO = (FIXTURES / "form13fhr_infotable.xml").read_text(encoding="utf-8")
 F13F_PRIMARY = (FIXTURES / "form13fhr_primary.xml").read_text(encoding="utf-8")
 SCHED_13D = (FIXTURES / "schedule13d.xml").read_text(encoding="utf-8")
 SCHED_13GA = (FIXTURES / "schedule13ga.xml").read_text(encoding="utf-8")
+FORM_D = (FIXTURES / "formd_private_fund.xml").read_text(encoding="utf-8")
+FORM_DA = (FIXTURES / "formd_amendment.xml").read_text(encoding="utf-8")
 
 _SCHED13_ROW_KEYS = {
     "issuer_name", "issuer_cik", "issuer_cusip", "class_title",
@@ -19,6 +21,13 @@ _SCHED13_ROW_KEYS = {
     "shared_voting_power", "sole_dispositive_power", "shared_dispositive_power",
     "aggregate_amount_owned", "percent_of_class", "type_of_reporting_person",
     "event_date", "is_amendment",
+}
+
+_FORM_D_ROW_KEYS = {
+    "issuer_name", "issuer_cik", "jurisdiction", "entity_type",
+    "industry_group", "federal_exemptions", "date_of_first_sale",
+    "total_offering_amount", "total_amount_sold", "total_remaining",
+    "investor_count", "is_amendment", "related_persons",
 }
 
 _F13F_ROW_KEYS = {
@@ -251,3 +260,74 @@ def test_schedule_13dg_rejects_a_form_4_and_a_13f_cover():
     # And the ownership reader rejects a 13D submission in turn.
     with pytest.raises(XmlFormError):
         read_filing("4", SCHED_13D)
+
+
+# ── Form D — exempt offering ─────────────────────────────────────────────────────
+
+def test_form_d_one_row_with_every_key_and_numeric_amounts():
+    rows = read_filing("D", FORM_D)
+    # Form D is one offering, so it reads into exactly one row.
+    assert len(rows) == 1
+    row = rows[0]
+    assert set(row) == _FORM_D_ROW_KEYS
+
+    assert row["issuer_name"] == "Evergreen Capital Partners Fund III, L.P."
+    assert row["issuer_cik"] == "0001854776"
+    assert row["jurisdiction"] == "DELAWARE"
+    assert row["entity_type"] == "Limited Partnership"
+    assert row["industry_group"] == "Pooled Investment Fund"
+    assert row["date_of_first_sale"] == "2026-02-17"
+    assert row["is_amendment"] is False
+
+    # federal_exemptions and related_persons are lists.
+    assert row["federal_exemptions"] == ["06b", "3C", "3C.1"]
+    assert row["related_persons"] == [
+        "Margaret A Chen", "Evergreen Capital GP III, LLC"]
+
+    # Amounts come back as numbers, not strings.
+    assert row["total_offering_amount"] == 750000000
+    assert isinstance(row["total_offering_amount"], int)
+    assert row["total_amount_sold"] == 312500000
+    assert row["total_remaining"] == 437500000
+    assert row["investor_count"] == 42
+
+
+def test_form_d_indefinite_offering_amount_is_null():
+    # A filer who has not capped the raise writes "Indefinite" where a number
+    # would go; it reads back as None, and the row is still returned.
+    rows = read_filing("D/A", FORM_DA)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["total_offering_amount"] is None
+    assert row["total_remaining"] is None
+    # The sold figure is still a real number.
+    assert row["total_amount_sold"] == 18750000
+    assert row["issuer_name"] == "Northwind Ventures Opportunity Fund, LLC"
+
+
+def test_form_d_amendment_flag_is_set():
+    rows = read_filing("D/A", FORM_DA)
+    assert rows[0]["is_amendment"] is True
+    assert rows[0]["federal_exemptions"] == ["06c", "3C.7"]
+    # A single-name block still joins to one display name.
+    assert rows[0]["related_persons"] == ["Daniel Okafor"]
+
+
+def test_form_d_shares_one_reader_across_both_form_types():
+    assert READERS["D"] is READERS["D/A"]
+    # Case and surrounding space do not matter at the front door.
+    assert read_filing(" d ", FORM_D)[0]["issuer_cik"] == "0001854776"
+
+
+def test_form_d_rejects_other_edgar_submissions():
+    # A 13F cover page and a Schedule 13D both root at edgarSubmission but carry
+    # no offeringData, so the Form D reader rejects them rather than returning a
+    # blank row.
+    with pytest.raises(XmlFormError):
+        read_filing("D", F13F_PRIMARY)
+    with pytest.raises(XmlFormError):
+        read_filing("D", SCHED_13D)
+    with pytest.raises(XmlFormError):
+        read_filing("D", FORM4)
+    with pytest.raises(XmlFormError):
+        read_filing("D", "<not-xml>")

@@ -6,9 +6,10 @@ with a published schema, so their data can be lifted exactly, with no model and
 no network. Forms 3/4/5 (insider ownership), 13F-HR (institutional holdings),
 Schedule 13D/13G and Form D all fall here.
 
-This module is the reader *contract* and its one proven reader, Forms 3/4/5.
-Later issues add one reader each; each registers itself in ``READERS`` and is
-driven through the same ``read_filing`` front door.
+This module is the reader *contract* and its readers: Forms 3/4/5 (insider
+ownership), 13F-HR (institutional holdings), Schedule 13D/13G (5%+ beneficial
+ownership) and Form D (exempt offering). Each registers itself in ``READERS``
+and is driven through the same ``read_filing`` front door.
 
 A reader is a function ``(xml_text) -> list[dict]``, one dict per row. It raises
 ``XmlFormError`` when handed XML that is not its own schema (a 13F read of a
@@ -389,11 +390,113 @@ def read_schedule_13dg(xml_text):
     return rows
 
 
+# ── Form D — notice of exempt (private) offering ─────────────────────────────────
+#
+# Form D (and its amendment `D/A`) is the notice of an exempt offering under
+# Regulation D — a private placement that skips registration. It is filed as a
+# single structured XML document whose root is a bare `edgarSubmission` (no
+# default namespace, unlike the 13F cover and the 13D/13G submissions, which also
+# root at `edgarSubmission` but inside a namespace). Its data is one offering, so
+# it reads into exactly ONE row: the issuer's cover fields, the offering's
+# industry and exemptions, the money raised and still open, and the list of
+# related persons (the executives, directors and promoters named on the notice).
+#
+# The dollar fields are the one trap: a filer who has not capped the raise writes
+# the literal word "Indefinite" where a number would go, so `totalOfferingAmount`
+# and `totalRemaining` are sometimes prose, not digits. `_num` already maps a
+# non-numeric string to None, so "Indefinite" reads back as None — never a zero,
+# never a guess. `is_amendment` is read from the filing's own `isAmendment` box
+# (and the `/A` submission type), not inferred.
+
+
+def _all_dtext(elem, name):
+    """Stripped text of every descendant of ``elem`` whose local name is ``name``
+    (case-insensitive, namespace ignored), skipping empties, as a list."""
+    out = []
+    if elem is None:
+        return out
+    wanted = name.lower()
+    for e in elem.iter():
+        if _local(e.tag).lower() == wanted and e.text and e.text.strip():
+            out.append(e.text.strip())
+    return out
+
+
+def _related_person_name(person):
+    """Join a `relatedPersonName`'s first/middle/last into one display name, or
+    None when the block carries no name parts."""
+    parts = [_dtext(person, "firstName"),
+             _dtext(person, "middleName"),
+             _dtext(person, "lastName")]
+    name = " ".join(p for p in parts if p)
+    return name or None
+
+
+def read_form_d(xml_text):
+    """Read a Form D / D/A notice of exempt offering into exactly one row.
+
+    The row carries the issuer (name, CIK, jurisdiction, entity type), the
+    offering's industry group and federal exemptions (a list), the date of first
+    sale, the offering amounts (total offered, sold and remaining), the count of
+    investors, the amendment flag and the related persons named on the notice (a
+    list). A dollar field the filer gave as "Indefinite" reads back as None, as
+    does any element the filer omitted.
+
+    Raises ``XmlFormError`` if the text is not well-formed XML or is not a Form D
+    submission (a 13F cover page or a Schedule 13D, say, which also root at
+    ``edgarSubmission`` but carry no ``offeringData``).
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise XmlFormError(f"not well-formed XML: {exc}") from exc
+    # A Form D roots at a bare `edgarSubmission` and is the only one of the three
+    # `edgarSubmission` forms that carries an `offeringData` block; that block is
+    # what tells it apart from a 13F cover page or a Schedule 13D/13G.
+    if _local(root.tag).lower() != "edgarsubmission" \
+            or _desc(root, "offeringData") is None:
+        raise XmlFormError(
+            f"not a Form D submission (root is {root.tag!r})")
+
+    submission_type = _dtext(root, "submissionType")
+    issuer = _desc(root, "primaryIssuer")
+    offering = _desc(root, "offeringData")
+    sales = _desc(offering, "offeringSalesAmounts")
+
+    is_amendment = bool(
+        (submission_type and submission_type.strip().upper().endswith("/A"))
+        or _bool(_dtext(offering, "isAmendment")))
+
+    related = [name for person in root.iter()
+               if _local(person.tag).lower() == "relatedpersoninfo"
+               for name in (_related_person_name(person),)
+               if name]
+
+    return [{
+        "issuer_name": _dtext(issuer, "entityName"),
+        "issuer_cik": _dtext(issuer, "cik"),
+        "jurisdiction": _dtext(issuer, "jurisdictionOfInc"),
+        "entity_type": _dtext(issuer, "entityType"),
+        "industry_group": _dtext(offering, "industryGroupType"),
+        "federal_exemptions": _all_dtext(
+            _desc(offering, "federalExemptionsExclusions"), "item"),
+        "date_of_first_sale": _dtext(
+            _desc(offering, "dateOfFirstSale"), "value"),
+        # "Indefinite" is prose, not a number; _num maps it to None.
+        "total_offering_amount": _num(_dtext(sales, "totalOfferingAmount")),
+        "total_amount_sold": _num(_dtext(sales, "totalAmountSold")),
+        "total_remaining": _num(_dtext(sales, "totalRemaining")),
+        "investor_count": _num(_dtext(offering, "totalNumberAlreadyInvested")),
+        "is_amendment": is_amendment,
+        "related_persons": related,
+    }]
+
+
 # ── Registry + front door ──────────────────────────────────────────────────────
 
-# Form code -> reader. Later issues extend this (Form D); each reader owns its
-# schema check and raises XmlFormError when handed another form's XML. Codes are
-# matched case-insensitively (see `read_filing`).
+# Form code -> reader. Each reader owns its schema check and raises XmlFormError
+# when handed another form's XML. Codes are matched case-insensitively (see
+# `read_filing`).
 READERS = {
     "3": read_ownership,
     "4": read_ownership,
@@ -403,6 +506,8 @@ READERS = {
     "SCHEDULE 13D/A": read_schedule_13dg,
     "SCHEDULE 13G": read_schedule_13dg,
     "SCHEDULE 13G/A": read_schedule_13dg,
+    "D": read_form_d,
+    "D/A": read_form_d,
 }
 
 

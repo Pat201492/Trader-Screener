@@ -117,6 +117,15 @@
       "q": "",
       "forms": ["SCHEDULE 13D", "SCHEDULE 13D/A", "SCHEDULE 13G", "SCHEDULE 13G/A"],
       "field_source": "xml"
+    },
+    {
+      "id": "form-d",
+      "form_type": "D",
+      "display_name": "Form D exempt offering notice",
+      "purpose": "Notice of an exempt (private) offering under Regulation D; a structured XML form, one row per offering.",
+      "q": "",
+      "forms": ["D", "D/A"],
+      "field_source": "xml"
     }
   ]
 }
