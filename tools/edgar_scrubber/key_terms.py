@@ -395,7 +395,7 @@ def _underlyings(term):
     ([names], first name, its span). A table header ("Underlying Initial
     underlying value* ...") is not a list of names and is left to the model."""
     v = term.value[:900]
-    if re.match(r"(?:underlying|market measure)\s+(?:initial|bloomberg|ticker|starting)", v, re.I):
+    if re.match(r"(?:(?:underlying|market measure)\s+(?:initial|bloomberg|ticker|starting)|bloomberg\s+ticker)", v, re.I):
         return None
     pieces, pos = [], 0
     for m in _TICKER_RE.finditer(v):
@@ -480,6 +480,31 @@ def _table_underlyings(text):
             out.append((got[0], idx))
         if out:
             return [x for x, _ in out], out[0][0], (out[0][1], out[0][1] + len(out[0][0]))
+    # JPMorgan multi-stock notes: "Reference Stocks: As specified under 'Key
+    # Terms Relating to the Reference Stocks'", then a table whose rows read
+    # "(Class A) common stock of NAME, par value $X per share [:] TICKER", often
+    # wrapped across lines (5 of 7 JPMorgan NVIDIA notes had no underlyings
+    # before this, found by the research digest 2026-10-19).
+    m = re.search(r"Reference Stocks?:{0,2}\s+Bloomberg\s+Ticker", text[:80000])
+    if m:
+        stop = re.search(r"According to publicly available|\n\s*\(\d\)|Key Terms Relating to the Review", text[m.end():m.end() + 6000])
+        region = text[m.end():m.end() + (stop.start() if stop else 4000)]
+        flat = re.sub(r"\s+", " ", region)
+        names = []
+        for r in re.finditer(r"(?:(?:Class\s+[A-Z]\s+)?(?:common|ordinary)\s+(?:stock|shares)|"
+                             r"American depositary shares)\s+of\s+(.+?),?\s+(?:no\s+)?par\s+value",
+                             flat, re.I):
+            name = _trim_name(r.group(1))
+            if not (2 <= len(name) <= 100) or re.search(r"[$%:*()]", name):
+                return None
+            if name not in names:
+                names.append(name)
+        if names:
+            # Span of the first name, matched across the table's line breaks.
+            pat = r"\s+".join(re.escape(w) for w in names[0].split())
+            s = re.search(pat, text[m.end():])
+            span = (m.end() + s.start(), m.end() + s.end()) if s else (m.start(), m.end())
+            return names, text[span[0]:span[1]], span
     return None
 
 
