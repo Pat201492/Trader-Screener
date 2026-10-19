@@ -20,6 +20,10 @@ calls -- see ARCHITECTURE.md "API already exposed by the old server"):
   GET /api/macro                       -> {"vix":..., "t10y3m":..., ...}
   GET /api/options/{ticker}            -> {"summary":..., "expirations":[...]}
   GET /api/options/{ticker}/{exp}      -> {"contracts": [...]}
+  GET /api/insider-trades?from&to&type&ticker&insider&role&min_value&sort&limit&offset&include_suspect
+                                       -> {"count", "total", "rows": [...]}   (Stock-Data-Pipeline #57)
+  GET /api/insider-trades/rollups?from&to&role&include_suspect
+                                       -> {"top_buys", "most_sold", "clusters"} (#58)
 
 Run:  python pipeline-mock/server.py [port, default 8000]
 Then point web-dashboard/index.html's API field at http://127.0.0.1:8000
@@ -30,7 +34,8 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-from sample_data import STOCKS, OPTIONS, MACRO
+import insider
+from sample_data import STOCKS, OPTIONS, MACRO, INSIDER_TRADES
 
 STOCKS_BY_TICKER = {r["ticker"]: r for r in STOCKS}
 
@@ -76,6 +81,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if parts == ["api", "macro"]:
             return self._send_json(MACRO)
+
+        # Insider trades (#314): the contract of Stock-Data-Pipeline #57 / #58,
+        # implemented in insider.py.
+        if parts == ["api", "insider-trades"]:
+            return self._send_json(insider.insider_trades(INSIDER_TRADES, qs))
+        if parts == ["api", "insider-trades", "rollups"]:
+            return self._send_json(insider.rollups(INSIDER_TRADES, qs))
 
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "options":
             entry = OPTIONS.get(parts[2].upper())

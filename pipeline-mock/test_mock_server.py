@@ -174,6 +174,34 @@ def run_checks():
     status, _ = get("/api/stocks/NOPE")
     check("unknown ticker -> 404", status == 404)
 
+    print("\n/api/insider-trades (#314, contract of Stock-Data-Pipeline #57)")
+    status, ib = get("/api/insider-trades")
+    check("200 with count, total and rows", status == 200 and {"count", "total", "rows"} <= set(ib))
+    INSIDER_KEYS = {"filing_id", "ticker", "company_name", "insider_name", "insider_title",
+                    "transaction_date", "transaction_type", "shares", "price_per_share", "total_value",
+                    "shares_owned_after", "form_type", "filed_date", "source_url", "sec_url", "suspect"}
+    check("rows carry every InsiderTrade column plus sec_url and suspect",
+          ib["rows"] and all(INSIDER_KEYS <= set(r) for r in ib["rows"]))
+    check("sec_url never keeps a mirror: prefix", all(not r["sec_url"].startswith("mirror:") for r in ib["rows"]))
+    check("the impossible SLBT row is hidden by default", all(r["ticker"] != "SLBT" for r in ib["rows"]))
+    _, ibs = get("/api/insider-trades?include_suspect=1")
+    check("...and shown, flagged suspect, with include_suspect=1",
+          any(r["ticker"] == "SLBT" and r["suspect"] for r in ibs["rows"]) and ibs["total"] == ib["total"] + 1)
+    _, ibp = get("/api/insider-trades?type=P&sort=value")
+    vals = [r["total_value"] for r in ibp["rows"]]
+    check("type=P keeps only buys, sort=value orders by value", all(r["transaction_type"] == "P" for r in ibp["rows"])
+          and vals == sorted(vals, reverse=True))
+    _, ibl = get("/api/insider-trades?limit=5&offset=5")
+    check("limit/offset page the rows and total stays the full count", ibl["count"] == 5 and ibl["total"] == ib["total"])
+
+    print("\n/api/insider-trades/rollups (#58)")
+    status, ru = get("/api/insider-trades/rollups")
+    check("200 with top_buys, most_sold and clusters", status == 200 and {"top_buys", "most_sold", "clusters"} <= set(ru))
+    check("the 3-insider CLST buy appears as a cluster",
+          any(c["ticker"] == "CLST" and c["insiders"] >= 3 for c in ru["clusters"]))
+    check("most_sold rows carry ticker, sell_value, sell_count and insiders",
+          ru["most_sold"] and all({"ticker", "sell_value", "sell_count", "insiders"} <= set(m) for m in ru["most_sold"]))
+
 
 if __name__ == "__main__":
     main()
