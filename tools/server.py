@@ -2641,6 +2641,16 @@ class ResearchBatchStore:
         finally:
             self._running.release()
 
+    def set_field(self, batch_id, key, value):
+        """Store one extra field on a batch (e.g. its report) and persist it."""
+        with self._lock:
+            b = self._batches.get(batch_id)
+            if b is None:
+                return None
+            b[key] = value
+            self._persist_batch(batch_id)
+            return self._copy(batch_id)
+
     def set_digest(self, batch_id, digest):
         """Store the no-model digest of a ran batch's filings (#317) and return
         the updated batch copy (None for an unknown batch)."""
@@ -2902,6 +2912,17 @@ def research_plan(params):
     # only these, so a filing the user never saw is dropped, not scrubbed.
     known = RESEARCH.result_filings(chat_id)
     result = ra.plan(provider, message, history=history, known_accessions=set(known))
+    # A written report (#318): each row links to its filing on sec.gov, so every
+    # figure can be checked against the document it came from.
+    report = None
+    if result.report:
+        report = dict(result.report)
+        report["rows"] = []
+        for row in result.report["rows"]:
+            f = known.get(row["accession"]) or {}
+            urls = edgar_urls(f.get("cik"), row["accession"])
+            report["rows"].append({**row, "url": urls.get("filing_url"),
+                                   "issuer": f.get("issuer"), "form": f.get("form")})
     # The assistant's side of the conversation, as the next turn will see it.
     said = result.reply or ""
     if result.question:
@@ -2918,12 +2939,15 @@ def research_plan(params):
         return 200, {"batch_id": None, "chat_id": chat_id, "provider": name,
                      "status": "reply", "reply": result.reply, "question": result.question,
                      "searches": [], "dropped": result.dropped, "extract": None,
-                     "hits": None, "created_at": utcnow(), "ran_at": None}
+                     "report": report, "hits": None, "created_at": utcnow(), "ran_at": None}
     extract = describe_extract(result.extract.to_dict()) if result.extract else None
     batch = RESEARCH.create(chat_id, name, [s.to_dict() for s in result.searches],
                             reply=result.reply, dropped=result.dropped,
                             extract=extract)
     batch["question"] = result.question
+    if report:
+        batch = RESEARCH.set_field(batch["batch_id"], "report", report) or batch
+        batch["question"] = result.question
     RESEARCH.append_history(chat_id, [
         {"role": "user", "content": message},
         {"role": "assistant", "content": said},
