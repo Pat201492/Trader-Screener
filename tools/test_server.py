@@ -1676,6 +1676,118 @@ check("...including the population the title used to claim",
 print("      registry serves: %s" % ", ".join(_forms))
 
 # --------------------------------------------------------------------------- #
+section("search takes any well-formed form; a run for an unowned form refuses (#279)")
+# --------------------------------------------------------------------------- #
+# The registry owns four forms (10-K/10-Q/8-K/424B2). Search is a discovery step
+# and must not be penned to those -- it takes any well-formed EDGAR form code --
+# but a RUN for a form nothing extracts has to fail loudly, not be silently
+# scrubbed as a 424B2 structured note.
+
+check("FIELD_SOURCES carries xml for the later issues that add such a scrubber",
+      "xml" in _scrubbers_mod.FIELD_SOURCES)
+check("supported_forms unions every registered scrubber's forms",
+      set(_scrubbers_mod.supported_forms()) >= {"10-K", "10-Q", "8-K", "424B2"})
+
+# Form-code validation: well-formed codes are upper-cased and kept; an injected
+# one is refused naming it.
+check("a bare form passes, upper-cased", server.normalize_forms(["s-1"]) == ["S-1"])
+check("a form with a space passes", server.normalize_forms(["DEF 14A"]) == ["DEF 14A"])
+check("a slashed amendment passes", server.normalize_forms(["SC 13D/A"]) == ["SC 13D/A"])
+check("a comma string is split and validated",
+      server.normalize_forms("13F-HR, SCHEDULE 13G") == ["13F-HR", "SCHEDULE 13G"])
+_bad_form = None
+try:
+    server.normalize_forms(["10-K;DROP"])
+except ValueError as _e:
+    _bad_form = str(_e)
+check("an injected form code is refused, naming it",
+      _bad_form is not None and "10-K;DROP" in _bad_form)
+
+# A run for a form nothing extracts refuses BEFORE any SEC request.
+_run_refused = None
+try:
+    server.start_scrubber_run({"forms": ["S-1"]})
+except ValueError as _e:
+    _run_refused = str(_e)
+check("a run for an unowned form is refused with 'no scrubber extracts S-1'",
+      _run_refused == "no scrubber extracts S-1")
+
+# 424B2 and an empty form list both pass the form gate and reach target
+# resolution exactly as before. Stub resolve_targets so neither touches SEC;
+# an empty target list then raises the SAME "nothing to extract" both would.
+_real_rt = server.resolve_targets
+server.resolve_targets = lambda params: ([], {"source": "selection", "limit": 1})
+try:
+    for _desc, _req in (("424B2", {"forms": ["424B2"]}), ("no forms", {})):
+        _reached = None
+        try:
+            server.start_scrubber_run(_req)
+        except ValueError as _e:
+            _reached = str(_e)
+        check("a run with %s passes the form gate and resolves targets as before"
+              % _desc,
+              _reached == "nothing to extract -- the query returned no filings")
+finally:
+    server.resolve_targets = _real_rt
+
+# Over the wire: the search route, the /forms route and the run route.
+_279_httpd = _THS(("127.0.0.1", 0),
+                  _partial(server.Handler, directory=str(server.REPO_ROOT)))
+threading.Thread(target=_279_httpd.serve_forever, daemon=True).start()
+_279_base = "http://127.0.0.1:%d" % _279_httpd.server_address[1]
+
+
+def _post279(path, payload):
+    _req = urllib.request.Request(
+        _279_base + path, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(_req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8") or "{}")
+
+
+def _get279(path):
+    try:
+        with urllib.request.urlopen(_279_base + path, timeout=5) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8") or "{}")
+
+
+# An injected form is a 400 naming it -- validation happens before the UA check,
+# so this needs neither EDGAR_USER_AGENT nor the network.
+_prev_ua279 = os.environ.pop("EDGAR_USER_AGENT", None)
+try:
+    _st, _b = _post279("/api/tools/edgar-scrubber/search", {"forms": ["10-K;DROP"]})
+    check("POST search refuses an injected form with a 400 naming it",
+          _st == 400 and "10-K;DROP" in _b.get("error", ""))
+
+    # A well-formed form is ACCEPTED: it gets past validation to the UA check
+    # (there is no allowlist to trip on), which is as far as an offline test can
+    # drive it. A form-code 400 here would mean it was rejected.
+    for _form in ("S-1", "DEF 14A"):
+        _st, _b = _post279("/api/tools/edgar-scrubber/search", {"forms": [_form]})
+        check("POST search accepts %r -- past validation to the UA check" % _form,
+              _st == 400 and "EDGAR_USER_AGENT" in _b.get("error", "")
+              and "form code" not in _b.get("error", ""))
+
+    # The run route maps the ValueError to a 400 naming the form.
+    _st, _b = _post279("/api/tools/edgar-scrubber/run", {"forms": ["S-1"]})
+    check("POST run for an unowned form is a 400 saying 'no scrubber extracts S-1'",
+          _st == 400 and "no scrubber extracts S-1" in _b.get("error", ""))
+finally:
+    if _prev_ua279 is not None:
+        os.environ["EDGAR_USER_AGENT"] = _prev_ua279
+
+_st, _b = _get279("/api/tools/edgar-scrubber/forms")
+check("GET /forms lists the registry's owned forms",
+      _st == 200 and "424B2" in _b.get("forms", []) and "10-K" in _b.get("forms", []))
+
+_279_httpd.shutdown()
+
+# --------------------------------------------------------------------------- #
 section("charset -- declared, not sniffed")
 # --------------------------------------------------------------------------- #
 

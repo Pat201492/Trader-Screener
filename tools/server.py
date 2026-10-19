@@ -216,6 +216,35 @@ def edgar_urls(cik, accession, document=None):
     return out
 
 
+# EDGAR form codes are wildly varied -- "S-1", "DEF 14A", "13F-HR", "SC 13D/A",
+# "SCHEDULE 13G" -- so search keeps NO allowlist of them and takes any
+# well-formed code. "Well-formed" is the shape EDGAR itself uses: an
+# alphanumeric lead, then letters, digits, spaces, dots, slashes or dashes, 20
+# characters at most. That admits every real form and rejects an injected
+# "10-K;DROP" before it reaches the query.
+FORM_CODE_RE = re.compile(r"^[A-Z0-9][A-Z0-9 ./-]{0,19}$")
+
+
+def normalize_forms(forms):
+    """Split (if a string), upper-case and validate every form code.
+
+    Upper-casing is safe -- EDGAR is case-insensitive on form and the registry
+    stores them upper -- and each code is checked against `FORM_CODE_RE`.
+    Anything malformed raises `ValueError` naming the offending code, which the
+    search route surfaces as a 400."""
+    if isinstance(forms, str):
+        forms = [f.strip() for f in forms.split(",") if f.strip()]
+    out = []
+    for f in (forms or []):
+        code = str(f).strip().upper()
+        if not code:
+            continue
+        if not FORM_CODE_RE.match(code):
+            raise ValueError(f"not a valid EDGAR form code: {f!r}")
+        out.append(code)
+    return out
+
+
 def edgar_search_url(q, forms, ciks, startdt, enddt):
     """The same query in EDGAR's own full-text search UI, so a search here can
     be carried over to sec.gov rather than re-typed."""
@@ -265,9 +294,7 @@ def edgar_search(params):
     # Params first, environment second: an empty form is the user's error and
     # should say so, not report a missing env var they did not ask about.
     q = (params.get("q") or "").strip()
-    forms = params.get("forms") or []
-    if isinstance(forms, str):
-        forms = [f.strip() for f in forms.split(",") if f.strip()]
+    forms = normalize_forms(params.get("forms"))
     ciks = params.get("ciks") or []
     if isinstance(ciks, str):
         ciks = [c.strip() for c in ciks.split(",") if c.strip()]
@@ -378,9 +405,7 @@ def edgar_search_daily(params):
     by_day.reverse()
     hits.reverse()
     q = (params.get("q") or "").strip()
-    forms = params.get("forms") or []
-    if isinstance(forms, str):
-        forms = [f.strip() for f in forms.split(",") if f.strip()]
+    forms = normalize_forms(params.get("forms"))
     ciks = params.get("ciks") or []
     if isinstance(ciks, str):
         ciks = [c.strip() for c in ciks.split(",") if c.strip()]
@@ -921,8 +946,10 @@ def compare_runs_json(run_a, run_b, field=None):
 def scrubber_for_forms(forms):
     """The registry entry owning these form types, or None.
 
-    None means "no scrubber claims this", which the caller treats as the 424B2
-    spec path for backward compatibility rather than as an error.
+    None means "no scrubber claims this". For a NON-EMPTY form list that is an
+    error the caller raises on (a form nothing extracts must not be scrubbed as
+    a 424B2 note); an EMPTY list also returns None and the caller keeps the
+    424B2 spec default, which the saved 424B2 queries rely on.
     """
     try:
         import scrubbers as scrubbers_mod
@@ -1134,19 +1161,26 @@ def accuracy_switches(params):
 def start_scrubber_run(params):
     home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
     fields = params.get("fields") or DEFAULT_FIELDS
-    targets, provenance = resolve_targets(params)
-    if not targets:
-        raise ValueError("nothing to extract -- the query returned no filings")
-    samples, shadow, cands = accuracy_switches(params)
 
-    # Which path this run takes comes from the registry, not from an assumption.
-    # `spec` (424B2) goes through the prose ladder; `taxonomy` (10-K/10-Q/8-K)
-    # reads the filing's own XBRL tags and needs no model at all.
+    # Which path this run takes comes from the registry, not from an assumption,
+    # and it is resolved BEFORE any SEC request: a form nothing extracts must
+    # fail loudly here rather than be quietly scrubbed as a 424B2 structured
+    # note. `spec` (424B2) goes through the prose ladder; `taxonomy`
+    # (10-K/10-Q/8-K) reads the filing's own XBRL tags and needs no model at
+    # all. An empty form list keeps today's 424B2 default, because the saved
+    # 424B2 queries carry no explicit `forms` here and rely on it.
     forms = params.get("forms") or (params.get("search") or {}).get("forms") or []
     if isinstance(forms, str):
         forms = [f.strip() for f in forms.split(",") if f.strip()]
     scrubber = scrubber_for_forms(forms)
+    if scrubber is None and forms:
+        raise ValueError("no scrubber extracts %s" % ", ".join(str(f) for f in forms))
     source = getattr(scrubber, "field_source", "spec") or "spec"
+
+    targets, provenance = resolve_targets(params)
+    if not targets:
+        raise ValueError("nothing to extract -- the query returned no filings")
+    samples, shadow, cands = accuracy_switches(params)
 
     run_id = RUNS.create("edgar-scrubber", {**provenance, "fields": fields,
                                              "limit": len(targets),
@@ -3403,6 +3437,14 @@ class Handler(SimpleHTTPRequestHandler):
                             "ciks": list(sq.ciks or []), "startdt": sq.startdt,
                             "enddt": sq.enddt})
             return self._json(out)
+        if path == "/api/tools/edgar-scrubber/forms":
+            try:
+                import scrubbers as scrubbers_mod
+                return self._json({"forms": scrubbers_mod.supported_forms()})
+            except ImportError:
+                return self._json({"error": "scrubbers registry not available"}, 503)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
         if path == "/api/tools/edgar-scrubber/scrubbers":
             try:
                 import scrubbers as scrubbers_mod
