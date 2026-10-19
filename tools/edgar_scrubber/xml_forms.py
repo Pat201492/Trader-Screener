@@ -518,6 +518,68 @@ def read_form_d(xml_text):
     }]
 
 
+def read_form_144(xml_text):
+    """Read a Form 144 / 144/A notice of proposed sale into one row per security
+    to be sold (each ``securitiesInformation`` block).
+
+    Every row carries the issuer, the person for whose account the securities
+    are sold and their relationship to the issuer, the class, units to be sold,
+    aggregate market value, units outstanding, approximate sale date, exchange
+    and broker -- plus the acquisition (date and nature) from the
+    ``securitiesToBeSold`` table entry of the same class (the first entry when
+    no class matches), and the amendment flag. Missing elements read as None.
+
+    Raises ``XmlFormError`` if the text is not well-formed XML or is not a Form
+    144 (a Form D, 13F cover or Schedule 13D also roots at ``edgarSubmission``
+    but carries no ``securitiesInformation``).
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise XmlFormError(f"not well-formed XML: {exc}") from exc
+    if _local(root.tag).lower() != "edgarsubmission" \
+            or _desc(root, "securitiesInformation") is None:
+        raise XmlFormError(
+            f"not a Form 144 submission (root is {root.tag!r})")
+
+    submission_type = _dtext(root, "submissionType")
+    is_amendment = bool(submission_type
+                        and submission_type.strip().upper().endswith("/A"))
+    issuer = _desc(root, "issuerInfo")
+    relationships = _all_dtext(_desc(issuer, "relationshipsToIssuer"),
+                               "relationshipToIssuer")
+    acquisitions = [e for e in root.iter()
+                    if _local(e.tag).lower() == "securitiestobesold"]
+
+    rows = []
+    for info in root.iter():
+        if _local(info.tag).lower() != "securitiesinformation":
+            continue
+        cls = _dtext(info, "securitiesClassTitle")
+        acq = next((a for a in acquisitions
+                    if cls and _dtext(a, "securitiesClassTitle") == cls),
+                   acquisitions[0] if acquisitions else None)
+        broker = _desc(info, "brokerOrMarketmakerDetails")
+        rows.append({
+            "issuer_name": _dtext(issuer, "issuerName"),
+            "issuer_cik": _dtext(issuer, "issuerCik"),
+            "seller_name": _dtext(
+                issuer, "nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold"),
+            "relationship_to_issuer": "; ".join(relationships) or None,
+            "class_title": cls,
+            "units_to_be_sold": _num(_dtext(info, "noOfUnitsSold")),
+            "aggregate_market_value": _num(_dtext(info, "aggregateMarketValue")),
+            "units_outstanding": _num(_dtext(info, "noOfUnitsOutstanding")),
+            "approx_sale_date": _iso_date(_dtext(info, "approxSaleDate")),
+            "exchange": _dtext(info, "securitiesExchangeName"),
+            "broker_name": _dtext(broker, "name"),
+            "acquired_date": _iso_date(_dtext(acq, "acquiredDate")),
+            "nature_of_acquisition": _dtext(acq, "natureOfAcquisitionTransaction"),
+            "is_amendment": is_amendment,
+        })
+    return rows
+
+
 # ── Registry + front door ──────────────────────────────────────────────────────
 
 # Form code -> reader. Each reader owns its schema check and raises XmlFormError
@@ -540,6 +602,8 @@ READERS = {
     "SCHEDULE 13G/A": read_schedule_13dg,
     "D": read_form_d,
     "D/A": read_form_d,
+    "144": read_form_144,
+    "144/A": read_form_144,
 }
 
 

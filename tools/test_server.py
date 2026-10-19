@@ -2162,6 +2162,31 @@ check("SCHEDULE 13G resolves to the xml 13D/13G scrubber",
 check("legacy SC 13G is owned by no scrubber",
       server.scrubber_for_forms(["SC 13G"]) is None)
 
+# Form 144 (#320): owned by the xml scrubber; a run writes its rows to FormsStore.
+_s144 = server.scrubber_for_forms(["144"])
+check("144 resolves to the xml form-144 scrubber",
+      _s144 is not None and _s144.id == "form-144" and _s144.field_source == "xml"
+      and server.scrubber_for_forms(["144/A"]) is not None)
+_ACCN_144 = "0002096999-26-000012"
+_xml_filings[_ACCN_144] = {
+    "items": [{"name": "primary_doc.xml", "type": "144", "size": "1"}],
+    "docs": {"primary_doc.xml": (_F13F_DIR / "form144_opendoor.xml").read_bytes()}}
+_f144rid = server.RUNS.create("edgar-scrubber", {"limit": 1, "fields": []})
+_ecx.EdgarClient = lambda **kw: _FakeXmlClient(_xml_filings)
+try:
+    server.xml_run(_f144rid, [{"accession": _ACCN_144, "cik": "1801169",
+                               "file_date": "2026-10-16"}],
+                   _xml_home, form_type="144")
+finally:
+    _ecx.EdgarClient = _real_ecx
+_f144run = server.RUNS.get(_f144rid)
+_144_grid = server.store_forms(form="144")
+check("a 144 run completes and writes its row to FormsStore",
+      _f144run["status"] == "done" and _f144run.get("rows_written") == 1
+      and len(_144_grid["rows"]) == 1
+      and _144_grid["rows"][0].get("units_to_be_sold") == 10393
+      and _144_grid["rows"][0].get("seller_name") == "Giang Nguyen")
+
 _f13frid = server.RUNS.create("edgar-scrubber", {"limit": 1, "fields": []})
 _ecx.EdgarClient = lambda **kw: _FakeXmlClient(_xml_filings)
 try:
