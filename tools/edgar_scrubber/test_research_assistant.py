@@ -384,6 +384,28 @@ def run_conversation_checks():
           "2-3 phrasings" in sp and "Automatic Call" in sp and "Contingent Interest" in sp)
     check("creative: the prompt says not to repeat a 0-hit search, and to narrow a truncated one",
           "0 hits" in sp and "TRUNCATED" in sp)
+    # #318: a written report; rows must be filings from this chat's results.
+    rp = json.dumps({"reply": "Here is the comparison.", "searches": [], "question": None,
+                     "extract": None, "report": {
+                         "summary": "Note A is the most aggressive.",
+                         "columns": ["coupon", "barrier"],
+                         "rows": [{"accession": "a-1", "cells": ["16%", "60%"]},
+                                  {"accession": "made-up", "cells": ["9%", "70%"]},
+                                  {"accession": "a-2", "cells": ["11%"]}],
+                         "notes": "Underlyings unknown for a-2."}})
+    pr = ra.plan(FakeProvider(rp), "compare", known_accessions={"a-1", "a-2"}, today=TODAY)
+    check("report: a valid report is carried with its summary, columns and notes",
+          pr.report and pr.report["summary"].startswith("Note A") and pr.report["columns"] == ["coupon", "barrier"]
+          and pr.report["notes"])
+    check("report: a row naming an accession not in the results is dropped with a reason",
+          [r["accession"] for r in pr.report["rows"]] == ["a-1"]
+          and any("made-up" in d and "did not appear" in d for d in pr.dropped))
+    check("report: a row with the wrong number of cells is dropped with a reason",
+          any("1 cells for 2 columns" in d for d in pr.dropped))
+    check("report: the schema makes report nullable-required",
+          "report" in ra.PLAN_SCHEMA["required"])
+    check("report: the prompt says to build cells only from extracted values and not guess",
+          "report" in sp and "never guess" in sp)
     check("conversation: the schema allows zero searches and requires `question`",
           ra.PLAN_SCHEMA["properties"]["searches"]["minItems"] == 0
           and "question" in ra.PLAN_SCHEMA["required"])

@@ -2395,6 +2395,22 @@ check("a digest failure leaves the approval a 200, with the error recorded",
       _st == 200 and _ran2.get("status") == "ran" and "SEC down" in (_ran2.get("digest_error") or ""))
 server.research_digest_for = _prev_digest
 
+# #318: a report's rows link to their filings; one naming an unseen filing drops.
+_known_acc = (_ran.get("hits") or [{}])[0].get("result", {}).get("hits", [{}])[0].get("accession")
+_report_provider = _FakeResearchProvider({
+    "reply": "Comparison.", "searches": [], "question": None, "extract": None,
+    "report": {"summary": "One note found.", "columns": ["barrier"],
+               "rows": [{"accession": _known_acc, "cells": ["60%"]},
+                        {"accession": "0009999999-26-000001", "cells": ["70%"]}],
+               "notes": ""}})
+server.build_research_provider = lambda name, chat_id=None: _report_provider
+_st, _rpb = _rb_req("POST", "/plan", {"chat_id": "chat-dig", "message": "compare", "provider": "ollama"})
+_rows = ((_rpb.get("report") or {}).get("rows") or [])
+check("a report is returned with only rows for filings this chat found",
+      _st == 200 and [r["accession"] for r in _rows] == [_known_acc])
+check("...each row carrying its filing's sec.gov link (or none when the CIK is unknown)",
+      all("url" in r for r in _rows))
+
 # #315: a conversation turn with no searches is stored without a batch.
 _reply_provider = _FakeResearchProvider({
     "reply": "Happy to help -- which issuer?", "searches": [],
