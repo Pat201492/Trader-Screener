@@ -4176,7 +4176,7 @@ function researchTurnHtml(turn,ti){
     // (its own card with its own approval), and a plan may carry either. Show
     // the search card only when there are searches to show, so an extract-only
     // follow-up does not render an empty "no searches" card above it.
-    const showSearches=(b.searches&&b.searches.length)||b.status==='ran';
+    const showSearches=(b.searches&&b.searches.length)||b.status==='ran'||b.insider_query;
     const searchCard=showSearches
       ? `<div class="card" id="batchCard_${ti}" style="margin:0">${batchCardInner(b,ti)}</div>`:'';
     const extractCard=b.extract
@@ -4198,24 +4198,60 @@ function batchCardInner(batch,ti){
   const ran=batch.status==='ran';
   const head=`<div class="name" style="font-size:13px">Proposed searches
       <span class="muted" style="font-weight:400;font-size:11.5px">· ${batch.searches.length} search(es)${ran?' · <span style="color:var(--green)">ran</span>':''}</span></div>`;
-  if(ran) return head+researchResultsHtml(batch,ti);
+  if(ran) return head+(batch.searches.length?researchResultsHtml(batch,ti):'')
+    +(batch.insider_query?insiderResultsHtml(batch):'');
   const running=batch._running;
   const rows=batch.searches.map((s,i)=>researchRowHtml(s,ti,i,batch._rowErrors||{})).join('');
   const dropped=(batch.dropped&&batch.dropped.length)
     ? `<div style="font-size:11px;margin:6px 0;color:#e3b341">The planner dropped: ${batch.dropped.map(esc).join('; ')}</div>`:'';
   const gerr=batch._error?`<div class="err" style="margin:8px 0">${esc(batch._error)}</div>`:'';
-  const n=batch.searches.length;
+  const n=batch.searches.length, iq=!!batch.insider_query;
+  const runLabel=[n?`${n} search${n===1?'':'es'}`:'',iq?'insider query':''].filter(Boolean).join(' + ');
   const controls=`<div style="display:flex;gap:8px;margin-top:10px">
-      <button onclick="runBatch(${ti})" ${running||!n?'disabled':''}
+      <button onclick="runBatch(${ti})" ${running||(!n&&!iq)?'disabled':''}
         style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">
-        ${running?'running…':`Run ${n} search${n===1?'':'es'}`}</button>
+        ${running?'running…':`Run ${runLabel||'nothing'}`}</button>
       <button onclick="discardBatch(${ti})" ${running?'disabled':''}
         style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px 12px;font-size:12.5px;cursor:pointer">
         Discard</button>
     </div>`;
   return head+dropped
-    +`<div style="margin-top:8px">${rows||'<div class="muted" style="font-size:12px">No searches left — discard this batch.</div>'}</div>`
+    +`<div style="margin-top:8px">${rows||(iq?'':'<div class="muted" style="font-size:12px">No searches left — discard this batch.</div>')}</div>`
+    +(iq?insiderQueryHtml(batch.insider_query,ti):'')
     +gerr+controls;
+}
+
+// The insider query (#319): editable filters against the pipeline's market-wide
+// insider-trades table, read back by readBatchRows and PUT with the searches.
+const INSIDER_FIELDS=[['from','from','YYYY-MM-DD',110],['to','to','YYYY-MM-DD',110],
+  ['type','type','P,S,A,M,F,G,D,C',110],['ticker','ticker','NVDA',80],
+  ['role','role','officer|director|ten_pct',150],['min_value','min $','1000000',100],
+  ['sort','sort','date|value',80]];
+function insiderQueryHtml(q,ti){
+  const inp='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:5px;padding:4px 7px;font-size:12px';
+  return `<div style="border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:6px;padding:9px;margin-bottom:8px">
+    <div style="font-size:12px;font-weight:600">Insider-trades query <span class="muted" style="font-weight:400">· market-wide table, not Form 4 keyword search</span></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+      ${INSIDER_FIELDS.map(([k,label,ph,w])=>`<label class="muted" style="font-size:11px">${label} <input id="iq_${k}_${ti}" value="${esc(q[k]||'')}" placeholder="${ph}" style="${inp};width:${w}px"></label>`).join('')}
+    </div></div>`;
+}
+
+// The ran insider query: total, the rows, and a sec.gov link per row.
+function insiderResultsHtml(batch){
+  const r=batch.insider_results||{};
+  if(r.error) return `<div class="err" style="margin:8px 0">Insider query failed: ${esc(r.error)}</div>`;
+  const rows=r.rows||[];
+  const money=v=>(typeof v==='number'?'$'+Math.round(v).toLocaleString():'—');
+  const body=rows.map(x=>{const u=x.sec_url||'';return `<tr>
+      <td>${esc(x.transaction_date||'')}</td><td>${esc(x.ticker||'')}</td>
+      <td>${esc(x.insider_name||'')}<div class="muted" style="font-size:10.5px">${esc(x.insider_title||'')}</div></td>
+      <td>${esc(x.transaction_type||'')}</td><td style="text-align:right">${x.shares==null?'—':Number(x.shares).toLocaleString()}</td>
+      <td style="text-align:right">${money(x.total_value)}</td>
+      <td>${/^https:\/\/www\.sec\.gov\//.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener" style="color:var(--accent)">filing</a>`:''}</td></tr>`;}).join('');
+  return `<div style="margin-top:10px"><div style="font-size:12px;font-weight:600">Insider trades
+      <span class="muted" style="font-weight:400">· ${r.total==null?rows.length:r.total} matching${r.total>rows.length?`, ${rows.length} shown`:''}</span></div>
+    ${rows.length?`<div style="overflow-x:auto"><table style="font-size:11.5px;margin-top:6px"><tr><th>Date</th><th>Ticker</th><th>Insider</th><th>Type</th><th>Shares</th><th>Value</th><th></th></tr>${body}</table></div>`
+      :'<div class="muted" style="font-size:12px;padding:6px 0">No matching trades.</div>'}</div>`;
 }
 
 function researchRowHtml(s,ti,i,errs){
@@ -4255,6 +4291,11 @@ function readBatchRows(batch,ti){
       enddt:(g(`rs_end_${ti}_${i}`)||'').trim(),
       rationale:(g(`rs_rat_${ti}_${i}`)||'').trim()};
   });
+  if(batch.insider_query){
+    const q={};
+    INSIDER_FIELDS.forEach(([k])=>{const v=g(`iq_${k}_${ti}`);q[k]=(v===undefined?(batch.insider_query[k]||''):v).trim();});
+    batch.insider_query=q;
+  }
 }
 
 function syncAllProposedBatches(){
@@ -4404,7 +4445,8 @@ async function runBatch(ti){
     // lands on that row, never a quietly-dropped search.
     const put=await fetch('/api/tools/research/batch/'+encodeURIComponent(batch.batch_id),{
       method:'PUT',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({searches:batch.searches})});
+      body:JSON.stringify(batch.insider_query
+        ?{searches:batch.searches,insider_query:batch.insider_query}:{searches:batch.searches})});
     const pd=await put.json();
     if(!put.ok){
       batch._running=false;
