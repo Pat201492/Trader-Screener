@@ -345,3 +345,58 @@ def test_form_d_entity_placeholder_is_not_part_of_a_related_name():
     q = ET.fromstring("<relatedPersonName><firstName>Jane</firstName>"
                       "<lastName>Doe</lastName></relatedPersonName>")
     assert _related_person_name(q) == "Jane Doe"
+
+
+FORM_144 = (FIXTURES / "form144_opendoor.xml").read_text(encoding="utf-8")
+_FORM_144_ROW_KEYS = {
+    "issuer_name", "issuer_cik", "seller_name", "relationship_to_issuer",
+    "class_title", "units_to_be_sold", "aggregate_market_value",
+    "units_outstanding", "approx_sale_date", "exchange", "broker_name",
+    "acquired_date", "nature_of_acquisition", "is_amendment",
+}
+
+
+def test_form_144_reads_one_row_per_security():
+    # Live 0002096999-26-000012 (Opendoor, sell-to-cover after an RSU vest).
+    rows = read_filing("144", FORM_144)
+    assert len(rows) == 1
+    row = rows[0]
+    assert set(row) == _FORM_144_ROW_KEYS
+    assert row["issuer_name"] == "Opendoor Technologies Inc."
+    assert row["issuer_cik"] == "0001801169"
+    assert row["seller_name"] == "Giang Nguyen"
+    assert row["relationship_to_issuer"] == "Chief Operating Officer"
+    assert row["class_title"] == "Common"
+    assert row["units_to_be_sold"] == 10393
+    assert row["aggregate_market_value"] == 20682.07
+    assert row["units_outstanding"] == 971091050
+    assert row["approx_sale_date"] == "2026-10-15"
+    assert row["exchange"] == "Nasdaq"
+    assert row["broker_name"].startswith("Morgan Stanley Smith Barney")
+    assert row["acquired_date"] == "2026-10-15"
+    assert row["nature_of_acquisition"] == "Restricted Stock Units"
+    assert row["is_amendment"] is False
+
+
+def test_form_144_amendment_flag_is_set():
+    amended = FORM_144.replace("<own:submissionType>144</own:submissionType>",
+                               "<own:submissionType>144/A</own:submissionType>")
+    assert amended != FORM_144
+    rows = read_filing("144/A", amended)
+    assert rows[0]["is_amendment"] is True
+    assert READERS["144"] is READERS["144/A"]
+
+
+def test_form_144_missing_elements_are_null():
+    import re
+    stripped = re.sub(r"<own:securitiesExchangeName>.*?</own:securitiesExchangeName>", "", FORM_144)
+    stripped = re.sub(r"<own:aggregateMarketValue>.*?</own:aggregateMarketValue>", "", stripped)
+    row = read_filing("144", stripped)[0]
+    assert row["exchange"] is None and row["aggregate_market_value"] is None
+    assert set(row) == _FORM_144_ROW_KEYS
+
+
+def test_form_144_rejects_other_forms():
+    for other in (FORM_D, F13F_PRIMARY, SCHED_13D, FORM4, "<not-xml>"):
+        with pytest.raises(XmlFormError):
+            read_filing("144", other)

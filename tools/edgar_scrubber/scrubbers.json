@@ -126,6 +126,15 @@
       "q": "",
       "forms": ["D", "D/A"],
       "field_source": "xml"
+    },
+    {
+      "id": "form-144",
+      "form_type": "144",
+      "display_name": "Form 144 proposed sale",
+      "purpose": "Notice of proposed sale of restricted or control securities by an insider or affiliate, filed before the sale; a structured XML form, one row per security to be sold.",
+      "q": "",
+      "forms": ["144", "144/A"],
+      "field_source": "xml"
     }
   ]
 }
