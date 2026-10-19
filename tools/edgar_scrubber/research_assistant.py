@@ -53,7 +53,7 @@ MAX_YEARS_BACK = 25
 # run, and nothing the planner proposes should exceed what a human would queue
 # by hand.
 MAX_EXTRACT_ACCESSIONS = 50
-DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5"
+DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
 
 # Cost estimation. Rough but honest: APIs bill by their own tokenizer, but 4
 # characters per token is the long-standing ballpark for English, and the point
@@ -61,7 +61,10 @@ DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5"
 # call, not an invoice. The output allowance mirrors ClaudeProvider's max_tokens
 # -- the call could cost up to that many output tokens.
 CHARS_PER_TOKEN = 4
-OUTPUT_TOKEN_ALLOWANCE = 2048
+# One number for both, so the estimate stays a true ceiling on the call. Thinking
+# counts against it; a typical plan uses a small fraction (estimate = worst case).
+CLAUDE_MAX_TOKENS = 16000
+OUTPUT_TOKEN_ALLOWANCE = CLAUDE_MAX_TOKENS
 # The editable price table lives beside this module.
 PRICES_PATH = Path(__file__).resolve().parent / "research_prices.json"
 
@@ -455,7 +458,7 @@ class OllamaProvider(Provider):
 class ClaudeProvider(Provider):
     """Claude via the Anthropic SDK, the same client `claude_template._client`
     builds. Model comes from ANTHROPIC_RESEARCH_MODEL (default
-    `claude-sonnet-5-5`); the key comes from ANTHROPIC_API_KEY. A `client` may
+    `claude-opus-5-5`); the key comes from ANTHROPIC_API_KEY. A `client` may
     be injected (the tests do this) so the class is exercisable without the SDK,
     a key, or the network."""
 
@@ -465,11 +468,19 @@ class ClaudeProvider(Provider):
         self.client = client or _anthropic_client(api_key)
 
     def complete(self, system, messages):
-        message = self.client.messages.create(
+        # Thinking is always on for current Claude models and counts against
+        # max_tokens: 2048 risked a plan cut off before its JSON. Effort is set
+        # explicitly (the Opus 5.5 default is medium; a search plan needs no more).
+        # Refusal fallbacks: on a policy decline the API re-runs the request on a
+        # model chosen by refusal category, inside the same call.
+        message = self.client.beta.messages.create(
             model=self.model,
-            max_tokens=2048,
+            max_tokens=CLAUDE_MAX_TOKENS,
             system=system,
-            output_config={"format": {"type": "json_schema", "schema": PLAN_SCHEMA}},
+            output_config={"effort": "medium",
+                           "format": {"type": "json_schema", "schema": PLAN_SCHEMA}},
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
             messages=list(messages),
         )
         if getattr(message, "stop_reason", None) == "refusal":

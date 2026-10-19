@@ -83,6 +83,9 @@ class FakeAnthropicClient:
         self.text = text
         self.seen = None
         self.messages = self
+        # ClaudeProvider calls client.beta.messages.create (refusal fallbacks
+        # are a beta parameter); both paths record into `seen`.
+        self.beta = type("Beta", (), {"messages": self})()
 
     def create(self, **kwargs):
         self.seen = kwargs
@@ -196,8 +199,8 @@ def run_checks():
     try:
         os.environ.pop("ANTHROPIC_RESEARCH_MODEL", None)
         cp = ra.ClaudeProvider(client=FakeAnthropicClient())
-        check("claude: default model is claude-sonnet-5-5",
-              cp.model == "claude-sonnet-5-5")
+        check("claude: default model is claude-opus-5-5",
+              cp.model == "claude-opus-5-5")
         os.environ["ANTHROPIC_RESEARCH_MODEL"] = "claude-opus-5"
         cp2 = ra.ClaudeProvider(client=FakeAnthropicClient())
         check("claude: model read from ANTHROPIC_RESEARCH_MODEL",
@@ -207,6 +210,12 @@ def run_checks():
               cp2.client.seen["output_config"]["format"]["schema"] is ra.PLAN_SCHEMA)
         check("claude: model passed through to the SDK call",
               cp2.client.seen["model"] == "claude-opus-5")
+        s = cp2.client.seen
+        check("claude: max_tokens leaves room for thinking (>= 16000)", s["max_tokens"] >= 16000)
+        check("claude: effort set explicitly", s["output_config"].get("effort") == "medium")
+        check("claude: server-side refusal fallbacks on (default routing)",
+              s.get("fallbacks") == "default"
+              and "server-side-fallback-2026-07-01" in (s.get("betas") or []))
     finally:
         if saved is None:
             os.environ.pop("ANTHROPIC_RESEARCH_MODEL", None)
