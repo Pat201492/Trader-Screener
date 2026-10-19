@@ -79,14 +79,24 @@ _CIK_RE = re.compile(r"^\d{1,10}$")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-SYSTEM_PROMPT = """You are a research assistant for SEC EDGAR. A user asks a \
-question about company filings; you PROPOSE EDGAR full-text searches that would \
-help answer it. You do three things and nothing else:
+SYSTEM_PROMPT = """You are a research assistant for SEC EDGAR, in a conversation \
+with a user about company filings. You talk with them -- ask what they mean, \
+explain what was found, take pushback -- and you PROPOSE EDGAR full-text \
+searches when a search would help. Your limits:
 
-1. You propose searches. You do NOT run them, summarize results, or claim to \
-know what any filing says -- you have not read any filing. Executing a search \
-and showing the user the hits is a separate, human-approved step you are not \
-part of.
+1. You propose searches. You do NOT run them, and you never claim to know what \
+a filing says -- you have not read any filing. Executing a search and showing \
+the user the hits is a separate, human-approved step you are not part of. When \
+search results have been shown to you, you MAY explain them in plain language \
+(how many, which filers, which dates, what looks worth a closer look), only from \
+what you were shown.
+
+A turn is a conversation turn, not a form:
+- When the request is ambiguous (which issuer, which period, which form), ask ONE \
+short clarifying `question` and propose no searches yet.
+- When the user pushes back ("too narrow", "only last month", "what about \
+Goldman?"), adjust: say what you are changing and propose the revised searches.
+- When the user only wants an explanation, reply with no searches.
 
 2. Every search is an EDGAR full-text search (the `efts` endpoint) and only \
 that. Each proposed search is {q, forms, ciks, startdt, enddt, rationale}: `q` \
@@ -98,8 +108,9 @@ before enddt, and `rationale` is one sentence on why this search helps. Leave \
 `forms`, `ciks`, or the dates empty when the question does not constrain them; \
 do not invent a form code or a date to fill a slot.
 
-3. Propose between 1 and 5 searches, narrowest first. A short `reply` tells the \
-user, in plain language, what you are proposing and why.
+3. Propose between 0 and 5 searches, narrowest first. A short `reply` tells the \
+user, in plain language, what you are proposing and why -- or answers them when \
+no search is needed. `question` is your one clarifying question, or null.
 
 4. ONCE A BATCH HAS RUN and you have seen its results, you MAY instead propose \
 extracting specific filings with the scrubber, as an `extract` object {form, \
@@ -166,9 +177,13 @@ PLAN_SCHEMA = {
                   "description": "plain-language note on what is being proposed"},
         "searches": {
             "type": "array",
-            "minItems": 1,
+            "minItems": 0,
             "maxItems": MAX_SEARCHES,
             "items": _SEARCH_SCHEMA,
+        },
+        "question": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "description": "one short clarifying question for the user, or null",
         },
         "extract": {
             "anyOf": [_EXTRACT_SCHEMA, {"type": "null"}],
@@ -176,7 +191,7 @@ PLAN_SCHEMA = {
                            "is another search",
         },
     },
-    "required": ["reply", "searches", "extract"],
+    "required": ["reply", "searches", "question", "extract"],
     "additionalProperties": False,
 }
 
@@ -248,23 +263,31 @@ class Plan:
     model proposed one and it validated). An empty `searches` with a non-empty
     `dropped` is a valid, safe outcome, not an error."""
 
-    __slots__ = ("reply", "searches", "dropped", "extract")
+    __slots__ = ("reply", "searches", "dropped", "extract", "question")
 
-    def __init__(self, reply="", searches=None, dropped=None, extract=None):
+    def __init__(self, reply="", searches=None, dropped=None, extract=None, question=None):
         self.reply = reply or ""
         self.searches = list(searches or [])
         self.dropped = list(dropped or [])
         self.extract = extract
+        self.question = question or None
+
+    @property
+    def reply_only(self):
+        """A conversation turn with nothing to approve: no searches, no extract."""
+        return not self.searches and self.extract is None
 
     def to_dict(self):
         return {"reply": self.reply,
+                "question": self.question,
                 "searches": [s.to_dict() for s in self.searches],
                 "dropped": self.dropped,
                 "extract": self.extract.to_dict() if self.extract else None}
 
     def __repr__(self):
-        return (f"Plan(reply={self.reply!r}, searches={self.searches!r}, "
-                f"dropped={self.dropped!r}, extract={self.extract!r})")
+        return (f"Plan(reply={self.reply!r}, question={self.question!r}, "
+                f"searches={self.searches!r}, dropped={self.dropped!r}, "
+                f"extract={self.extract!r})")
 
 
 # -- validation --------------------------------------------------------------
@@ -349,8 +372,8 @@ def validate_searches(raw, *, today=None):
 
     A failed check drops the ENTIRE entry; nothing is silently corrected. The
     `today` hook keeps the 25-year window deterministic under test."""
-    if raw is None:
-        return [], ["model reply had no searches"]
+    if raw is None or raw == []:
+        return [], []           # a reply-only conversation turn
     if not isinstance(raw, list):
         return [], ["searches was not a list"]
 
@@ -736,6 +759,8 @@ def plan(provider, message, history=None, known_accessions=None, today=None):
 
     reply = data.get("reply")
     reply = reply if isinstance(reply, str) else ""
+    question = data.get("question")
+    question = question.strip() if isinstance(question, str) and question.strip() else None
     searches, dropped = validate_searches(data.get("searches"), today=today)
     dropped += _drop_unsourced_ciks(
         searches, [message] + [m.get("content", "") for m in (history or [])
@@ -744,4 +769,4 @@ def plan(provider, message, history=None, known_accessions=None, today=None):
     extract, extract_dropped = validate_extract(
         data.get("extract"), known_accessions=known_accessions)
     return Plan(reply=reply, searches=searches, dropped=dropped + extract_dropped,
-                extract=extract)
+                extract=extract, question=question)
