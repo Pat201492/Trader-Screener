@@ -99,6 +99,17 @@ def test_registry_ships_forms_and_resolves_queries():
 # --------------------------------------------------------------------------- #
 # 4. load_scrubbers validates and raises naming the offending id
 # --------------------------------------------------------------------------- #
+def test_foreign_and_transition_forms():
+    section("20-F / 40-F / 10-KT / 10-QT ship as taxonomy scrubbers (#282)")
+    scrubbers = sc.load_scrubbers()
+    for fid, form in (("20-f", "20-F"), ("40-f", "40-F"),
+                      ("10-kt", "10-KT"), ("10-qt", "10-QT")):
+        check(f"registry defines {fid}", fid in scrubbers)
+        s = scrubbers.get(fid)
+        check(f"{fid} is a taxonomy scrubber", s is not None and s.field_source == "taxonomy")
+        check(f"{fid} fixes its own form filter", s is not None and s.forms == (form,))
+
+
 def test_load_validates_and_names_offender():
     section("A malformed entry fails at load, naming the offending id (#212)")
 
@@ -160,6 +171,7 @@ def main():
         test_record_shape,
         test_field_source_by_form,
         test_registry_ships_forms_and_resolves_queries,
+        test_foreign_and_transition_forms,
         test_load_validates_and_names_offender,
         test_build_query_round_trip,
     ]

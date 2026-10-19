@@ -178,6 +178,57 @@ for label, payload in (("empty facts", no_facts),
           all(a in res.groups for a in tf.AREA_ORDER))
 
 # --------------------------------------------------------------------------- #
+section("ifrs-full 20-F groups into the same statement areas (#282)")
+# --------------------------------------------------------------------------- #
+# Foreign annual reports (20-F, 40-F) and transition-period reports tag in
+# ifrs-full, whose concept names differ from us-gaap. A small synthetic
+# companyfacts payload exercises the ifrs-full grouping offline.
+IFRS_ACCN = "0000000002-24-000001"
+ifrs_facts = {
+    "cik": 2, "entityName": "Foreign Filer PLC",
+    "facts": {"ifrs-full": {
+        "Revenue": {"label": "Revenue", "units": {"EUR": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 100,
+             "form": "20-F", "accn": IFRS_ACCN, "filed": "2024-03-01"}]}},
+        "ProfitLoss": {"label": "Profit (loss)", "units": {"EUR": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 20,
+             "form": "20-F", "accn": IFRS_ACCN, "filed": "2024-03-01"}]}},
+        "Assets": {"label": "Assets", "units": {"EUR": [
+            {"end": "2023-12-31", "val": 500,
+             "form": "20-F", "accn": IFRS_ACCN, "filed": "2024-03-01"}]}},
+        "Equity": {"label": "Equity", "units": {"EUR": [
+            {"end": "2023-12-31", "val": 300,
+             "form": "20-F", "accn": IFRS_ACCN, "filed": "2024-03-01"}]}},
+        "CashFlowsFromUsedInOperatingActivities": {
+            "label": "Cash flows from operating activities", "units": {"EUR": [
+                {"start": "2023-01-01", "end": "2023-12-31", "val": 80,
+                 "form": "20-F", "accn": IFRS_ACCN, "filed": "2024-03-01"}]}},
+        "NumberOfEmployees": {"label": "Number of employees", "units": {"pure": [
+            {"end": "2023-12-31", "val": 42,
+             "form": "20-F", "accn": IFRS_ACCN, "filed": "2024-03-01"}]}},
+    }},
+}
+ifrs = tf.fields_for_filing(ifrs_facts, "20-F", IFRS_ACCN)
+ifrs_inc = [f.concept for f in ifrs.area("income_statement")]
+ifrs_bal = [f.concept for f in ifrs.area("balance_sheet")]
+ifrs_cf = [f.concept for f in ifrs.area("cash_flow")]
+ifrs_ung = [f.concept for f in ifrs.area(tf.UNGROUPED)]
+
+check("ifrs-full Revenue lands in the income statement", "ifrs-full:Revenue" in ifrs_inc)
+check("ifrs-full ProfitLoss lands in the income statement", "ifrs-full:ProfitLoss" in ifrs_inc)
+check("ifrs-full Assets lands in the balance sheet", "ifrs-full:Assets" in ifrs_bal)
+check("ifrs-full Equity lands in the balance sheet", "ifrs-full:Equity" in ifrs_bal)
+check("ifrs-full operating cash flow lands in cash flow",
+      "ifrs-full:CashFlowsFromUsedInOperatingActivities" in ifrs_cf)
+check("an ifrs-full concept the grouping does not cover is ungrouped, not dropped",
+      "ifrs-full:NumberOfEmployees" in ifrs_ung)
+check("area_of groups ifrs-full concepts",
+      tf.area_of("ifrs-full:Revenue") == "income_statement"
+      and tf.area_of("ifrs-full:Assets") == "balance_sheet")
+check("an unknown taxonomy stays ungrouped",
+      tf.area_of("srt:SomeConcept") == tf.UNGROUPED)
+
+# --------------------------------------------------------------------------- #
 if failures:
     print(f"\n{len(failures)} FAILURE(S):")
     for f in failures:

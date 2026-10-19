@@ -14,9 +14,10 @@ in advance -- measured on Apple (CIK 0000320193) on 2026-09-24, a single
 tags. So the fields are read off the filing's own facts here, never authored.
 
 What is NOT in `companyfacts` is the statement each concept belongs to: the
-income-statement / balance-sheet / cash-flow grouping lives in the us-gaap
-taxonomy's presentation linkbases, not in the facts payload. `STATEMENT_AREAS`
-carries that grouping -- it is the taxonomy's, keyed by concept, applied to
+income-statement / balance-sheet / cash-flow grouping lives in the taxonomy's
+presentation linkbases, not in the facts payload. `STATEMENT_AREAS` (us-gaap)
+and `IFRS_STATEMENT_AREAS` (ifrs-full, which most 20-F/40-F filers tag in)
+carry that grouping -- it is the taxonomy's, keyed by concept, applied to
 whatever concepts the filing turns out to tag. A concept the grouping does not
 cover is returned under an explicit "ungrouped" bucket, never dropped.
 
@@ -81,6 +82,33 @@ STATEMENT_AREAS = {
     },
 }
 
+# The ifrs-full taxonomy's statement grouping. Foreign annual reports (20-F,
+# 40-F) and transition-period reports tag in `ifrs-full` rather than `us-gaap`,
+# and its concept names differ (`Revenue`, not `Revenues`; `ProfitLoss`, not
+# `NetIncomeLoss`), so the grouping is kept separate rather than merged into the
+# us-gaap one. Same rule: only the common statement line items are enumerated,
+# and anything else a filing tags falls to the explicit "ungrouped" bucket.
+IFRS_STATEMENT_AREAS = {
+    "income_statement": {
+        "Revenue",
+        "ProfitLoss",
+        "ProfitLossAttributableToOwnersOfParent",
+        "BasicEarningsLossPerShare",
+        "DilutedEarningsLossPerShare",
+    },
+    "balance_sheet": {
+        "Assets",
+        "Liabilities",
+        "Equity",
+        "CashAndCashEquivalents",
+    },
+    "cash_flow": {
+        "CashFlowsFromUsedInOperatingActivities",
+        "CashFlowsFromUsedInInvestingActivities",
+        "CashFlowsFromUsedInFinancingActivities",
+    },
+}
+
 # The bucket a concept lands in when the taxonomy's grouping above does not
 # cover it -- returned explicitly, never silently dropped.
 UNGROUPED = "ungrouped"
@@ -88,23 +116,38 @@ UNGROUPED = "ungrouped"
 # The stable order groups are reported in; `UNGROUPED` always sorts last.
 AREA_ORDER = ("income_statement", "balance_sheet", "cash_flow", UNGROUPED)
 
-# Concept -> statement area, inverted from STATEMENT_AREAS once at import.
+# Concept -> statement area, inverted from each taxonomy's grouping once at
+# import. A bare (unqualified) concept name uses the us-gaap grouping.
 _AREA_OF = {
     concept: area
     for area, concepts in STATEMENT_AREAS.items()
     for concept in concepts
+}
+_IFRS_AREA_OF = {
+    concept: area
+    for area, concepts in IFRS_STATEMENT_AREAS.items()
+    for concept in concepts
+}
+# The grouping to apply per taxonomy; a taxonomy not listed here is ungrouped.
+_AREA_BY_TAXONOMY = {
+    "us-gaap": _AREA_OF,
+    "ifrs-full": _IFRS_AREA_OF,
 }
 
 
 def area_of(concept):
     """The statement area a concept belongs to, or ``UNGROUPED`` if the
     taxonomy's grouping does not cover it. Accepts either a bare concept name
-    (``NetIncomeLoss``) or a taxonomy-qualified one (``us-gaap:NetIncomeLoss``);
-    only us-gaap concepts are grouped, everything else is ungrouped."""
-    taxonomy, _, bare = concept.rpartition(":")
-    if taxonomy and taxonomy != "us-gaap":
+    (``NetIncomeLoss``) or a taxonomy-qualified one (``us-gaap:NetIncomeLoss``,
+    ``ifrs-full:Revenue``); us-gaap and ifrs-full concepts are grouped, and a
+    bare name is treated as us-gaap. Any other taxonomy is ungrouped."""
+    taxonomy, sep, bare = concept.rpartition(":")
+    if not sep:
+        return _AREA_OF.get(bare, UNGROUPED)
+    mapping = _AREA_BY_TAXONOMY.get(taxonomy)
+    if mapping is None:
         return UNGROUPED
-    return _AREA_OF.get(bare, UNGROUPED)
+    return mapping.get(bare, UNGROUPED)
 
 
 # ── Period + occurrence shapes ───────────────────────────────────────────────
@@ -357,4 +400,30 @@ if __name__ == "__main__":
     assert "us-gaap:StandardProductWarrantyAccrual" in \
         [f.concept for f in filing.area(UNGROUPED)]
     assert len(empty) == 0 and empty.reason
+
+    # An ifrs-full 20-F (foreign annual report) groups just like us-gaap does.
+    ifrs_20f = {
+        "cik": 2, "entityName": "Foreign Filer PLC",
+        "facts": {"ifrs-full": {
+            "Revenue": {"label": "Revenue", "units": {"EUR": [
+                {"start": "2023-01-01", "end": "2023-12-31", "val": 100,
+                 "form": "20-F", "accn": "0000000002-24-000001", "filed": "2024-03-01"}]}},
+            "Assets": {"label": "Assets", "units": {"EUR": [
+                {"end": "2023-12-31", "val": 500,
+                 "form": "20-F", "accn": "0000000002-24-000001", "filed": "2024-03-01"}]}},
+            "CashFlowsFromUsedInOperatingActivities": {
+                "label": "Cash flows from operating activities", "units": {"EUR": [
+                    {"start": "2023-01-01", "end": "2023-12-31", "val": 80,
+                     "form": "20-F", "accn": "0000000002-24-000001", "filed": "2024-03-01"}]}},
+            "NumberOfEmployees": {"label": "Number of employees", "units": {"pure": [
+                {"end": "2023-12-31", "val": 42,
+                 "form": "20-F", "accn": "0000000002-24-000001", "filed": "2024-03-01"}]}},
+        }},
+    }
+    ifrs = fields_for_filing(ifrs_20f, "20-F", "0000000002-24-000001")
+    assert "ifrs-full:Revenue" in [f.concept for f in ifrs.area("income_statement")]
+    assert "ifrs-full:Assets" in [f.concept for f in ifrs.area("balance_sheet")]
+    assert "ifrs-full:CashFlowsFromUsedInOperatingActivities" in \
+        [f.concept for f in ifrs.area("cash_flow")]
+    assert "ifrs-full:NumberOfEmployees" in [f.concept for f in ifrs.area(UNGROUPED)]
     print("\ntaxonomy_fields self-check: PASS")

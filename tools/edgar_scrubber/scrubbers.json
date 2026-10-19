@@ -29,6 +29,42 @@
       "field_source": "taxonomy"
     },
     {
+      "id": "20-f",
+      "form_type": "20-F",
+      "display_name": "20-F foreign annual report",
+      "purpose": "Foreign private issuer annual report: audited financials, usually tagged in ifrs-full.",
+      "q": "",
+      "forms": ["20-F"],
+      "field_source": "taxonomy"
+    },
+    {
+      "id": "40-f",
+      "form_type": "40-F",
+      "display_name": "40-F Canadian annual report",
+      "purpose": "Canadian MJDS annual report: audited full-year financials carried as XBRL facts.",
+      "q": "",
+      "forms": ["40-F"],
+      "field_source": "taxonomy"
+    },
+    {
+      "id": "10-kt",
+      "form_type": "10-KT",
+      "display_name": "10-KT transition annual report",
+      "purpose": "Transition-period annual report filed on a fiscal-year change; XBRL-tagged like a 10-K.",
+      "q": "",
+      "forms": ["10-KT"],
+      "field_source": "taxonomy"
+    },
+    {
+      "id": "10-qt",
+      "form_type": "10-QT",
+      "display_name": "10-QT transition quarterly report",
+      "purpose": "Transition-period quarterly report filed on a fiscal-year change; XBRL-tagged like a 10-Q.",
+      "q": "",
+      "forms": ["10-QT"],
+      "field_source": "taxonomy"
+    },
+    {
       "id": "424b2",
       "form_type": "424B2",
       "display_name": "424B2 structured notes",
