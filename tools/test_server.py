@@ -1895,6 +1895,168 @@ finally:
     server._FILER_NAMES.clear()
 
 # --------------------------------------------------------------------------- #
+section("research assistant -- proposal batches (plan, edit, approve, caps)")
+# --------------------------------------------------------------------------- #
+# Nothing the assistant proposes may run without the user approving THAT batch
+# by id. Exercised with a fake provider (no model) and a stubbed search (no
+# network): the plan step must store a proposal and touch nothing executable,
+# and only an approve of a specific id may run the stored searches, full-text
+# only and hard-capped at 20 hits apiece.
+
+# A fake provider returns a canned plan and records that it was asked -- no
+# model, no key, no network. build_research_provider is the seam we replace.
+class _FakeResearchProvider:
+    def __init__(self, payload):
+        self.payload, self.calls = payload, 0
+
+    def complete(self, system, messages):
+        self.calls += 1
+        return json.dumps(self.payload)
+
+
+# A stub search records every call (and its max_results) and returns a hit.
+class _StubSearch:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, params):
+        self.calls.append(dict(params))
+        return {"returned": 1, "total": 1, "hits": [{"accession": "a-%d" % len(self.calls),
+                                                     "q": params.get("q")}]}
+
+
+_two_plan = {
+    "reply": "Proposing two searches.",
+    "searches": [
+        {"q": "contingent coupon", "forms": ["424B2"], "ciks": [],
+         "startdt": "", "enddt": "", "rationale": "the coupon terms"},
+        {"q": "buffer", "forms": [], "ciks": ["AAPL"], "startdt": "",
+         "enddt": "", "rationale": "the buffer"},
+    ],
+}
+
+_stub_search = _StubSearch()
+_prev_search = server.edgar_search
+_prev_build = server.build_research_provider
+_prev_research = server.RESEARCH
+_fake_provider = _FakeResearchProvider(_two_plan)
+server.edgar_search = _stub_search
+server.build_research_provider = lambda name: _fake_provider
+server.RESEARCH = server.ResearchBatchStore()      # this test's counts only
+
+_rb_httpd = _THS(("127.0.0.1", 0), _partial(server.Handler, directory=str(server.REPO_ROOT)))
+threading.Thread(target=_rb_httpd.serve_forever, daemon=True).start()
+_rb_base = "http://127.0.0.1:%d" % _rb_httpd.server_address[1]
+_RB = "/api/tools/research"
+
+
+def _rb_req(method, path, payload, origin=None):
+    headers = {"Content-Type": "application/json"}
+    if origin:
+        headers["Origin"] = origin
+    req = urllib.request.Request(
+        _rb_base + _RB + path, data=json.dumps(payload).encode("utf-8"),
+        headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8") or "{}")
+
+
+# -- plan: stores a proposal, runs nothing ----------------------------------
+_st, _b = _rb_req("POST", "/plan", {"provider": "fake", "message": "coupons?",
+                                    "chat_id": "c1"})
+check("POST /plan stores a batch with status 'proposed'",
+      _st == 200 and _b["status"] == "proposed")
+check("...carrying the validated searches", len(_b["searches"]) == 2)
+check("...after asking the provider exactly once", _fake_provider.calls == 1)
+check("POST /plan does NOT call the search function", _stub_search.calls == [])
+_bid = _b["batch_id"]
+
+_st, _b = _rb_req("POST", "/plan", {"provider": "fake", "message": "", "chat_id": "c1"})
+check("POST /plan with an empty message is a 400", _st == 400)
+
+# -- edit: validated, proposed-only -----------------------------------------
+_st, _b = _rb_req("PUT", "/batch/%s" % _bid,
+                  {"searches": [{"q": "x", "forms": ["FORM!"], "ciks": [],
+                                 "startdt": "", "enddt": ""}]})
+check("PUT with an invalid form code returns 400", _st == 400)
+
+_st, _b = _rb_req("PUT", "/batch/%s" % _bid,
+                  {"searches": [{"q": "only one", "forms": ["10-K"], "ciks": [],
+                                 "startdt": "", "enddt": "", "rationale": "r"}]})
+check("a valid edit replaces the stored searches",
+      _st == 200 and len(_b["searches"]) == 1 and _b["searches"][0]["q"] == "only one")
+
+_st, _b = _rb_req("PUT", "/batch/%s" % _bid,
+                  {"searches": [{"q": "q%d" % i, "forms": [], "ciks": [],
+                                 "startdt": "", "enddt": ""} for i in range(6)]})
+check("an edit to 6 searches is refused with 400", _st == 400)
+
+_st, _b = _rb_req("PUT", "/batch/does-not-exist",
+                  {"searches": [{"q": "x", "forms": [], "ciks": [],
+                                 "startdt": "", "enddt": ""}]})
+check("PUT to an unknown batch is a 404", _st == 404)
+
+# A foreign Origin is refused the same as on POST.
+_st, _b = _rb_req("PUT", "/batch/%s" % _bid,
+                  {"searches": []}, origin="http://evil.example")
+check("a cross-origin PUT is refused 403", _st == 403)
+
+# -- approve: runs the stored searches, capped, once ------------------------
+_st, _b = _rb_req("POST", "/batch/%s/approve" % _bid, {})
+check("POST approve runs the batch and marks it 'ran'",
+      _st == 200 and _b["status"] == "ran")
+check("approve ran exactly the stored search(es)",
+      len(_stub_search.calls) == 1 and _stub_search.calls[0]["q"] == "only one")
+check("each search was capped at max_results <= 20",
+      all(c["max_results"] <= 20 for c in _stub_search.calls))
+check("the hits are stored on the batch",
+      _b["hits"] and _b["hits"][0]["result"]["returned"] == 1)
+
+_st, _b = _rb_req("POST", "/batch/%s/approve" % _bid, {})
+check("a second approve returns 409", _st == 409)
+check("...and did not re-run the searches", len(_stub_search.calls) == 1)
+
+_st, _b = _rb_req("PUT", "/batch/%s" % _bid,
+                  {"searches": [{"q": "late", "forms": [], "ciks": [],
+                                 "startdt": "", "enddt": ""}]})
+check("editing a batch that already ran returns 409", _st == 409)
+
+_st, _b = _rb_req("POST", "/batch/no-such/approve", {})
+check("approving an unknown batch is a 404", _st == 404)
+
+# -- caps: at most 20 batches per chat --------------------------------------
+_cap = server.ResearchBatchStore.MAX_BATCHES_PER_CHAT
+for _i in range(_cap):
+    _st, _ = _rb_req("POST", "/plan", {"provider": "f", "message": "m",
+                                       "chat_id": "cap"})
+    if _st != 200:
+        break
+check("a chat accepts up to the batch cap", _st == 200)
+_st, _b = _rb_req("POST", "/plan", {"provider": "f", "message": "m",
+                                    "chat_id": "cap"})
+check("the %dst batch in one chat is refused with 400" % (_cap + 1), _st == 400)
+
+# A model that proposes 6 searches has the 6th dropped by plan(), not stored.
+_fake_provider.payload = {
+    "reply": "too many",
+    "searches": [{"q": "q%d" % i, "forms": [], "ciks": [], "startdt": "",
+                  "enddt": "", "rationale": "r"} for i in range(6)],
+}
+_st, _b = _rb_req("POST", "/plan", {"provider": "f", "message": "m",
+                                    "chat_id": "over"})
+check("a plan proposing 6 searches stores only the 5-search cap",
+      _st == 200 and len(_b["searches"]) == server.ResearchBatchStore.MAX_SEARCHES)
+check("...and records the dropped 6th", bool(_b["dropped"]))
+
+_rb_httpd.shutdown()
+server.edgar_search = _prev_search
+server.build_research_provider = _prev_build
+server.RESEARCH = _prev_research
+
+# --------------------------------------------------------------------------- #
 if failures:
     print(f"\n{len(failures)} FAILURE(S):")
     for f in failures:

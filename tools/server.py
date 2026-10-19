@@ -2128,6 +2128,222 @@ def start_fr_brief(params):
     return run_id
 
 
+# --------------------------------------------------------------------------- #
+# Research assistant: proposal batches (issue #285)
+#
+# The assistant (research_assistant.py, #280) is a PLANNER -- it turns a question
+# into proposed EDGAR full-text searches and never runs them. This is the gate
+# between a proposal and a run: nothing the model suggests touches the SEC until
+# the user approves THIS batch by its id. The server holds each batch, lets the
+# user edit it while it is still only a proposal, and on approval runs every
+# stored search through the same `edgar_search` the search box uses -- full-text
+# search only, `max_results` hard-capped at 20 so an approval can never fan out
+# into an unbounded crawl.
+#
+# In-memory like the run registry: a proposal is a pending decision, not a
+# record. The caps (5 searches a batch, 20 batches a chat, one batch running at a
+# time) bound how much a single approval -- or a runaway planner loop -- can
+# spend.
+# --------------------------------------------------------------------------- #
+
+# The hard ceiling on hits an approved search may fetch. 20 is enough to judge
+# whether a query is on target without turning one approval into a bulk pull;
+# `edgar_search` would otherwise default to 25 and allow up to 100.
+RESEARCH_MAX_RESULTS = 20
+
+
+class ResearchBatchStore:
+    """Proposed search batches, held under an id until the user approves one.
+
+    Thread-safe, in-memory. A batch is `{batch_id, chat_id, searches, status}`
+    where `status` walks "proposed" -> "running" -> "ran" (and back to
+    "proposed" if a run errors, so a transient failure is retryable). Only a
+    "proposed" batch may be edited or approved; everything else is a 409.
+    """
+
+    MAX_SEARCHES = 5
+    MAX_BATCHES_PER_CHAT = 20
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._batches = {}
+        self._seq = 0
+        # One batch may run at a time per server: an approval spends SEC
+        # requests, and two approvals racing would blow the rate budget. A
+        # non-blocking acquire means a second approve is refused (409), not
+        # queued behind the first.
+        self._running = threading.Lock()
+
+    def _copy(self, batch_id):
+        b = self._batches.get(batch_id)
+        return json.loads(json.dumps(b)) if b else None
+
+    def create(self, chat_id, searches, reply="", dropped=None):
+        """Store a proposed batch. Raises ValueError (surfaced as 400) past the
+        per-chat cap, so a runaway planner cannot pile up batches forever."""
+        with self._lock:
+            n = sum(1 for b in self._batches.values() if b["chat_id"] == chat_id)
+            if n >= self.MAX_BATCHES_PER_CHAT:
+                raise ValueError(
+                    "chat %r already holds %d batches (the limit)"
+                    % (chat_id, self.MAX_BATCHES_PER_CHAT))
+            self._seq += 1
+            batch_id = "batch-%04d" % self._seq
+            self._batches[batch_id] = {
+                "batch_id": batch_id, "chat_id": chat_id,
+                "searches": list(searches), "status": "proposed",
+                "reply": reply or "", "dropped": list(dropped or []),
+                "hits": None, "created_at": utcnow(), "ran_at": None,
+            }
+            return self._copy(batch_id)
+
+    def get(self, batch_id):
+        with self._lock:
+            return self._copy(batch_id)
+
+    def replace_searches(self, batch_id, searches):
+        """Replace a PROPOSED batch's searches with the user's edited list.
+
+        Returns (batch, None) on success; (None, 404) for an unknown id; (None,
+        409) once the batch has left "proposed" -- the searches that ran are the
+        record of what ran, and editing them after the fact would rewrite it."""
+        with self._lock:
+            b = self._batches.get(batch_id)
+            if b is None:
+                return None, 404
+            if b["status"] != "proposed":
+                return None, 409
+            b["searches"] = list(searches)
+            return self._copy(batch_id), None
+
+    def begin_approve(self, batch_id):
+        """Claim a proposed batch for running. Returns (searches, None) on
+        success, having set the batch "running" and taken the server-wide run
+        lock; else (None, 404) / (None, 409). The caller MUST pair every success
+        with exactly one `finish_approve` or `abort_approve` to release it."""
+        if not self._running.acquire(blocking=False):
+            return None, 409          # another batch is mid-run on this server
+        try:
+            with self._lock:
+                b = self._batches.get(batch_id)
+                if b is None:
+                    self._running.release()
+                    return None, 404
+                if b["status"] != "proposed":
+                    self._running.release()
+                    return None, 409
+                b["status"] = "running"
+                return list(b["searches"]), None
+        except BaseException:
+            self._running.release()
+            raise
+
+    def finish_approve(self, batch_id, hits):
+        """Record the hits and mark the batch "ran", then release the run lock."""
+        try:
+            with self._lock:
+                b = self._batches.get(batch_id)
+                if b is not None:
+                    b["hits"] = hits
+                    b["status"] = "ran"
+                    b["ran_at"] = utcnow()
+                return self._copy(batch_id)
+        finally:
+            self._running.release()
+
+    def abort_approve(self, batch_id):
+        """A run failed before it finished: return the batch to "proposed" so it
+        can be approved again, and release the run lock."""
+        try:
+            with self._lock:
+                b = self._batches.get(batch_id)
+                if b is not None and b["status"] == "running":
+                    b["status"] = "proposed"
+        finally:
+            self._running.release()
+
+
+RESEARCH = ResearchBatchStore()
+
+
+def build_research_provider(name):
+    """A research_assistant Provider from a short name ("ollama" / "claude").
+
+    A seam, not just a dispatch: the tests replace this wholesale with a fake
+    provider so `/plan` is exercisable with no model, no key, and no network."""
+    import research_assistant as ra
+    key = (name or "").strip().lower()
+    if key in ("", "ollama", "local"):
+        from ollama_client import OllamaClient, OllamaConfig
+        return ra.OllamaProvider(OllamaClient(OllamaConfig.from_env({})))
+    if key == "claude":
+        return ra.ClaudeProvider()
+    raise ValueError("unknown research provider: %r" % name)
+
+
+def research_plan(params):
+    """POST /plan: ask the chosen provider for a batch and STORE it, proposed.
+
+    This spends a model call and nothing else -- the searches it proposes do not
+    touch the SEC until the batch is approved by id. Raises ValueError (400) for
+    a missing field or past the per-chat cap."""
+    import research_assistant as ra
+    chat_id = (params.get("chat_id") or "").strip()
+    message = params.get("message")
+    if not chat_id:
+        raise ValueError("chat_id is required")
+    if not isinstance(message, str) or not message.strip():
+        raise ValueError("message is required")
+    provider = build_research_provider(params.get("provider"))
+    result = ra.plan(provider, message)
+    return RESEARCH.create(chat_id, [s.to_dict() for s in result.searches],
+                           reply=result.reply, dropped=result.dropped)
+
+
+def research_edit(batch_id, params):
+    """PUT /batch/{id}: (status, body). Re-validates the edited searches with
+    the planner's own `validate_searches`; a single bad entry (an invalid form
+    code, or a 6th search past the cap) rejects the WHOLE edit as 400 rather
+    than quietly keeping the good ones -- the user approves what they see."""
+    import research_assistant as ra
+    kept, dropped = ra.validate_searches(params.get("searches"))
+    if dropped:
+        return 400, {"error": "edit rejected: every search must be valid",
+                     "dropped": dropped}
+    batch, err = RESEARCH.replace_searches(batch_id, [s.to_dict() for s in kept])
+    if err == 404:
+        return 404, {"error": "no such batch: %r" % batch_id}
+    if err == 409:
+        return 409, {"error": "this batch is no longer a proposal and cannot be edited"}
+    return 200, batch
+
+
+def approve_research_batch(batch_id):
+    """POST /batch/{id}/approve: (status, body). Runs every stored search through
+    `edgar_search` -- full-text search only, `max_results` capped at 20 -- and
+    stores the hits. A second approve (the batch already ran, or another batch is
+    running) is a 409, never a re-run."""
+    searches, err = RESEARCH.begin_approve(batch_id)
+    if err == 404:
+        return 404, {"error": "no such batch: %r" % batch_id}
+    if err == 409:
+        return 409, {"error": "batch cannot be approved: it already ran, or "
+                              "another batch is running on this server"}
+    try:
+        results = []
+        for s in searches:
+            # Only the efts fields, and max_results pinned to the 20-hit cap: an
+            # approval runs the searches the user saw, at a bounded size, never a
+            # larger query the stored batch could carry.
+            p = {k: s.get(k) for k in ("q", "forms", "ciks", "startdt", "enddt")}
+            p["max_results"] = RESEARCH_MAX_RESULTS
+            results.append({"query": s, "result": edgar_search(p)})
+    except Exception:
+        RESEARCH.abort_approve(batch_id)
+        raise
+    return 200, RESEARCH.finish_approve(batch_id, results)
+
+
 def start_preview(params):
     """Run a check in the background so the browser can watch it.
 
@@ -3627,6 +3843,20 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"error": str(exc)}, 404)
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/tools/research/plan":
+            # Stores a proposed batch; spends a model call, no SEC request. The
+            # searches do not run until the batch is approved by id below.
+            try:
+                return self._json(research_plan(params), 200)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        m = re.fullmatch(r"/api/tools/research/batch/([\w.-]+)/approve", path)
+        if m:
+            try:
+                status, body = approve_research_batch(m.group(1))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+            return self._json(body, status)
         m = re.fullmatch(r"/api/runs/([\w.-]+)/stop", path)
         if m:
             ok = RUNS.request_stop(m.group(1))
@@ -3670,6 +3900,33 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
             return self._json({"run_id": run_id}, 202)
+        return self._json({"error": "unknown endpoint"}, 404)
+
+    def do_PUT(self):
+        path = urlparse(self.path).path
+
+        # Same cross-origin refusal as POST: a PUT edits a stored proposal, which
+        # is a state change any page in the browser could try to drive.
+        origin = self.headers.get("Origin")
+        if origin:
+            allowed = {f"http://{self.headers.get('Host', '')}",
+                       f"https://{self.headers.get('Host', '')}"}
+            if origin not in allowed:
+                return self._json({"error": f"cross-origin PUT refused (Origin: {origin})"}, 403)
+
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            params = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            return self._json({"error": "body must be JSON"}, 400)
+
+        m = re.fullmatch(r"/api/tools/research/batch/([\w.-]+)", path)
+        if m:
+            try:
+                status, body = research_edit(m.group(1), params)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+            return self._json(body, status)
         return self._json({"error": "unknown endpoint"}, 404)
 
     def log_message(self, fmt, *args):
