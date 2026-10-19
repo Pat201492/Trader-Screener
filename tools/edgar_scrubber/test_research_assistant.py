@@ -410,6 +410,25 @@ def run_conversation_checks():
           ra.PLAN_SCHEMA["properties"]["searches"]["minItems"] == 0
           and "question" in ra.PLAN_SCHEMA["required"])
     run_insider_checks(sp)
+    run_item_checks(sp)
+
+
+def run_item_checks(sp):
+    # #321: a search may carry 8-K item codes; a bad code drops it.
+    kept, why = ra.validate_searches([
+        {"q": "", "forms": ["8-K"], "ciks": [], "startdt": "", "enddt": "",
+         "items": ["5.02", " 5.02 ", "2.02"], "rationale": "CEO changes"},
+        {"q": "", "forms": ["8-K"], "ciks": [], "startdt": "", "enddt": "",
+         "items": ["5.99"], "rationale": "bad"}], today=TODAY)
+    check("items: a search with real item codes validates, deduplicated",
+          len(kept) == 1 and kept[0].items == ["5.02", "2.02"]
+          and kept[0].to_dict()["items"] == ["5.02", "2.02"])
+    check("items: a bad item code drops the search with a reason",
+          any("search 2" in w and "5.99" in w for w in why))
+    check("items: the schema requires items on every search",
+          "items" in ra._SEARCH_SCHEMA["required"])
+    check("items: the prompt maps event questions to 8-K item codes",
+          "5.02" in sp and "8-K item codes" in sp)
 
 
 def run_insider_checks(sp):
