@@ -43,7 +43,12 @@ DEFAULT_QUERIES_DIR = Path(__file__).resolve().parent / "queries"
 #                 list (424B2 structured notes). A prose form does NOT state
 #                 its contents, so the fields have to be authored as a field
 #                 spec (#102) and pulled by the model.
-FIELD_SOURCES = ("taxonomy", "spec")
+#   "xml"      -- the form ships a dedicated XML form document whose own schema
+#                 names every field (13F holdings, Form D, ownership forms).
+#                 Reserved here for the later issues that add such a scrubber;
+#                 no registry entry uses it yet, but a value the validator will
+#                 reject is a value no one can author toward.
+FIELD_SOURCES = ("taxonomy", "spec", "xml")
 
 
 class ScrubberError(ValueError):
@@ -162,6 +167,19 @@ def load_scrubbers(path=None):
             raise ScrubberError(f"scrubber {s.id!r}: duplicate id in registry")
         scrubbers[s.id] = s
     return scrubbers
+
+
+def supported_forms(path=None):
+    """Every form type any registered scrubber owns, upper-cased and sorted.
+
+    A scrubber's `forms` filter can list more than its `form_type` (an alias or
+    an amendment variant), so this unions every entry's `forms` rather than only
+    collecting `form_type`. This is the set a run can actually extract -- a form
+    outside it has no scrubber."""
+    forms = set()
+    for s in load_scrubbers(path).values():
+        forms.update(f.upper() for f in s.forms)
+    return sorted(forms)
 
 
 def resolve_scrubber(query, scrubbers):
