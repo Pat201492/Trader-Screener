@@ -328,55 +328,85 @@ def edgar_search(params):
         # efts filters server-side on `ciks`; zero-padding is what the API wants.
         extra["ciks"] = ",".join(c.zfill(10) for c in ciks)
 
-    page = client.full_text_search(q=q or None, forms=forms or None,
-                                    startdt=params.get("startdt") or None,
-                                    enddt=params.get("enddt") or None, **extra)
-    total, saturated = search_total(page)
-
+    # One efts page is the newest 100. An item filter keeps only some of each
+    # page, so with `items` set further pages are read (#335) -- until enough
+    # matching hits are found, the matches run out, or ITEMS_PAGE_CAP pages
+    # (1,000 filings) have been scanned. Without `items`: exactly one request.
+    page_cap = ITEMS_PAGE_CAP if items else 1
     hits, seen = [], set()
-    raw_hits = ((page.get("hits", {}) or {}).get("hits", []) or [])
+    total, saturated = 0, False
+    scanned = pages = 0
     stopped_early = False
-    for h in raw_hits:
-        if len(hits) >= max_results:
-            stopped_early = True        # more hits on this page than asked for
+    while pages < page_cap:
+        page = client.full_text_search(q=q or None, forms=forms or None,
+                                        startdt=params.get("startdt") or None,
+                                        enddt=params.get("enddt") or None,
+                                        from_=scanned, **extra)
+        if pages == 0:
+            total, saturated = search_total(page)
+        pages += 1
+        raw_hits = ((page.get("hits", {}) or {}).get("hits", []) or [])
+        scanned += len(raw_hits)
+        for h in raw_hits:
+            if len(hits) >= max_results:
+                stopped_early = True    # more hits on this page than asked for
+                break
+            _add_search_hit(h, hits, seen, exclude, items, parse_hit)
+        if stopped_early or len(hits) >= max_results:
             break
-        info = parse_hit(h)
-        if not info.get("accession") or info["accession"] in seen:
-            continue
-        if exclude & set(info.get("ciks") or []):
-            continue
-        src = h.get("_source") or {}
-        hit_items = [str(i) for i in (src.get("items") or [])]
-        if items and not set(items) & set(hit_items):
-            continue
-        seen.add(info["accession"])
-        row = {k: info.get(k) for k in
-               ("accession", "document", "issuer", "cik", "form",
-                "file_date", "tickers")}
-        # An 8-K's item codes say what happened (2.02 earnings, 5.02 officer
-        # change); the industry codes ride along for the same no-read screening.
-        row["items"] = hit_items
-        row["sics"] = [str(s) for s in (src.get("sics") or [])]
-        row.update(edgar_urls(row.get("cik"), row.get("accession"), row.get("document")))
-        hits.append(row)
+        if len(raw_hits) < EFTS_PAGE or scanned >= total:
+            break                       # the matches ran out
 
     # `saturated` only means EDGAR's own 10,000 cap. The cap that actually bites
     # is ours and EDGAR's page: a 30-day market-wide Form 4 search matched 9,671
     # and showed only the newest day, which read as "the dates are ignored"
     # (2026-10-19). `truncated` says older matches were not shown, and
     # `oldest_returned` says from when.
-    truncated = bool(stopped_early or total > len(raw_hits))
+    truncated = bool(stopped_early or total > scanned)
     dates = [h["file_date"] for h in hits if h.get("file_date")]
-    return {"total": total, "saturated": saturated, "returned": len(hits),
-            "truncated": truncated, "oldest_returned": min(dates) if dates else None,
-            # The item filter applies to the hits EDGAR returned, so a truncated
-            # page stays truncated: older matching 8-Ks may not be shown.
-            "items_filtered": bool(items),
-            "hits": hits,
-            "search_url": edgar_search_url(q, forms, ciks,
-                                            params.get("startdt"), params.get("enddt")),
-            "query": {"q": q, "forms": forms, "ciks": ciks, "items": items,
-                      "startdt": params.get("startdt"), "enddt": params.get("enddt")}}
+    out = {"total": total, "saturated": saturated, "returned": len(hits),
+           "truncated": truncated, "oldest_returned": min(dates) if dates else None,
+           # The item filter applies to the filings scanned, so older matching
+           # 8-Ks past the scan may not be shown.
+           "items_filtered": bool(items), "pages_scanned": pages,
+           "hits": hits,
+           "search_url": edgar_search_url(q, forms, ciks,
+                                           params.get("startdt"), params.get("enddt")),
+           "query": {"q": q, "forms": forms, "ciks": ciks, "items": items,
+                     "startdt": params.get("startdt"), "enddt": params.get("enddt")}}
+    if items:
+        out["items_scan_complete"] = scanned >= total
+    return out
+
+
+# efts returns 100 hits a page; an item-filtered search reads at most
+# ITEMS_PAGE_CAP pages of them.
+EFTS_PAGE = 100
+ITEMS_PAGE_CAP = 10
+
+
+def _add_search_hit(h, hits, seen, exclude, items, parse_hit):
+    """Flatten one efts hit into `hits` unless it is a duplicate, an excluded
+    filer, or (with an item filter) reports none of the wanted 8-K items."""
+    info = parse_hit(h)
+    if not info.get("accession") or info["accession"] in seen:
+        return
+    if exclude & set(info.get("ciks") or []):
+        return
+    src = h.get("_source") or {}
+    hit_items = [str(i) for i in (src.get("items") or [])]
+    if items and not set(items) & set(hit_items):
+        return
+    seen.add(info["accession"])
+    row = {k: info.get(k) for k in
+           ("accession", "document", "issuer", "cik", "form",
+            "file_date", "tickers")}
+    # An 8-K's item codes say what happened (2.02 earnings, 5.02 officer
+    # change); the industry codes ride along for the same no-read screening.
+    row["items"] = hit_items
+    row["sics"] = [str(s) for s in (src.get("sics") or [])]
+    row.update(edgar_urls(row.get("cik"), row.get("accession"), row.get("document")))
+    hits.append(row)
 
 
 def edgar_search_daily(params):
