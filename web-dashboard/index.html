@@ -4727,6 +4727,87 @@ async function renderToolModel(id){
   v.innerHTML=html;
 }
 
+// Dealer Hedging (#343): the real-data causal test -- its coverage, the last
+// real run's 27 trials against the shifted-issuance placebo, and a Run button.
+// Everything comes from /api/tools/dealer-hedging/results, which reads the
+// results file the test itself writes; nothing here is hard-coded.
+let DH_POLL=null;
+async function renderDealerHedging(){
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading…</div>';
+  stopPolling();
+  if(DH_POLL){ clearTimeout(DH_POLL); DH_POLL=null; }
+  const t=await toolEntry('dealer-hedging-barrier-test');
+  if(DEMO_ON||!RUNNER){
+    v.innerHTML=toolHeader(t)+`<div style="padding:20px"><div class="muted">The dealer-hedging test reads the local EDGAR dataset and the pipeline's prices, which needs the tool runner: <code>python tools/server.py</code>.</div></div>`;
+    return;
+  }
+  let d;
+  try{ d=await (await fetch('/api/tools/dealer-hedging/results')).json(); }
+  catch(e){ v.innerHTML=toolHeader(t)+`<div class="err">Could not read the results: ${esc(e.message)}</div>`; return; }
+  const res=d.results, run=d.run||{}, cov=d.coverage;
+  const head=t?{...t,last_run:(res&&res.ran_at)||null}:t;
+  const n=x=>(x==null?'—':Number(x).toLocaleString());
+  const tile=(label,val,sub)=>`<div class="card" style="margin:0;padding:10px 12px"><div class="muted" style="font-size:11px">${esc(label)}</div><div style="font-size:18px;font-weight:600">${val}</div>${sub?`<div class="muted" style="font-size:10.5px">${sub}</div>`:''}</div>`;
+  const covHtml=cov&&!cov.error
+    ? `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:12px">
+        ${tile('Underlyings priced',n(cov.underlyings_priced),cov.underlyings_skipped?`${cov.underlyings_skipped} without prices`:'')}
+        ${tile('424B2 filings counted',n(cov.filings_counted),`${esc(cov.start||'')} → ${esc(cov.end||'')}`)}
+        ${tile('Notes with barriers',n(cov.notes_with_barriers),'sampled, key-terms extractor')}
+        ${tile('Days of OI history',n(d.oi_history_days),d.oi_history_days?'point-in-time, from the pipeline':'none yet: matching is size + ADV')}
+      </div>`
+    : `<div class="muted" style="margin-bottom:12px">No dataset built yet${cov&&cov.error?` (${esc(cov.error)})`:''}. Run with “rebuild the dataset” ticked.</div>`;
+  let verdict;
+  if(!res) verdict=`<div class="muted">No real-data run yet. The status stays <b>inconclusive</b> until one exists.</div>`;
+  else if(!res.ok) verdict=`<div class="warn">Last run did not score trials: ${esc(res.reason||'unknown')}</div>`;
+  else{
+    const sm=res.summary||{}, pc=res.placebo_confirming||[];
+    const color={confirmed:'var(--green)',refuted:'var(--red)',inconclusive:'#e3b341'}[sm.verdict]||'var(--txt)';
+    verdict=`<div style="display:flex;gap:14px;align-items:baseline;flex-wrap:wrap">
+        <div style="font-size:20px;font-weight:700;color:${color}">${esc((sm.verdict||'').toUpperCase())}</div>
+        <div class="muted" style="font-size:12px">${n(sm.n_confirming)} of ${n(sm.n_scored)} scored trials confirm a difference
+          (${n(sm.n_underpowered)} underpowered) · placebo range ${pc.length?Math.min(...pc)+'–'+Math.max(...pc):'—'} over ${pc.length} shifted-issuance runs ·
+          empirical p ${sm.empirical_p!=null?Number(sm.empirical_p).toFixed(3):'—'}</div></div>
+      <div class="muted" style="font-size:11.5px;margin-top:4px">${esc((res.universe||{}).tickers)} underlyings × ${esc((res.universe||{}).days)} trading days ·
+        matched on ${esc((res.universe||{}).matched_on||'')} · ran ${esc(res.ran_at||'')}</div>`;
+  }
+  const f=x=>(x==null?'—':(x>=0?'+':'')+Number(x).toFixed(4));
+  const pv=x=>(x==null?'':` <span class="muted">p=${Number(x).toFixed(3)}</span>`);
+  const trials=(res&&res.ok&&res.trials)?`
+    ${toolSection('Declared trials ('+res.trials.length+')')}
+    <div class="scroll" style="max-height:360px;border:1px solid var(--border);border-radius:6px;margin-bottom:12px">
+    <table style="font-size:11.5px"><tr><th>Window</th><th>Near barrier</th><th>Horizon</th><th class="num">Pairs</th><th>Fwd vol diff</th><th>Pinning diff</th><th></th></tr>
+    ${res.trials.map(r=>`<tr>
+      <td>${r.issuance_window}d</td><td>${(r.proximity_pct*100).toFixed(1)}%</td><td>${r.horizon}d</td>
+      <td class="num">${r.n_pairs}</td>
+      <td>${r.underpowered?'<span class="muted">underpowered</span>':f(r.vol_mean_diff)+pv(r.vol_p)}</td>
+      <td>${r.underpowered?'':f(r.pin_mean_diff)+pv(r.pin_p)}</td>
+      <td>${r.confirms_difference?`<b>${esc(r.direction)}</b>`:''}</td></tr>`).join('')}
+    </table></div>`:'';
+  const running=run.status==='running';
+  const log=(run.log&&run.log.length)?`<pre style="max-height:180px;overflow:auto;font-size:11px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:8px">${esc(run.log.slice(-40).join('\n'))}</pre>`:'';
+  const controls=`<div class="card" style="margin-bottom:12px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button onclick="runDealerHedging()" ${running?'disabled':''} style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">${running?'running…':'Run on real data'}</button>
+        <label class="muted" style="font-size:12px"><input type="checkbox" id="dh_build"> rebuild the dataset first (EDGAR; cached days are not refetched)</label>
+        <span class="muted" style="font-size:11.5px">${run.status&&run.status!=='idle'?`last run: ${esc(run.status)}${run.finished_at?' · '+esc(run.finished_at):''}`:''}</span>
+      </div>${log}</div>`;
+  const hyp=res&&res.hypothesis?`<div class="muted" style="font-size:12px;line-height:1.5;margin-bottom:6px"><b>Hypothesis.</b> ${esc(res.hypothesis)}</div>
+      <div class="muted" style="font-size:12px;line-height:1.5;margin-bottom:12px"><b>Falsifier.</b> ${esc(res.falsifier)}</div>`:'';
+  v.innerHTML=toolHeader(head)+`<div class="card" style="margin-bottom:12px">${verdict}</div>`+
+    toolSection('Data coverage')+covHtml+controls+hyp+trials;
+  if(running) DH_POLL=setTimeout(renderDealerHedging,4000);
+}
+async function runDealerHedging(){
+  const build=!!(document.getElementById('dh_build')||{}).checked;
+  try{
+    const r=await fetch('/api/tools/dealer-hedging/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({build})});
+    const data=await r.json();
+    if(!r.ok&&r.status!==409) throw new Error(data.error||`HTTP ${r.status}`);
+  }catch(e){ alert('Could not start the run: '+e.message); return; }
+  renderDealerHedging();
+}
+
 // Testing: pick two runs, get the per-field before/after. The numbers come from
 // compare_runs.py (#180) through /api/tools/testing/compare, so the page and the
 // CLI cannot disagree about what "spanned" means.
@@ -5819,7 +5900,7 @@ const SECTIONS={
                 ['testing','Testing',renderToolTesting],
                 ['magic-formula','Magic Formula',()=>renderToolModel('magic-formula')],
                 ['smart-money-score','Smart Money',()=>renderToolModel('smart-money-score')],
-                ['dealer-hedging-barrier-test','Dealer Hedging',()=>renderToolModel('dealer-hedging-barrier-test')]]},
+                ['dealer-hedging-barrier-test','Dealer Hedging',()=>renderDealerHedging()]]},
   research:{label:'Research', icon:'🔬', desc:'Hypothesis projects — prediction, evidence, verdict',
           tabs:[['projects','Projects',renderResearchProjects]]},
 };
