@@ -733,15 +733,13 @@ def real_placebo_universe(universe, seed):
     return out
 
 
-# Left out of the real run, with the reason recorded in the results. The index
-# phrases match nearly every 424B2 ("S&P 500" ~56,000 of the year's filings --
-# boilerplate, not underlyings), so their counts cannot rank issuance, and their
-# barrier samples barely parse (SPY 0, IWM 3, QQQ 4 notes; first build,
-# 2026-10-20). Single stocks are named in a filing almost only as underlyings.
-REAL_EXCLUDED = {"SPY": "index phrase matches nearly every 424B2; counts are not issuance",
-                 "QQQ": "index phrase matches nearly every 424B2; counts are not issuance",
-                 "IWM": "index phrase matches nearly every 424B2; counts are not issuance",
-                 "DIA": "index phrase matches nearly every 424B2; counts are not issuance"}
+# Left out of the real run, with the reason recorded in the results. Empty
+# since #354: the first real run (#342) excluded SPY/QQQ/IWM/DIA because the
+# plain index phrase matched nearly every 424B2; indices are now counted by
+# note-title phrases (dealer_hedging_data.INDEX_TITLE_PHRASES).
+REAL_EXCLUDED = {}
+INDEX_COUNT_NOTE = ("an index counts only 424B2s whose title leads with it (\"Linked to the X\", "
+                    "\"... Performing of the X\"); an index listed second in a basket is not counted")
 
 
 def run_real(dataset, prices, oi_by_ticker=None, seeds=REAL_PLACEBO_SEEDS, log=print,
@@ -764,6 +762,7 @@ def run_real(dataset, prices, oi_by_ticker=None, seeds=REAL_PLACEBO_SEEDS, log=p
         log(f"  placebo {seed}: {placebo[-1][0]} confirming")
     summary = determine_verdict(results, placebo)
     meta["control_rule"] = "low_tercile: zero issuance, or bottom third of the day's rank"
+    meta["index_counts"] = INDEX_COUNT_NOTE
     return {"ok": True, "universe": meta, "trials": results, "placebo_confirming": [c for c, _ in placebo],
             "summary": summary, "trial_count": TRIAL_COUNT, "lookahead_posture": LOOKAHEAD_POSTURE}
 

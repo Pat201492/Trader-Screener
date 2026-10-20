@@ -38,6 +38,30 @@ def test_lookalikes_are_not_mapped(name):
     assert dh.ticker_for_name(name) is None
 
 
+def test_index_queries_use_note_title_phrases_stocks_their_name():
+    q = dh.search_query("SPY")
+    assert q == '"Linked to the S&P 500" OR "Linked to the Performance of the S&P 500" OR "Performing of the S&P 500"'
+    assert dh.search_query("NVDA") == '"NVIDIA Corporation"'
+
+
+def test_a_cache_built_with_another_query_is_not_reused():
+    q = dh.search_query("SPY")
+    old_index = {"2026-09-01": 900}                      # plain-phrase era, untagged
+    assert dh._with_query(old_index, q) == ({"_query": q}, True)
+    old_stock = {"2026-09-01": 3}                        # same quoted name: still valid
+    kept, _ = dh._with_query(old_stock, dh.search_query("NVDA"))
+    assert kept["2026-09-01"] == 3 and kept["_query"] == '"NVIDIA Corporation"'
+    other = {"_query": '"something else"', "2026-09-01": 1}
+    assert dh._with_query(other, q)[0] == {"_query": q}
+
+
+def test_index_counts_query_the_title_phrases(tmp_path):
+    c = StubClient()
+    dh.daily_counts(c, "IWM", date(2026, 9, 1), date(2026, 9, 1), cache_dir=tmp_path,
+                    today=date(2026, 10, 1))
+    assert c.calls[0][0] == dh.search_query("IWM") and " OR " in c.calls[0][0]
+
+
 def test_banks_are_not_underlyings():
     assert not {"GS", "JPM", "MS", "C", "BAC", "WFC"} & set(dh.STOCK_UNDERLYINGS)
 

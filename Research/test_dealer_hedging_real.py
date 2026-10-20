@@ -144,12 +144,14 @@ def test_low_tercile_controls_include_low_but_nonzero_issuers():
     assert low["n_treated"] == zero["n_treated"]
 
 
-def test_index_proxies_are_excluded_by_design():
+def test_exclusions_are_recorded_and_applied():
     ds = _dataset()
-    ds["tickers"]["SPY"] = dict(ds["tickers"]["AAA"])
-    res = ct.run_real(ds, _prices(), seeds=(), log=lambda *a: None)
-    assert "SPY" in res["universe"]["excluded_by_design"]
-    assert res["universe"]["tickers"] == 5            # SPY never entered the universe
+    res = ct.run_real(ds, _prices(), seeds=(), log=lambda *a: None, exclude={"EEE": "test"})
+    assert res["universe"]["excluded_by_design"] == {"EEE": "test"}
+    assert res["universe"]["tickers"] == 4            # EEE never entered the universe
+    # Since #354 nothing is excluded by default, and the index rule is stated.
+    full = ct.run_real(ds, _prices(), seeds=(), log=lambda *a: None)
+    assert full["universe"]["excluded_by_design"] == {} and "title" in full["universe"]["index_counts"]
 
 
 def test_run_real_refuses_a_tiny_universe():
