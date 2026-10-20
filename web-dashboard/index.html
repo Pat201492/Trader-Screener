@@ -2911,7 +2911,7 @@ async function runSearch(errTargetId){
     ? `<strong>${data.days_covered}</strong> day(s) with filings · ${data.returned} sampled `
       +`(${data.per_day}/day) · ${data.days_scanned} day(s) scanned, ${data.days_empty} empty`
     : `${data.saturated?'at least ':''}<strong>${data.total}</strong> filing(s) match · showing ${data.returned}`
-      +(data.items_filtered?` <span class="muted">(only those reporting item ${esc((data.query.items||[]).join(', '))} — filtered from the returned page)</span>`:'')
+      +(data.items_filtered?` <span class="muted">(only those reporting item ${esc((data.query.items||[]).join(', '))}${data.items_scan_complete===false?` — scanned the newest ${(data.pages_scanned||1)*100} filings, older ones not checked`:''})</span>`:'')
       +truncatedNote(data);
   renderHits();
 }

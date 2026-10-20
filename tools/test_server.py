@@ -410,6 +410,56 @@ try:
         _bad_item = str(_e)
     check("an unknown item code is refused (the route answers 400)",
           bool(_bad_item) and "5.99" in _bad_item)
+
+    # #335: an item filter pages through efts until it has enough hits.
+    class _PagedClient(_TruncClient):
+        """`total` 8-Ks in pages of 100; only filings on `match_pages` (0-based)
+        report item 5.02. Records each request's offset."""
+        def __init__(self, total, match_pages, **kw):
+            self.total, self.match_pages, self.offsets = total, set(match_pages), []
+
+        def full_text_search(self, from_=0, **kw):
+            self.offsets.append(from_)
+            n = min(100, max(0, self.total - from_))
+            hits = []
+            for i in range(from_, from_ + n):
+                its = ["5.02"] if (i // 100) in self.match_pages else ["8.01"]
+                hits.append({"_id": f"0000000000-26-{i:06d}:d{i}.htm",
+                             "_source": {"adsh": f"0000000000-26-{i:06d}", "ciks": ["0000000001"],
+                                         "display_names": ["X Co (CIK 0000000001)"], "form": "8-K",
+                                         "file_date": "2026-10-15", "items": its}})
+            return {"hits": {"total": {"value": self.total, "relation": "eq"}, "hits": hits}}
+
+    _pc = _PagedClient(1000, [2])
+    _ec_t.EdgarClient = lambda **kw: _pc
+    _r_p = server.edgar_search({"forms": ["8-K"], "items": ["5.02"], "max_results": 20})
+    check("items: matches on page 3 are found, with pages_scanned 3",
+          _r_p["returned"] == 20 and _r_p["pages_scanned"] == 3
+          and _pc.offsets == [0, 100, 200]
+          and all("5.02" in h["items"] for h in _r_p["hits"]))
+    _pc2 = _PagedClient(5000, [])
+    _ec_t.EdgarClient = lambda **kw: _pc2
+    _r_c = server.edgar_search({"forms": ["8-K"], "items": ["5.02"], "max_results": 20})
+    check("items: the scan stops at the page cap and says it is incomplete",
+          _r_c["pages_scanned"] == server.ITEMS_PAGE_CAP and len(_pc2.offsets) == server.ITEMS_PAGE_CAP
+          and _r_c["items_scan_complete"] is False and _r_c["truncated"] is True)
+    _pc3 = _PagedClient(250, [0, 1, 2])
+    _ec_t.EdgarClient = lambda **kw: _pc3
+    _r_all = server.edgar_search({"forms": ["8-K"], "items": ["5.02"], "max_results": 100})
+    check("items: stopping at max_results with filings left is truncated and incomplete",
+          _r_all["pages_scanned"] == 1 and _r_all["returned"] == 100 and _r_all["truncated"] is True
+          and _r_all["items_scan_complete"] is False)
+    _pc4 = _PagedClient(250, [2])
+    _ec_t.EdgarClient = lambda **kw: _pc4
+    _r_end = server.edgar_search({"forms": ["8-K"], "items": ["5.02"], "max_results": 100})
+    check("items: running out of filings ends the scan complete and untruncated",
+          _r_end["pages_scanned"] == 3 and _r_end["returned"] == 50
+          and _r_end["items_scan_complete"] is True and _r_end["truncated"] is False)
+    _pc5 = _PagedClient(5000, [0])
+    _ec_t.EdgarClient = lambda **kw: _pc5
+    _r_one = server.edgar_search({"forms": ["8-K"], "max_results": 25})
+    check("no items filter: exactly one efts request",
+          _pc5.offsets == [0] and _r_one["pages_scanned"] == 1 and "items_scan_complete" not in _r_one)
 finally:
     _ec_t.EdgarClient = _real_ec_t
     if _saved_ua_t is None:
