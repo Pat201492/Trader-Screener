@@ -124,6 +124,40 @@ def _assert_local_destination(path):
             )
 
 
+# ── Underlyings ──────────────────────────────────────────────────────────────
+
+# The `kind` values. Never a name: older writers flattened {"name","kind"}
+# pairs and stored "single_stock" / "index" / "etf" as underlyings of their own
+# (#339; the latest view was cleaned by correction run #0032).
+UNDERLYING_KINDS = frozenset({"single_stock", "index", "etf", "fund", "basket", "rate",
+                              "commodity", "currency", "kind", "name"})
+
+
+def normalize_underlyings(raw):
+    """[(name, kind)] from whatever shape an extractor produced: plain names,
+    {"name", "kind"} dicts, JSON strings of those, or [name, kind] pairs. Kind
+    words and empties are dropped; a repeated name keeps its first kind."""
+    out, seen = [], set()
+    for u in raw or []:
+        if isinstance(u, str) and u.strip().startswith("{"):
+            try:
+                u = json.loads(u)
+            except ValueError:
+                continue                 # a broken blob is not a name either
+        if isinstance(u, dict):
+            name, kind = u.get("name"), u.get("kind")
+        elif isinstance(u, (list, tuple)) and len(u) == 2 and all(isinstance(x, str) for x in u):
+            name, kind = u
+        else:
+            name, kind = u, None
+        name = str(name).strip() if name is not None else ""
+        if not name or name.lower() in UNDERLYING_KINDS or name in seen:
+            continue
+        seen.add(name)
+        out.append((name, kind if isinstance(kind, str) and kind else None))
+    return out
+
+
 # ── Records ──────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -412,13 +446,7 @@ class OutputStore:
              doc.product_type, doc.filing_date),
         )
 
-        for u in doc.underlyings:
-            if isinstance(u, dict):
-                name, kind = u.get("name"), u.get("kind")
-            else:
-                name, kind = str(u), None
-            if not name:
-                continue
+        for name, kind in normalize_underlyings(doc.underlyings):
             self._conn.execute(
                 "INSERT INTO document_underlyings "
                 "(run_id, accession, document, name, kind) VALUES (?, ?, ?, ?, ?)",
