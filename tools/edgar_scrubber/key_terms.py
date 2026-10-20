@@ -629,11 +629,22 @@ def _table_threshold(text, header):
     return (pct, fn.group(1), (s, s + len(fn.group(1)))) if 0 < pct <= 100 else None
 
 
+# One bullet of a per-review-date call premium schedule. Anything between the
+# end of one bullet and the next (the "set forth below:" lead-in, bullets,
+# line breaks) is skipped lazily, up to 120 characters.
+_SCHEDULE_ITEM_RE = re.compile(
+    r"[\s\S]{0,120}?\b[a-z][a-z\-]*\s+review date:\s*(at least\s*)?"
+    r"(\d{1,3}(?:\.\d+)?)\s?%\s*[×x]\s*\$1,000", re.I)
+_DENOM_PROSE_RE = re.compile(
+    r"minimum denominations of \$\s?(\d{1,3}(?:,\d{3})*)(?:\.00)?\s+and integral multiples", re.I)
+
+
 def extract_key_terms(text, fields=None):
     """{field: KeyTermValue} for every field this module can read with
     certainty. Fields it cannot read are absent (left for the model)."""
     wanted = set(fields) if fields else set(FIELD_LABELS) | {
-        "estimated_value_per_1000", "estimated_value_low", "estimated_value_high", "filing_stage"}
+        "estimated_value_per_1000", "estimated_value_low", "estimated_value_high", "filing_stage",
+        "call_premium_schedule"}
     terms = [t for t in parse_terms(text) if not t.label.startswith("hypothetical")]
     known = sorted({lab for labs in FIELD_LABELS.values() for lab in labs}, key=len, reverse=True)
     by_label = {}
@@ -741,6 +752,41 @@ def extract_key_terms(text, fields=None):
                 out["coupon_frequency"] = KeyTermValue("coupon_frequency", val, m.group(1),
                                                        (s0, e0), t.raw_label, "term-prose")
                 break
+
+    # A call premium stated per review date (JPMorgan Review Notes, #334):
+    # "first Review Date: at least 18.5250% x $1,000 * second Review Date: ...".
+    # The schedule runs past a term's length cap, so it is read from the text
+    # after the term's start, one bullet after another, in date order.
+    if "call_premium_schedule" in wanted and "call_premium" not in out:
+        for t in terms:
+            if t.label not in ("call premium amount", "call premium"):
+                continue
+            pos, vals, hedged, first, last = t.value_start, [], False, None, None
+            while True:
+                m = _SCHEDULE_ITEM_RE.match(text, pos)
+                if not m:
+                    break
+                vals.append(float(m.group(2)))
+                hedged = hedged or bool(m.group(1))
+                first = m.start(2) if first is None else first
+                last = m.end(2)
+                pos = m.end()
+            if len(vals) >= 2:
+                out["call_premium_schedule"] = KeyTermValue(
+                    "call_premium_schedule", vals, text[first:last], (first, last),
+                    t.raw_label, "term-schedule", "min" if hedged else None)
+            break
+
+    # JPMorgan states the denomination as a cover bullet, not a term (#336):
+    # "Minimum denominations of $1,000 and integral multiples thereof".
+    if "denomination" in wanted and "denomination" not in out:
+        m = _DENOM_PROSE_RE.search(text)
+        if m:
+            amt = float(m.group(1).replace(",", ""))
+            if 1 <= amt <= 1_000_000:
+                out["denomination"] = KeyTermValue("denomination", amt, m.group(1),
+                                                   (m.start(1), m.end(1)), "denominations",
+                                                   "prose")
 
     preliminary = bool(_PRELIM_RE.search(text[:2000]))
 
