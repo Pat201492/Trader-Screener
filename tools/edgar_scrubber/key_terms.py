@@ -65,6 +65,10 @@ FIELD_LABELS = {
     "autocall_barrier_pct": ("call threshold price", "call threshold value", "call threshold level",
                              "call value", "call level", "call barrier", "autocall level",
                              "autocall barrier", "redemption threshold"),
+    # What an autocall pays on top of principal, as a percent of it. JPMorgan
+    # states it in dollars: "Call Premium Amount:: $147.50 per $1,000" = 14.75.
+    "call_premium": ("call premium amount", "call premium", "call return",
+                     "call premium percentage"),
     "buffer_pct": ("buffer amount", "buffer percentage", "buffer"),
     "downside_leverage": ("downside leverage factor",),
     "underlyings": ("underlyings", "underlying", "underlying stocks", "underlying stock",
@@ -75,7 +79,9 @@ FIELD_LABELS = {
     "issuer": ("issuer", "company (issuer)", "issuer (company)"),
     "maturity_date": ("maturity date", "stated maturity date"),
     "pricing_date": ("pricing date", "trade date"),
-    "issue_date": ("issue date", "original issue date", "settlement date"),
+    # JPMorgan: "Original Issue Date (Settlement Date):: On or about ...".
+    "issue_date": ("issue date", "original issue date", "settlement date",
+                   "original issue date (settlement date)"),
     "contingent_coupon_rate": ("contingent coupon rate", "contingent interest rate",
                                "coupon rate", "interest rate"),
     "coupon_barrier_pct": ("coupon barrier", "coupon barrier level", "coupon threshold price",
@@ -549,6 +555,22 @@ def _parse_for(field, term):
         if not m:
             return None
         return _FREQ[m.group(1).lower().replace("-", "")], m.group(1), _span_of(term, m)
+    if field == "call_premium":
+        # One figure for the note. A schedule ("with respect to each Review
+        # Date is set forth below: first Review Date: 18.5250% ...") is per
+        # date, not one number -- leave it.
+        if re.search(r"each review date|set forth below|\bfirst\b", v[:200], re.I):
+            return None
+        lead = r"(?:at least|not less than|no less than|a minimum of)?\s*"
+        m = re.match(lead + r"\$\s?(\d{1,3}(?:\.\d+)?)\s+per\s+\$1,000\b", v, re.I)
+        if m:
+            pct = round(float(m.group(1)) / 10, 6)
+            return (pct, m.group(1), _span_of(term, m)) if 0 < pct <= 100 else None
+        m = re.match(lead + r"(\d{1,3}(?:\.\d+)?)\s?%", v, re.I)
+        if m:
+            pct = float(m.group(1))
+            return (pct, m.group(1), _span_of(term, m)) if 0 < pct <= 100 else None
+        return None
     if field == "buffer_pct":
         m = re.match(r"(\d{1,2}(?:\.\d+)?)\s?%", v)
         return (float(m.group(1)), m.group(1), _span_of(term, m)) if m else None
@@ -638,7 +660,8 @@ def extract_key_terms(text, fields=None):
             got = _parse_for(field, t)
             bound = None
             if got and not _committed(text, got[2][0], got[2][1]):
-                if field == "contingent_coupon_rate" and _floor(text, got[2][0], got[2][1]):
+                if field in ("contingent_coupon_rate", "call_premium") \
+                        and _floor(text, got[2][0], got[2][1]):
                     bound = "min"
                 else:
                     got = None     # a range / to-be-set figure: the model's call
