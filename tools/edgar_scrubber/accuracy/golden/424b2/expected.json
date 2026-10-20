@@ -323,9 +323,9 @@
     "estimated_value_high": null,
     "filing_stage": "preliminary",
     "underlyings": [
-     "State Street\u00ae Energy Select Sector SPDR\u00ae ETF",
-     "State Street\u00ae Financial Select Sector SPDR\u00ae ETF",
-     "State Street\u00ae Technology Select Sector SPDR\u00ae ETF"
+     "State Street® Energy Select Sector SPDR® ETF",
+     "State Street® Financial Select Sector SPDR® ETF",
+     "State Street® Technology Select Sector SPDR® ETF"
     ],
     "calculation_agent": "Citigroup Global Markets Inc."
    }
@@ -466,6 +466,96 @@
      "Blackstone Inc."
     ],
     "calculation_agent": null
+   }
+  },
+  {
+   "accession": "0001213900-26-104584",
+   "doc": "0001213900-26-104584.txt.gz",
+   "expected": {
+    "issuer": "JPMorgan Chase Financial Company LLC",
+    "guarantor": "JPMorgan Chase & Co.",
+    "cusip": "46661MYA6",
+    "isin": null,
+    "maturity_date": "2029-09-28",
+    "pricing_date": "2026-09-25",
+    "issue_date": "2026-09-30",
+    "contingent_coupon_rate": null,
+    "coupon_barrier_pct": null,
+    "barrier_pct": null,
+    "autocall_barrier_pct": 100.0,
+    "coupon_frequency": null,
+    "denomination": null,
+    "estimated_value_per_1000": 947.8,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "Meta Platforms, Inc.",
+     "NVIDIA Corporation",
+     "Amazon.com, Inc."
+    ],
+    "calculation_agent": null,
+    "call_premium": 14.75
+   }
+  },
+  {
+   "accession": "0001213900-26-103512",
+   "doc": "0001213900-26-103512.txt.gz",
+   "expected": {
+    "issuer": "JPMorgan Chase Financial Company LLC",
+    "guarantor": "JPMorgan Chase & Co.",
+    "cusip": "46661PC54",
+    "isin": null,
+    "maturity_date": "2029-11-01",
+    "pricing_date": "2026-10-27",
+    "issue_date": "2026-10-30",
+    "contingent_coupon_rate": null,
+    "coupon_barrier_pct": null,
+    "barrier_pct": null,
+    "autocall_barrier_pct": 100.0,
+    "coupon_frequency": null,
+    "denomination": null,
+    "estimated_value_per_1000": null,
+    "estimated_value_low": 920.0,
+    "estimated_value_high": null,
+    "filing_stage": "preliminary",
+    "underlyings": [
+     "Micron Technology, Inc.",
+     "NVIDIA Corporation",
+     "Amazon.com, Inc."
+    ],
+    "calculation_agent": null,
+    "call_premium": 18.0
+   }
+  },
+  {
+   "accession": "0001213900-26-100773",
+   "doc": "0001213900-26-100773.txt.gz",
+   "expected": {
+    "issuer": "JPMorgan Chase Financial Company LLC",
+    "guarantor": "JPMorgan Chase & Co.",
+    "cusip": "46661PVS3",
+    "isin": null,
+    "maturity_date": "2029-09-21",
+    "pricing_date": "2026-09-18",
+    "issue_date": "2026-09-23",
+    "contingent_coupon_rate": null,
+    "coupon_barrier_pct": null,
+    "barrier_pct": 70.0,
+    "autocall_barrier_pct": 100.0,
+    "coupon_frequency": null,
+    "denomination": null,
+    "estimated_value_per_1000": null,
+    "estimated_value_low": 900.0,
+    "estimated_value_high": null,
+    "filing_stage": "preliminary",
+    "underlyings": [
+     "NVIDIA Corporation",
+     "Amazon.com, Inc.",
+     "Apple Inc."
+    ],
+    "calculation_agent": null,
+    "call_premium": null
    }
   }
  ]
