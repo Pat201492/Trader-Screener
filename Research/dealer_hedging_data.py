@@ -28,7 +28,7 @@ initial level is not known on the day it becomes public -- and is counted in
 Cached under ~/.edgar-scrubber/research/dealer_hedging/ (past days never
 change, so a rebuild only fetches new days).
 
-  python Research/dealer_hedging_data.py build [--months 12] [--per-month 4]
+  python Research/dealer_hedging_data.py build [--months 36] [--per-month 4]
   python Research/dealer_hedging_data.py coverage
 """
 import argparse
@@ -133,6 +133,23 @@ def search_phrase(ticker):
     return STOCK_UNDERLYINGS[ticker]
 
 
+# The plain index name matches boilerplate in nearly every 424B2 ("S&P 500":
+# ~4,861 of September 2026's ~10,000), so an index is counted by the phrases a
+# note's TITLE uses when it is linked to that index (#354; ~1,270 for the S&P
+# 500 that month). A worst-of basket's title names its first member only, so
+# an index listed second or third is not counted -- a consistent undercount.
+INDEX_TITLE_PHRASES = ("Linked to the {}", "Linked to the Performance of the {}", "Performing of the {}")
+
+
+def search_query(ticker):
+    """The full-text-search query that finds 424B2s on `ticker`: a stock's
+    quoted company name, or the OR of an index's note-title phrases."""
+    if ticker in INDEX_UNDERLYINGS:
+        name = INDEX_UNDERLYINGS[ticker][0]
+        return " OR ".join('"' + p.format(name) + '"' for p in INDEX_TITLE_PHRASES)
+    return '"' + STOCK_UNDERLYINGS[ticker] + '"'
+
+
 def all_tickers():
     return list(INDEX_UNDERLYINGS) + list(STOCK_UNDERLYINGS)
 
@@ -205,6 +222,19 @@ def _load(path):
         return {}
 
 
+def _with_query(cache, q):
+    """(cache, changed): the cache if it answers query `q`, else an empty one
+    tagged with it. A cache from before query tags was built with the quoted
+    phrase, which is still a stock's query -- so it is kept and tagged; an
+    index's old cache (plain phrase, #354) is discarded."""
+    if cache.get("_query") == q:
+        return cache, False
+    legacy_ok = "_query" not in cache and " OR " not in q
+    cache = dict(cache) if legacy_ok else {}
+    cache["_query"] = q
+    return cache, True
+
+
 def _save(path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -220,9 +250,8 @@ def daily_counts(client, ticker, start, end, cache_dir=CACHE_DIR, today=None):
     from edgar_client import search_total
     today = today or date.today()
     path = Path(cache_dir) / "counts" / f"{ticker}.json"
-    cache = _load(path)
-    q = f'"{search_phrase(ticker)}"'
-    changed = False
+    q = search_query(ticker)
+    cache, changed = _with_query(_load(path), q)
     for d in _days(start, end):
         iso = d.isoformat()
         if iso in cache:
@@ -234,7 +263,7 @@ def daily_counts(client, ticker, start, end, cache_dir=CACHE_DIR, today=None):
             changed = True
     if changed:
         _save(path, cache)
-    return {k: v for k, v in cache.items() if start.isoformat() <= k <= end.isoformat()}
+    return {k: v for k, v in cache.items() if k != "_query" and start.isoformat() <= k <= end.isoformat()}
 
 
 def _month_ranges(start, end):
@@ -269,9 +298,9 @@ def sample_notes(client, ticker, start, end, prices, per_month=4, cache_dir=CACH
     date (see LOOK-AHEAD in the module docstring). Cached per accession."""
     from edgar_client import parse_hit
     path = Path(cache_dir) / "notes" / f"{ticker}.json"
-    cache = _load(path)
+    q = search_query(ticker)
+    cache, _ = _with_query(_load(path), q)
     seen = cache.setdefault("accessions", {})
-    q = f'"{search_phrase(ticker)}"'
     for m0, m1 in _month_ranges(start, end):
         key = f"month:{m0.isoformat()}"
         if key in cache and m1 < date.today():
@@ -387,7 +416,7 @@ def coverage(dataset):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Build the dealer-hedging real-data inputs.")
     ap.add_argument("cmd", choices=["build", "coverage"])
-    ap.add_argument("--months", type=int, default=12)
+    ap.add_argument("--months", type=int, default=36)   # ~3 years (#355)
     ap.add_argument("--per-month", type=int, default=4)
     ap.add_argument("--tickers", nargs="*")
     a = ap.parse_args(argv)
