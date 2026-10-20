@@ -128,6 +128,21 @@ def test_run_real_runs_the_declared_grid_and_its_placebo():
     assert res["universe"]["matched_on"].startswith("size+ADV")
 
 
+def test_pruned_matching_equals_the_full_scan():
+    import random
+    for seed in range(30):
+        rnd = random.Random(seed)
+        dims = rnd.choice([2, 3])
+        # Coarse values make exact ties common: the tie-break must match too.
+        mk = lambda: {"cov": tuple(round(rnd.gauss(0, 1), 1) for _ in range(dims)),
+                      "vol": rnd.random(), "pin": rnd.random()}
+        treated = [mk() for _ in range(rnd.randint(0, 40))]
+        controls = [mk() for _ in range(rnd.randint(0, 60))]
+        fast = ct.match_treatment_to_controls(treated, controls)
+        slow = ct._match_full_scan(treated, controls)
+        assert [(id(a), id(b)) for a, b in fast] == [(id(a), id(b)) for a, b in slow], seed
+
+
 def test_too_few_scored_trials_is_inconclusive_never_refuted():
     results = [{"underpowered": True} for _ in range(27)]
     assert ct.determine_verdict(results, [(0, False)] * 20)["verdict"] == "inconclusive"

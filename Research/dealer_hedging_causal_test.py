@@ -449,10 +449,46 @@ def match_treatment_to_controls(treated, controls):
     def standardize(cov):
         return tuple((cov[d] - means[d]) / stds[d] for d in range(dims))
 
-    ctrl_std = [(standardize(c["cov"]), c) for c in controls]
+    # Controls sorted on the first standardized covariate: one further than
+    # CALIPER on that axis is further than CALIPER overall, so only the window
+    # [x0 - CALIPER, x0 + CALIPER] can hold a match (#357; the full scan was
+    # O(treated x controls) and took hours on the 3-year universe). Ties break
+    # on the control's original position -- the full scan's order -- so the
+    # pairs are identical to it.
+    import bisect
+    ctrl_std = sorted(((standardize(c["cov"]), k, c) for k, c in enumerate(controls)),
+                      key=lambda x: x[0][0])
+    keys = [x[0][0] for x in ctrl_std]
     pairs = []
     for t in treated:
         t_std = standardize(t["cov"])
+        lo = bisect.bisect_left(keys, t_std[0] - CALIPER)
+        hi = bisect.bisect_right(keys, t_std[0] + CALIPER)
+        best, best_key = None, None
+        for c_std, k, c in ctrl_std[lo:hi]:
+            dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(t_std, c_std)))
+            if best_key is None or (dist, k) < best_key:
+                best, best_key = c, (dist, k)
+        if best is not None and best_key[0] <= CALIPER:
+            pairs.append((t, best))
+    return pairs
+
+
+def _match_full_scan(treated, controls):
+    """The original O(treated x controls) matcher, kept as the reference the
+    pruned one is tested against (#357)."""
+    pool = treated + controls
+    if not pool:
+        return []
+    dims = len(pool[0]["cov"])
+    means = [sum(o["cov"][d] for o in pool) / len(pool) for d in range(dims)]
+    stds = [math.sqrt(sum((o["cov"][d] - means[d]) ** 2 for o in pool) / max(1, len(pool) - 1)) or 1.0
+            for d in range(dims)]
+    std = lambda cov: tuple((cov[d] - means[d]) / stds[d] for d in range(dims))
+    ctrl_std = [(std(c["cov"]), c) for c in controls]
+    pairs = []
+    for t in treated:
+        t_std = std(t["cov"])
         best, best_dist = None, None
         for c_std, c in ctrl_std:
             dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(t_std, c_std)))
