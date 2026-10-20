@@ -3140,6 +3140,97 @@ def summarize_insider_for_history(query, insider):
     return {"role": "user", "content": head + ("\n" + "\n".join(lines) if lines else "\nNo rows.")}
 
 
+# ── Dealer hedging (#343) ───────────────────────────────────────────────────
+# The Research tab's real-data run: `dealer_hedging_causal_test.py --real`
+# (self-checks, the declared 27-trial grid, shifted-issuance placebos) as a
+# background subprocess, its results file read back for the tab.
+
+DH_RESULTS = REPO_ROOT / "Research" / "dealer_hedging_results.json"
+DH_RUN = {"status": "idle", "started_at": None, "finished_at": None,
+          "returncode": None, "log": [], "build": False}
+_DH_LOCK = threading.Lock()
+
+
+def _dealer_hedging_cmds(build):
+    """The commands one run executes, in order (a seam: tests swap it)."""
+    research = REPO_ROOT / "Research"
+    cmds = []
+    if build:
+        cmds.append([sys.executable, str(research / "dealer_hedging_data.py"), "build"])
+    cmds.append([sys.executable, str(research / "dealer_hedging_causal_test.py"), "--real"])
+    return cmds
+
+
+def _dh_data():
+    research = str(REPO_ROOT / "Research")
+    if research not in sys.path:
+        sys.path.insert(0, research)
+    import dealer_hedging_data
+    return dealer_hedging_data
+
+
+def dealer_hedging_results():
+    """GET /api/tools/dealer-hedging/results: the last real run's results (or
+    None), the dataset's coverage (or None before a build), the days of
+    point-in-time OI the pipeline has saved, and the run state."""
+    results = None
+    if DH_RESULTS.exists():
+        try:
+            results = json.loads(DH_RESULTS.read_text(encoding="utf-8"))
+        except ValueError:
+            results = {"ok": False, "reason": "results file is not valid JSON"}
+    coverage, oi_days = None, 0
+    try:
+        dh = _dh_data()
+        ds_path = dh.CACHE_DIR / "dataset.json"
+        if ds_path.exists():
+            coverage = dh.coverage(json.loads(ds_path.read_text(encoding="utf-8")))
+        oi_days = len({d for hist in dh.oi_history(dh.PIPELINE_DB).values() for d in hist})
+    except Exception as exc:
+        coverage = {"error": f"{type(exc).__name__}: {exc}"}
+    with _DH_LOCK:
+        run = {k: (list(v) if isinstance(v, list) else v) for k, v in DH_RUN.items()}
+    return {"results": results, "coverage": coverage, "oi_history_days": oi_days, "run": run}
+
+
+def start_dealer_hedging_run(params):
+    """POST /api/tools/dealer-hedging/run: (status, body). One run at a time
+    (409 while one is going); `build: true` refreshes the dataset first."""
+    build = bool((params or {}).get("build"))
+    with _DH_LOCK:
+        if DH_RUN["status"] == "running":
+            return 409, {"error": "a dealer-hedging run is already in progress"}
+        DH_RUN.update(status="running", started_at=utcnow(), finished_at=None,
+                      returncode=None, log=[], build=build)
+    cmds = _dealer_hedging_cmds(build)
+
+    def work():
+        import subprocess
+        rc = 0
+        for cmd in cmds:
+            try:
+                proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                                        errors="replace")
+                for line in proc.stdout:
+                    with _DH_LOCK:
+                        DH_RUN["log"].append(line.rstrip())
+                        del DH_RUN["log"][:-200]
+                rc = proc.wait()
+            except Exception as exc:
+                with _DH_LOCK:
+                    DH_RUN["log"].append(f"could not start {cmd[1]}: {exc}")
+                rc = -1
+            if rc != 0:
+                break
+        with _DH_LOCK:
+            DH_RUN.update(status="done" if rc == 0 else "failed", returncode=rc,
+                          finished_at=utcnow())
+
+    threading.Thread(target=work, name="dealer-hedging-run", daemon=True).start()
+    return 202, {"status": "running", "build": build}
+
+
 def research_digest_for(results):
     """The no-model digest of every hit across a batch's results (a seam: the
     tests replace it, so approval stays network-free there)."""
@@ -4581,6 +4672,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"error": "scrubbers registry not available"}, 503)
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+        if path == "/api/tools/dealer-hedging/results":
+            return self._json(dealer_hedging_results())
         if path == "/api/tools/testing/compare":
             a = (qs.get("run_a") or [None])[0]
             b = (qs.get("run_b") or [None])[0]
@@ -4748,6 +4841,9 @@ class Handler(SimpleHTTPRequestHandler):
 
         if path == "/api/tools/edgar-scrubber/model/start":
             return self._json(start_local_model_async(), 202)
+        if path == "/api/tools/dealer-hedging/run":
+            st, body = start_dealer_hedging_run(params)
+            return self._json(body, st)
         if path == "/api/tools/edgar-scrubber/search":
             try:
                 return self._json(edgar_search_daily(params)

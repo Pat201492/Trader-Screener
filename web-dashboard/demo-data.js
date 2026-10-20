@@ -221,11 +221,11 @@
         id: 'dealer-hedging-barrier-test',
         kind: 'model',
         name: 'Dealer-Hedging Barrier Causal Test',
-        purpose: 'Propensity-matches elevated- vs low-issuance underlyings on size/ADV/options-OI and tests forward realized-vol/barrier-pinning behavior; calibrates the confirm/refute bar empirically against placebo null universes rather than an independence-assuming chance floor (#131).',
+        purpose: 'Real-data test (#341): 424B2 issuance per underlying from EDGAR search metadata, sampled barrier levels, pipeline prices. Matches elevated- vs low-issuance observations on size/ADV (and options OI once point-in-time history exists) and tests forward realized vol and barrier pinning across 27 declared trials, against a shifted-issuance placebo. Last run and coverage are read from Research/dealer_hedging_results.json.',
         status: 'working',
         inputs: ['edgar_scrubber.filing_date', 'edgar_scrubber.underlyings', 'prices', 'realized_vol', 'options_oi', 'adv'],
         output_field: 'dealer_hedging_verdict',
-        last_run: '2026-08-07T00:00:00Z',
+        last_run: null,
         doc_link: 'https://github.com/Pat201492/Trader-Screener/blob/master/Research/dealer_hedging_causal_test.py'
       }
     ];

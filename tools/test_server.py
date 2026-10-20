@@ -2618,6 +2618,51 @@ server.edgar_search = _prev_search
 server.build_research_provider = _prev_build
 server.RESEARCH = _prev_research
 
+# #343: the Dealer Hedging tab's endpoints -- results read back, one run at a time.
+section("dealer hedging: results + background run (#343)")
+import time as _dh_time
+_dh_prev_results, _dh_prev_cmds = server.DH_RESULTS, server._dealer_hedging_cmds
+_dh_tmp = Path(tempfile.mkdtemp(prefix="dh-"))
+server.DH_RESULTS = _dh_tmp / "dealer_hedging_results.json"
+_dh = server.dealer_hedging_results()
+check("dealer hedging: no results file reads as results None, with run state",
+      _dh["results"] is None and _dh["run"]["status"] in ("idle", "done", "failed"))
+server.DH_RESULTS.write_text(json.dumps({"ok": True, "summary": {"verdict": "inconclusive"}}), encoding="utf-8")
+check("dealer hedging: a results file is read back",
+      server.dealer_hedging_results()["results"]["summary"]["verdict"] == "inconclusive")
+
+
+def _dh_wait():
+    for _ in range(100):
+        if server.DH_RUN["status"] != "running":
+            return
+        _dh_time.sleep(0.05)
+
+
+server._dealer_hedging_cmds = lambda build: [[sys.executable, "-c", "print('grid ran')"]] + (
+    [[sys.executable, "-c", "print('built')"]] if build else [])
+_st, _b = server.start_dealer_hedging_run({})
+_dh_wait()
+check("dealer hedging: a run starts (202), finishes done, and keeps its output",
+      _st == 202 and server.DH_RUN["status"] == "done" and "grid ran" in server.DH_RUN["log"])
+server._dealer_hedging_cmds = lambda build: [[sys.executable, "-c", "import time; time.sleep(1.5)"]]
+_st1, _ = server.start_dealer_hedging_run({})
+_st2, _b2 = server.start_dealer_hedging_run({})
+check("dealer hedging: a second run while one is going is a 409", _st1 == 202 and _st2 == 409)
+_dh_wait()
+server._dealer_hedging_cmds = lambda build: [[sys.executable, "-c", "import sys; sys.exit(3)"],
+                                              [sys.executable, "-c", "print('never')"]]
+server.start_dealer_hedging_run({})
+_dh_wait()
+check("dealer hedging: a failing step stops the run as failed",
+      server.DH_RUN["status"] == "failed" and server.DH_RUN["returncode"] == 3
+      and "never" not in server.DH_RUN["log"])
+_cmds = _dh_prev_cmds(True)
+check("dealer hedging: build=true rebuilds the dataset before the real grid",
+      _cmds[0][-1] == "build" and _cmds[-1][-1] == "--real"
+      and len(_dh_prev_cmds(False)) == 1)
+server.DH_RESULTS, server._dealer_hedging_cmds = _dh_prev_results, _dh_prev_cmds
+
 # Claude on the user's plan: a provider entry, per-chat sessions, a reset route.
 _provs = {p["name"]: p for p in server.research_providers()["providers"]}
 check("providers offer Claude on the user's plan beside the API-key option",

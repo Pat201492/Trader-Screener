@@ -899,6 +899,7 @@ def main_real(out_path=None):
     res = run_real(dataset, prices, oi_by_ticker=dh.oi_history(dh.PIPELINE_DB))
     res["coverage"] = dh.coverage(dataset)
     res["ran_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    res["hypothesis"], res["falsifier"] = HYPOTHESIS, FALSIFIER
     out = out_path or os.path.join(os.path.dirname(__file__), "dealer_hedging_results.json")
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(res, fh, indent=1, default=list)
