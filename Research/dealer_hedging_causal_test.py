@@ -43,7 +43,8 @@ would smuggle in information nobody outside the desk had yet --
 directly: the plain A-vs-B truncation test alone cannot catch a
 wrong-but-still-past date field, only an absolute future-index read.
 
-DATA SOURCE: this repo has no live pipeline connection (Stock-Data-Pipeline is
+SYNTHETIC FIXTURE (the mechanism check; real data is the REAL DATA section
+below). Written when this repo had no live pipeline connection (Stock-Data-Pipeline is
 a separate, not-checked-out repo; ARCHITECTURE.md's "single writer" rule means
 this can't fork that ingest). Per the same posture as lookahead-gate/ and
 pipeline-mock/, this module is a portable, stdlib-only, deterministically
@@ -78,7 +79,18 @@ ISO) alongside `pricing_date` as two first-class fields -- worth fixing in
 output_store.py when a real 424B2 spec needs it, not a reason to bypass the
 interface here.
 
-Run:  python Research/dealer_hedging_causal_test.py
+REAL DATA (#341): `real_universe()` builds the same universe shape from the
+dataset `dealer_hedging_data.py` builds (424B2 counts per EDGAR file date,
+sampled barrier levels) and the pipeline's daily closes/volume. Issuance
+intensity there is the daily FILING COUNT (aggregate principal is rarely
+stated), barriers are the sampled notes', and the placebo is a circular time
+shift of each ticker's own issuance series (`real_placebo_universe`) -- the
+synthetic placebo universes are a different universe and the wrong null for a
+real one. Matching uses options OI only where point-in-time OI exists;
+otherwise size + ADV, and the result says so (`matched_on`).
+
+Run:  python Research/dealer_hedging_causal_test.py            (mechanism check, synthetic)
+      python Research/dealer_hedging_causal_test.py --real     (real data -> results JSON)
 Exit code 0 = self-checks passed and the declared trial grid ran to a
 published verdict (confirmed/refuted/inconclusive -- all three are a pass).
 Non-zero = a self-check (look-ahead gate or power check) failed, which blocks
@@ -322,8 +334,14 @@ def issuance_intensity_percentile(universe, tickers, i, window):
     `filing_idx` (EDGAR acceptance -- the knowledge date) is < i."""
     sums = {}
     for tk in tickers:
-        notes = universe[tk]["notes"]
-        sums[tk] = sum(n["size_usd"] for n in notes if i - window <= n["filing_idx"] < i)
+        u = universe[tk]
+        if "issuance_cum" in u:
+            # Real data: daily 424B2 counts by EDGAR file date; a day's count
+            # is known after that day, so the window is days [i-window, i).
+            cum = u["issuance_cum"]
+            sums[tk] = cum[i] - cum[max(0, i - window)]
+        else:
+            sums[tk] = sum(n["size_usd"] for n in u["notes"] if i - window <= n["filing_idx"] < i)
     ranks = lag.cross_sectional_rank({tk: s for tk, s in sums.items() if s > 0})
     return {tk: {"sum": s, "percentile": ranks.get(tk)} for tk, s in sums.items()}
 
@@ -344,10 +362,15 @@ def near_barrier(universe, tk, i, proximity_pct):
 
 def matching_covariates(universe, tk, i):
     """(log ADV, log total OI, log mkt_cap) as of the prior close -- the
-    size/liquidity/OI controls #131 requires. i-1 only."""
-    adv = universe[tk]["adv"][i - 1]
-    oi = universe[tk]["total_oi"][i - 1]
-    cap = universe[tk]["mkt_cap"]
+    size/liquidity/OI controls #131 requires. i-1 only. A universe without
+    point-in-time OI (`total_oi` None, the real data until the pipeline's OI
+    history has accumulated) matches on (log ADV, log mkt_cap) only."""
+    u = universe[tk]
+    adv = u["adv"][i - 1]
+    cap = u["mkt_cap"]
+    if u.get("total_oi") is None:
+        return (math.log(max(adv, 1.0)), math.log(max(cap, 1.0)))
+    oi = u["total_oi"][i - 1]
     return (math.log(max(adv, 1.0)), math.log(max(oi, 1.0)), math.log(max(cap, 1.0)))
 
 
@@ -446,7 +469,8 @@ def run_trial(universe, tickers, issuance_window, proximity_pct, horizon):
     """Build treatment/control observation pools, match, and test both
     outcomes for one (issuance_window, proximity_pct, horizon) cell."""
     treated_obs, control_obs = [], []
-    for i in range(70, N_DAYS - horizon):
+    n_days = len(universe[tickers[0]]["closes"])
+    for i in range(70, n_days - horizon):
         percentiles = issuance_intensity_percentile(universe, tickers, i, issuance_window)
         for tk in tickers:
             if not near_barrier(universe, tk, i, proximity_pct):
@@ -565,6 +589,149 @@ def determine_verdict(results, placebo_counts):
         "empirical_p": empirical_p,
         "consistent_direction": consistent,
     }
+
+
+# ── Real data (#341) ─────────────────────────────────────────────────────
+
+MIN_REAL_DAYS = 120     # a ticker needs this many aligned days to be included
+
+
+def real_universe(dataset, prices, oi_by_ticker=None):
+    """The test's universe from real inputs.
+
+    `dataset`: what dealer_hedging_data.build_dataset returns. `prices`: a
+    dealer_hedging_data.PriceSource. `oi_by_ticker`: {tk: {iso_date: total_oi}}
+    from the pipeline's options_oi_history, or None.
+
+    The calendar is the trading days every included ticker has a close on,
+    within the dataset's range. Per ticker: closes; ADV = trailing 20-day mean
+    dollar volume (read at i-1 by the signal); mkt_cap (an ETF proxy has none
+    in the pipeline -- imputed from its ADV with the stocks' median cap/ADV
+    ratio); `issuance` = the daily 424B2 count, each filing day mapped to the
+    first calendar day on or after it; `notes` = sampled barriers with
+    filing_idx (first calendar day on or after the EDGAR file date -- the
+    knowledge date) and pricing_idx (last calendar day on or before pricing).
+    Returns (universe, meta)."""
+    start, end = dataset["start"], dataset["end"]
+    series = {}
+    for tk in dataset["tickers"]:
+        rows = [(d, c, v) for d, c, v in prices.series(tk) if start <= d <= end and c]
+        if len(rows) >= MIN_REAL_DAYS:
+            series[tk] = {d: (c, v or 0.0) for d, c, v in rows}
+    if not series:
+        return {}, {"tickers": 0, "days": 0, "matched_on": None, "excluded": list(dataset["tickers"])}
+    days = sorted(set.intersection(*(set(v) for v in series.values())))
+    index = {d: k for k, d in enumerate(days)}
+
+    def first_on_or_after(iso):
+        for k, d in enumerate(days):
+            if d >= iso:
+                return k
+        return None
+
+    def last_on_or_before(iso):
+        best = None
+        for k, d in enumerate(days):
+            if d > iso:
+                break
+            best = k
+        return best
+
+    universe, ratios = {}, []
+    for tk, rows in series.items():
+        closes = [rows[d][0] for d in days]
+        dollar = [rows[d][0] * rows[d][1] for d in days]
+        adv = []
+        for k in range(len(days)):
+            w = dollar[max(0, k - 19):k + 1]
+            adv.append(sum(w) / len(w))
+        info = dataset["tickers"][tk]
+        issuance = [0] * len(days)
+        for iso, n in (info.get("counts") or {}).items():
+            k = first_on_or_after(iso)
+            if k is not None:
+                issuance[k] += n
+        cum = [0]
+        for n in issuance:
+            cum.append(cum[-1] + n)
+        notes = []
+        for n in info.get("notes") or []:
+            f = first_on_or_after(n["file_date"])
+            pr = last_on_or_before(n["pricing_date"])
+            if f is None or pr is None or pr > f:
+                continue
+            notes.append({"filing_idx": f, "pricing_idx": pr, "size_usd": 1.0,
+                          "barrier": n["barrier"], "accession": n.get("accession")})
+        oi = None
+        if oi_by_ticker and oi_by_ticker.get(tk):
+            hist = oi_by_ticker[tk]
+            last, oi = None, []
+            for d in days:
+                last = hist.get(d, last)
+                oi.append(last)
+            if any(x is None for x in oi):
+                oi = None          # not point-in-time for the whole calendar
+        cap = info.get("mkt_cap")
+        if cap and adv[-1]:
+            ratios.append(cap / adv[-1])
+        universe[tk] = {"closes": closes, "adv": adv, "total_oi": oi, "mkt_cap": cap,
+                        "issuance": issuance, "issuance_cum": cum, "notes": notes,
+                        "treatment_days": set()}
+    ratio = sorted(ratios)[len(ratios) // 2] if ratios else 1.0
+    for tk, u in universe.items():
+        if not u["mkt_cap"]:
+            u["mkt_cap"] = u["adv"][-1] * ratio
+            u["mkt_cap_imputed"] = True
+    with_oi = all(u["total_oi"] is not None for u in universe.values())
+    if not with_oi:
+        for u in universe.values():
+            u["total_oi"] = None
+    meta = {"tickers": len(universe), "days": len(days), "first_day": days[0], "last_day": days[-1],
+            "matched_on": "size+ADV+OI" if with_oi else "size+ADV (no point-in-time OI yet)",
+            "excluded": sorted(set(dataset["tickers"]) - set(universe)),
+            "mkt_cap_imputed": sorted(tk for tk, u in universe.items() if u.get("mkt_cap_imputed"))}
+    return universe, meta
+
+
+REAL_PLACEBO_SEEDS = tuple(f"shift-{k}" for k in range(20))
+
+
+def real_placebo_universe(universe, seed):
+    """The null for real data: each ticker's own issuance series circularly
+    shifted by a seeded offset of at least 60 trading days. Prices, barriers
+    and covariates are untouched, so any difference the grid still finds is
+    what it finds with issuance timing unlinked from price behavior."""
+    out = {}
+    for tk, u in universe.items():
+        series = u["issuance"]
+        n = len(series)
+        rnd = random.Random(f"{seed}:{tk}")
+        k = rnd.randint(60, max(60, n - 60)) if n > 120 else n // 2
+        shifted = series[-k:] + series[:-k] if k else list(series)
+        cum = [0]
+        for x in shifted:
+            cum.append(cum[-1] + x)
+        out[tk] = {**u, "issuance": shifted, "issuance_cum": cum}
+    return out
+
+
+def run_real(dataset, prices, oi_by_ticker=None, seeds=REAL_PLACEBO_SEEDS, log=print):
+    """The declared grid on real data plus its shifted-issuance placebo.
+    Returns the results document `dealer_hedging_results.json` stores."""
+    universe, meta = real_universe(dataset, prices, oi_by_ticker)
+    if len(universe) < 4:
+        return {"ok": False, "reason": f"only {len(universe)} priced underlyings", "universe": meta}
+    log(f"real universe: {meta['tickers']} underlyings x {meta['days']} days, matched on {meta['matched_on']}")
+    results = run_declared_grid(universe)
+    placebo = []
+    for seed in seeds:
+        pr = run_declared_grid(real_placebo_universe(universe, seed))
+        confirming = [r for r in pr if not r["underpowered"] and r["confirms_difference"]]
+        placebo.append((len(confirming), len({r["direction"] for r in confirming}) <= 1 and bool(confirming)))
+        log(f"  placebo {seed}: {placebo[-1][0]} confirming")
+    summary = determine_verdict(results, placebo)
+    return {"ok": True, "universe": meta, "trials": results, "placebo_confirming": [c for c, _ in placebo],
+            "summary": summary, "trial_count": TRIAL_COUNT, "lookahead_posture": LOOKAHEAD_POSTURE}
 
 
 # ── Self-checks (must pass before a verdict is published) ──────────────────
@@ -716,7 +883,38 @@ def run_power_check():
 
 # ── Entry point ──────────────────────────────────────────────────────────
 
+def main_real(out_path=None):
+    """Self-checks, then the declared grid on real data; writes the results
+    JSON (default Research/dealer_hedging_results.json)."""
+    import json
+    from datetime import datetime, timezone
+    import dealer_hedging_data as dh
+    print("-- self-checks (must pass before a verdict can be published) --")
+    if not (run_truncation_gate() and run_same_day_peek_check() and run_knowledge_date_check()
+            and run_power_check()):
+        print("\nSelf-checks FAILED -- refusing to run the real grid.")
+        return 1
+    dataset = json.loads((dh.CACHE_DIR / "dataset.json").read_text(encoding="utf-8"))
+    prices = dh.PriceSource()
+    res = run_real(dataset, prices, oi_by_ticker=dh.oi_history(dh.PIPELINE_DB))
+    res["coverage"] = dh.coverage(dataset)
+    res["ran_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    out = out_path or os.path.join(os.path.dirname(__file__), "dealer_hedging_results.json")
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(res, fh, indent=1, default=list)
+    if res.get("ok"):
+        s = res["summary"]
+        print(f"\nScored {s['n_scored']}/{s['n_trials']} trials; {s['n_confirming']} confirming; "
+              f"empirical p={s['empirical_p']:.3f} vs {len(res['placebo_confirming'])} shifted-issuance placebos")
+        print(f"VERDICT (real data): {s['verdict'].upper()}  -> {out}")
+    else:
+        print(f"Not run: {res['reason']} -> {out}")
+    return 0
+
+
 def main():
+    if "--real" in sys.argv:
+        return main_real()
     print("Part B -- dealer-hedging causal test (issue #131)")
     print(f"Hypothesis: {HYPOTHESIS}")
     print(f"Falsifier:  {FALSIFIER}")
@@ -755,7 +953,9 @@ def main():
     print(f"Confirming trials: {summary['n_confirming']} "
           f"(empirical p={summary['empirical_p']:.3f} vs placebo null, consistent direction: "
           f"{summary['consistent_direction']})")
-    print(f"\nVERDICT: {summary['verdict'].upper()}")
+    print(f"\nMECHANISM CHECK on the synthetic NULL fixture: {summary['verdict'].upper()} "
+          f"(expected -- no effect is planted there). This is not a finding about real "
+          f"underlyings; run with --real for that.")
     return 0
 
 

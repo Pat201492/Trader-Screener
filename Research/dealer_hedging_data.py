@@ -174,6 +174,20 @@ class PriceSource:
         return best
 
 
+def oi_history(db_path=PIPELINE_DB):
+    """{ticker: {iso_date: total_oi}} from the pipeline's options_oi_history
+    (its #66), or {} before that table exists."""
+    try:
+        conn = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
+        rows = conn.execute("SELECT ticker, date, total_oi FROM options_oi_history").fetchall()
+    except sqlite3.Error:
+        return {}
+    out = {}
+    for tk, d, oi in rows:
+        out.setdefault(tk, {})[d] = oi
+    return out
+
+
 # ── EDGAR: issuance counts (metadata only) and sampled barrier levels ───────
 
 def _days(start, end):
