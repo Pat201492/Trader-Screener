@@ -465,9 +465,20 @@ def match_treatment_to_controls(treated, controls):
 
 # ── One trial ────────────────────────────────────────────────────────────
 
-def run_trial(universe, tickers, issuance_window, proximity_pct, horizon):
+# Who counts as a low-issuance control. "zero": no issuance in the window --
+# the synthetic fixture's rule, where issuance is sparse. "low_tercile": zero,
+# or the bottom third of that day's cross-sectional rank -- the real-data rule
+# (#342): nearly every real underlying has 424B2 filings every week, so the
+# first real run found 0-48 zero-issuance controls per trial and scored no
+# trial at all. Declared from that feasibility count alone; no outcome had
+# been computed (no trial reached a single test).
+CONTROL_RULES = ("zero", "low_tercile")
+
+
+def run_trial(universe, tickers, issuance_window, proximity_pct, horizon, control="zero"):
     """Build treatment/control observation pools, match, and test both
     outcomes for one (issuance_window, proximity_pct, horizon) cell."""
+    assert control in CONTROL_RULES
     treated_obs, control_obs = [], []
     n_days = len(universe[tickers[0]]["closes"])
     for i in range(70, n_days - horizon):
@@ -483,7 +494,8 @@ def run_trial(universe, tickers, issuance_window, proximity_pct, horizon):
             obs = {"cov": matching_covariates(universe, tk, i), "vol": vol, "pin": pin}
             if entry["sum"] > 0 and entry["percentile"] is not None and entry["percentile"] >= 66.7:
                 treated_obs.append(obs)
-            elif entry["sum"] == 0:
+            elif entry["sum"] == 0 or (control == "low_tercile" and entry["percentile"] is not None
+                                       and entry["percentile"] <= 33.3):
                 control_obs.append(obs)
 
     pairs = match_treatment_to_controls(treated_obs, control_obs)
@@ -522,13 +534,13 @@ def run_trial(universe, tickers, issuance_window, proximity_pct, horizon):
 
 # ── Full declared grid + verdict ─────────────────────────────────────────
 
-def run_declared_grid(universe):
+def run_declared_grid(universe, control="zero"):
     tickers = list(universe.keys())
     results = []
     for window in ISSUANCE_WINDOWS:
         for prox in BARRIER_PROXIMITY_PCTS:
             for horizon in HORIZONS:
-                r = run_trial(universe, tickers, window, prox, horizon)
+                r = run_trial(universe, tickers, window, prox, horizon, control=control)
                 r.update(issuance_window=window, proximity_pct=prox, horizon=horizon)
                 results.append(r)
     assert len(results) == TRIAL_COUNT
@@ -573,7 +585,13 @@ def determine_verdict(results, placebo_counts):
     ge = sum(1 for c, _ in placebo_counts if c >= len(confirming))
     empirical_p = (ge + 1) / (n_placebo + 1)
 
-    if empirical_p < 0.1 and consistent:
+    if len(scored) * 2 < len(results):
+        # Fewer than half the declared trials could be scored: there is not
+        # enough evidence to refute (or confirm) anything. The first real run
+        # scored 0/27 and this rule said "refuted" -- a placebo p of 1.0 on no
+        # data is not a refutation.
+        verdict = "inconclusive"
+    elif empirical_p < 0.1 and consistent:
         verdict = "confirmed"
     elif empirical_p >= 0.3:
         verdict = "refuted"
@@ -715,21 +733,37 @@ def real_placebo_universe(universe, seed):
     return out
 
 
-def run_real(dataset, prices, oi_by_ticker=None, seeds=REAL_PLACEBO_SEEDS, log=print):
+# Left out of the real run, with the reason recorded in the results. The index
+# phrases match nearly every 424B2 ("S&P 500" ~56,000 of the year's filings --
+# boilerplate, not underlyings), so their counts cannot rank issuance, and their
+# barrier samples barely parse (SPY 0, IWM 3, QQQ 4 notes; first build,
+# 2026-10-20). Single stocks are named in a filing almost only as underlyings.
+REAL_EXCLUDED = {"SPY": "index phrase matches nearly every 424B2; counts are not issuance",
+                 "QQQ": "index phrase matches nearly every 424B2; counts are not issuance",
+                 "IWM": "index phrase matches nearly every 424B2; counts are not issuance",
+                 "DIA": "index phrase matches nearly every 424B2; counts are not issuance"}
+
+
+def run_real(dataset, prices, oi_by_ticker=None, seeds=REAL_PLACEBO_SEEDS, log=print,
+             exclude=None):
     """The declared grid on real data plus its shifted-issuance placebo.
     Returns the results document `dealer_hedging_results.json` stores."""
+    exclude = REAL_EXCLUDED if exclude is None else exclude
+    dataset = {**dataset, "tickers": {tk: v for tk, v in dataset["tickers"].items() if tk not in exclude}}
     universe, meta = real_universe(dataset, prices, oi_by_ticker)
+    meta["excluded_by_design"] = dict(exclude)
     if len(universe) < 4:
         return {"ok": False, "reason": f"only {len(universe)} priced underlyings", "universe": meta}
     log(f"real universe: {meta['tickers']} underlyings x {meta['days']} days, matched on {meta['matched_on']}")
-    results = run_declared_grid(universe)
+    results = run_declared_grid(universe, control="low_tercile")
     placebo = []
     for seed in seeds:
-        pr = run_declared_grid(real_placebo_universe(universe, seed))
+        pr = run_declared_grid(real_placebo_universe(universe, seed), control="low_tercile")
         confirming = [r for r in pr if not r["underpowered"] and r["confirms_difference"]]
         placebo.append((len(confirming), len({r["direction"] for r in confirming}) <= 1 and bool(confirming)))
         log(f"  placebo {seed}: {placebo[-1][0]} confirming")
     summary = determine_verdict(results, placebo)
+    meta["control_rule"] = "low_tercile: zero issuance, or bottom third of the day's rank"
     return {"ok": True, "universe": meta, "trials": results, "placebo_confirming": [c for c, _ in placebo],
             "summary": summary, "trial_count": TRIAL_COUNT, "lookahead_posture": LOOKAHEAD_POSTURE}
 
@@ -897,7 +931,10 @@ def main_real(out_path=None):
     dataset = json.loads((dh.CACHE_DIR / "dataset.json").read_text(encoding="utf-8"))
     prices = dh.PriceSource()
     res = run_real(dataset, prices, oi_by_ticker=dh.oi_history(dh.PIPELINE_DB))
-    res["coverage"] = dh.coverage(dataset)
+    # Coverage of what was TESTED: the excluded index proxies' counts are not
+    # issuance and must not inflate the totals.
+    res["coverage"] = dh.coverage({**dataset, "tickers": {
+        tk: v for tk, v in dataset["tickers"].items() if tk not in REAL_EXCLUDED}})
     res["ran_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     res["hypothesis"], res["falsifier"] = HYPOTHESIS, FALSIFIER
     out = out_path or os.path.join(os.path.dirname(__file__), "dealer_hedging_results.json")

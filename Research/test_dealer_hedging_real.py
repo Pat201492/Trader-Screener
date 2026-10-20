@@ -128,6 +128,30 @@ def test_run_real_runs_the_declared_grid_and_its_placebo():
     assert res["universe"]["matched_on"].startswith("size+ADV")
 
 
+def test_too_few_scored_trials_is_inconclusive_never_refuted():
+    results = [{"underpowered": True} for _ in range(27)]
+    assert ct.determine_verdict(results, [(0, False)] * 20)["verdict"] == "inconclusive"
+    half = [{"underpowered": True}] * 14 + [{"underpowered": False, "confirms_difference": False,
+                                            "direction": "none"}] * 13
+    assert ct.determine_verdict(half, [(0, False)] * 20)["verdict"] == "inconclusive"
+
+
+def test_low_tercile_controls_include_low_but_nonzero_issuers():
+    u, _ = ct.real_universe(_dataset(), _prices())
+    zero = ct.run_trial(u, TICKERS, 10, 0.05, 5, control="zero")
+    low = ct.run_trial(u, TICKERS, 10, 0.05, 5, control="low_tercile")
+    assert low["n_control"] >= zero["n_control"]
+    assert low["n_treated"] == zero["n_treated"]
+
+
+def test_index_proxies_are_excluded_by_design():
+    ds = _dataset()
+    ds["tickers"]["SPY"] = dict(ds["tickers"]["AAA"])
+    res = ct.run_real(ds, _prices(), seeds=(), log=lambda *a: None)
+    assert "SPY" in res["universe"]["excluded_by_design"]
+    assert res["universe"]["tickers"] == 5            # SPY never entered the universe
+
+
 def test_run_real_refuses_a_tiny_universe():
     ds = _dataset()
     ds["tickers"] = {k: v for k, v in ds["tickers"].items() if k in ("AAA", "BBB")}
