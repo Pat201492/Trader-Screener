@@ -4745,12 +4745,16 @@ async function renderDealerHedging(){
   let d;
   try{ d=await (await fetch('/api/tools/dealer-hedging/results')).json(); }
   catch(e){ v.innerHTML=toolHeader(t)+`<div class="err">Could not read the results: ${esc(e.message)}</div>`; return; }
-  const res=d.results, run=d.run||{}, cov=d.coverage;
+  const res=d.results, run=d.run||{};
+  // The last real run's own coverage is what the verdict was computed on (the
+  // index proxies are excluded by design); before a run, show what is built.
+  const tested=!!(res&&res.ok&&res.coverage), cov=tested?res.coverage:d.coverage;
   const head=t?{...t,last_run:(res&&res.ran_at)||null}:t;
   const n=x=>(x==null?'—':Number(x).toLocaleString());
   const tile=(label,val,sub)=>`<div class="card" style="margin:0;padding:10px 12px"><div class="muted" style="font-size:11px">${esc(label)}</div><div style="font-size:18px;font-weight:600">${val}</div>${sub?`<div class="muted" style="font-size:10.5px">${sub}</div>`:''}</div>`;
   const covHtml=cov&&!cov.error
-    ? `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:12px">
+    ? `<div class="muted" style="font-size:11px;margin-bottom:6px">${tested?'Data the last real run tested'+(res.universe&&res.universe.excluded_by_design?` (excluded by design: ${esc(Object.keys(res.universe.excluded_by_design).join(', '))})`:''):'Dataset built so far (no real run yet)'}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:12px">
         ${tile('Underlyings priced',n(cov.underlyings_priced),cov.underlyings_skipped?`${cov.underlyings_skipped} without prices`:'')}
         ${tile('424B2 filings counted',n(cov.filings_counted),`${esc(cov.start||'')} → ${esc(cov.end||'')}`)}
         ${tile('Notes with barriers',n(cov.notes_with_barriers),'sampled, key-terms extractor')}
