@@ -347,7 +347,10 @@ def _resolve_defined(text, kt):
     if not m:
         return None          # an unexplained abbreviation is not the legal name
     name = _trim_name(m.group(1))
-    return KeyTermValue(kt.field, name, name, m.span(1)[0:1] + (m.start(1) + len(name),),
+    # The span points at the name as printed (a line break may sit inside it:
+    # Citi's "Citigroup Global Markets\nInc."); the value is the name itself.
+    return KeyTermValue(kt.field, " ".join(name.split()), name,
+                        m.span(1)[0:1] + (m.start(1) + len(name),),
                         kt.label, kt.method + "+defined")
 
 
@@ -359,6 +362,27 @@ _TICKER_RE = re.compile(r"\s*\((?:current\s+)?(?:Bloomberg ticker|ticker symbol|
 _STOCK_LEAD = re.compile(r"^(?:the\s+|shares\s+of\s+)?(?:(?:class\s+[a-z]\s+)?(?:common|ordinary)\s+"
                          r"(?:stock|shares)|american depositary shares)\s+of\s+", re.I)
 _FUNDISH = re.compile(r"\b(?:index|average|etf|fund|trust)(?:SM|TM)?\b", re.I)   # "IndexSM"
+# A company name: Citi prints underlyings bare, with no "common stock of" lead-in
+# ("Broadcom Inc., NVIDIA Corporation and Alphabet Inc.", #349).
+_CORP_SUFFIX = re.compile(r"\b(?:Inc\.?|Incorporated|Corporation|Corp\.?|Company|Co\.|Ltd\.?|Limited|"
+                          r"plc|N\.V\.?|S\.A\.?|SE|AG|Holdings|Group)$")
+_LIST_SEP = re.compile(r",\s*(?:and\s+)?|\s+and\s+")
+
+
+def _split_bare_list(text):
+    """'A Inc., B Corporation and C Inc.' -> ['A Inc.', 'B Corporation', 'C Inc.'],
+    splitting only where the text so far ends in a company suffix; anything
+    else -- an index name with "and" in it -- stays one piece."""
+    parts, start = [], 0
+    for m in _LIST_SEP.finditer(text):
+        if _CORP_SUFFIX.search(text[start:m.start()].strip()):
+            parts.append(text[start:m.start()])
+            start = m.end()
+    parts.append(text[start:])
+    if len(parts) > 1 and all(_CORP_SUFFIX.search(p.strip().rstrip(".") + ("." if p.strip().endswith(".") else ""))
+                              for p in parts):
+        return parts
+    return [text]
 
 
 def _clean_underlying(item):
@@ -391,6 +415,8 @@ def _clean_underlying(item):
         kind = "etf"
     elif _FUNDISH.search(name):
         kind = "index"
+    elif _CORP_SUFFIX.search(name):
+        kind = "single_stock"     # a bare company name (#349)
     else:
         return None       # not recognisably a stock, fund or index: leave it
     return name, kind
@@ -415,7 +441,10 @@ def _underlyings(term):
         # ServiceNow (golden set, 2026-10-19).
         head = re.sub(r"\s*\((?:[“\"]|the\s|each\s|collectively\s|together\s|an?\s)[^()]*\)", "", v)
         head = re.split(r"\s*\(|\n|\.\s+(?=(?:We|The|Each|Its|This|In)\b)", head, maxsplit=1)[0]
-        pieces = [(0, part) for part in re.split(r",\s*(?:and\s+)?(?=the\s)|\s+and\s+(?=the\s)", head, flags=re.I)]
+        parts = re.split(r",\s*(?:and\s+)?(?=the\s)|\s+and\s+(?=the\s)", head, flags=re.I)
+        if len(parts) == 1:
+            parts = _split_bare_list(head)
+        pieces = [(0, part) for part in parts]
     names, kinds, first_span = [], [], None
     for off, piece in pieces:
         # A piece ends at its ticker; anything after a sentence end belongs to

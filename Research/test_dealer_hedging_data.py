@@ -157,6 +157,14 @@ def test_note_on_another_underlying_is_skipped(tmp_path):
     assert notes == [] and skipped == {"not this underlying": 1}
 
 
+def test_no_extracted_underlyings_is_its_own_skip_reason(tmp_path):
+    hits = {("NVIDIA Corporation", "2026-09-01"): [_hit("0001-26-000004", "831001", "2026-09-02")]}
+    notes, skipped = dh.sample_notes(
+        StubClient(hits=hits), "NVDA", date(2026, 9, 1), date(2026, 9, 30), PRICES, per_month=1,
+        cache_dir=tmp_path, extract=lambda c, cik, acc: _terms(underlyings=None))
+    assert notes == [] and skipped == {"no underlyings extracted": 1}
+
+
 def test_month_is_sampled_in_slices(tmp_path):
     c = StubClient()
     dh.sample_notes(c, "NVDA", date(2026, 9, 1), date(2026, 9, 30), PRICES, per_month=3,

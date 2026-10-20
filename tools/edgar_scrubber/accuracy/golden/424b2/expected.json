@@ -592,6 +592,33 @@
      111.15
     ]
    }
+  },
+  {
+   "accession": "0000950103-25-014667",
+   "doc": "0000950103-25-014667.txt.gz",
+   "expected": {
+    "issuer": "Citigroup Global Markets Holdings Inc.",
+    "guarantor": "Citigroup Inc.",
+    "cusip": "17331BK99",
+    "isin": "US17331BK999",
+    "maturity_date": "2028-11-30",
+    "pricing_date": "2025-11-25",
+    "issue_date": "2025-12-01",
+    "contingent_coupon_rate": 21.55,
+    "coupon_barrier_pct": 70.0,
+    "barrier_pct": 70.0,
+    "denomination": 1000.0,
+    "estimated_value_per_1000": null,
+    "estimated_value_low": 898.0,
+    "estimated_value_high": null,
+    "filing_stage": "preliminary",
+    "underlyings": [
+     "Broadcom Inc.",
+     "NVIDIA Corporation",
+     "Alphabet Inc."
+    ],
+    "calculation_agent": "Citigroup Global Markets Inc."
+   }
   }
  ]
 }

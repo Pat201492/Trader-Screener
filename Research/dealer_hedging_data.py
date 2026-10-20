@@ -329,6 +329,10 @@ def _val(terms, f):
 def _note_from_terms(ticker, accession, file_date, terms):
     """The cacheable part of a note (no prices yet), or {"skip": reason}."""
     unds = _val(terms, "underlyings") or []
+    if not unds:
+        # An extractor miss, not evidence the note is on something else (#349:
+        # Citi's bare lists read as nothing before the fix).
+        return {"skip": "no underlyings extracted"}
     if not any(ticker_for_name(u.get("name") if isinstance(u, dict) else u) == ticker for u in unds):
         return {"skip": "not this underlying"}
     pct = _val(terms, "barrier_pct") or _val(terms, "coupon_barrier_pct")
