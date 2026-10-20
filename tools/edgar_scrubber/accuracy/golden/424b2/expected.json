@@ -484,7 +484,7 @@
     "barrier_pct": null,
     "autocall_barrier_pct": 100.0,
     "coupon_frequency": null,
-    "denomination": null,
+    "denomination": 1000.0,
     "estimated_value_per_1000": 947.8,
     "estimated_value_low": null,
     "estimated_value_high": null,
@@ -495,7 +495,8 @@
      "Amazon.com, Inc."
     ],
     "calculation_agent": null,
-    "call_premium": 14.75
+    "call_premium": 14.75,
+    "call_premium_schedule": null
    }
   },
   {
@@ -514,7 +515,7 @@
     "barrier_pct": null,
     "autocall_barrier_pct": 100.0,
     "coupon_frequency": null,
-    "denomination": null,
+    "denomination": 1000.0,
     "estimated_value_per_1000": null,
     "estimated_value_low": 920.0,
     "estimated_value_high": null,
@@ -525,7 +526,8 @@
      "Amazon.com, Inc."
     ],
     "calculation_agent": null,
-    "call_premium": 18.0
+    "call_premium": 18.0,
+    "call_premium_schedule": null
    }
   },
   {
@@ -544,7 +546,7 @@
     "barrier_pct": 70.0,
     "autocall_barrier_pct": 100.0,
     "coupon_frequency": null,
-    "denomination": null,
+    "denomination": 1000.0,
     "estimated_value_per_1000": null,
     "estimated_value_low": 900.0,
     "estimated_value_high": null,
@@ -555,7 +557,40 @@
      "Apple Inc."
     ],
     "calculation_agent": null,
-    "call_premium": null
+    "call_premium": null,
+    "call_premium_schedule": [
+     18.525,
+     21.6125,
+     24.7,
+     27.7875,
+     30.875,
+     33.9625,
+     37.05,
+     40.1375,
+     43.225,
+     46.3125,
+     49.4,
+     52.4875,
+     55.575,
+     58.6625,
+     61.75,
+     64.8375,
+     67.925,
+     71.0125,
+     74.1,
+     77.1875,
+     80.275,
+     83.3625,
+     86.45,
+     89.5375,
+     92.625,
+     95.7125,
+     98.8,
+     101.8875,
+     104.975,
+     108.0625,
+     111.15
+    ]
    }
   }
  ]
