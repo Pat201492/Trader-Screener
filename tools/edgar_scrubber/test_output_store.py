@@ -234,6 +234,35 @@ def run_checks():
     hist = cc.field_history("0003-24-000003", "424b2.htm", "estimated_value_per_1000")
     check("field_history carries candidate_count", hist[0]["candidate_count"] == 5)
 
+    # ── #339: an underlying's kind is never stored as an underlying ──
+    section("#339: underlyings writer stores real names only")
+    us = fresh_store()
+    rid = us.start_run("424b2.structured_note", "1.2.0", "2026-10-20T00:00:00Z")
+    us.write_document(rid, DocumentExtraction.from_record("0004-26-000004", "424b2.htm", {
+        "underlyings": [{"name": "X Corp", "kind": "single_stock"},
+                        '{"name": "Y Index", "kind": "index"}',
+                        "single_stock", "index", "etf", "",
+                        ["Z Fund", "etf"],
+                        "X Corp",
+                        "Plain Name"]}))
+    rows = [tuple(r) for r in us._conn.execute(
+        "SELECT name, kind FROM document_underlyings "
+        "WHERE accession = '0004-26-000004' ORDER BY rowid").fetchall()]
+    check("a {name, kind} dict stores one row with its kind",
+          ("X Corp", "single_stock") in rows)
+    check("a JSON-string entry decodes the same way", ("Y Index", "index") in rows)
+    check("a [name, kind] pair stores its name", ("Z Fund", "etf") in rows)
+    check("kind words, empties and repeats are never stored",
+          [r[0] for r in rows] == ["X Corp", "Y Index", "Z Fund", "Plain Name"])
+    check("normalize_underlyings drops a broken JSON blob",
+          os_mod.normalize_underlyings(['{"name": ', "A"]) == [("A", None)])
+
+
+def test_output_store():
+    """pytest entrypoint: the same gate `main()` runs."""
+    run_checks()
+    assert not failures, f"{len(failures)} check(s) failed: {failures}"
+
 
 def main():
     print("EDGAR scrubber output-store gate (#109)")
