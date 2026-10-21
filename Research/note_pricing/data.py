@@ -74,6 +74,7 @@ SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS notes ({", ".join(c + (" TEXT PRIMARY KEY" if c == "accession" else "") for c in COLUMNS)});
 CREATE TABLE IF NOT EXISTS weeks (issuer_cik TEXT, week TEXT, sampled INTEGER, skipped TEXT,
                                   PRIMARY KEY (issuer_cik, week));
+CREATE TABLE IF NOT EXISTS tried (accession TEXT PRIMARY KEY, issuer_cik TEXT, week TEXT, outcome TEXT);
 """
 
 
@@ -81,6 +82,11 @@ def connect(home=HOME):
     Path(home).mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(Path(home) / "notes.sqlite"))
     conn.executescript(SCHEMA)
+    # #376: a week whose candidates ran out is not searched again.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(weeks)")}
+    if "exhausted" not in cols:
+        conn.execute("ALTER TABLE weeks ADD COLUMN exhausted INTEGER DEFAULT 0")
+        conn.commit()
     return conn
 
 
@@ -272,44 +278,58 @@ def _weeks(n_weeks, today=None):
 
 def sample_week(client, conn, issuer, cik, w0, w1, market, lookup, per_week=4,
                 extract=_default_extract):
-    """Sample one issuer-week into `notes`; mark it done in `weeks`."""
+    """Bring one issuer-week up to `per_week` kept notes (#376: a re-run with a
+    higher target tops up weeks already sampled). Every accession read is
+    recorded in `tried`, kept or skipped, and never read again; a week whose
+    candidates run out is marked exhausted. Returns (kept_now, skipped_now),
+    or None when the week needs nothing."""
     from edgar_client import parse_hit
-    done = conn.execute("SELECT 1 FROM weeks WHERE issuer_cik = ? AND week = ?", (cik, w0.isoformat())).fetchone()
-    if done:
+    week = w0.isoformat()
+    prev = conn.execute("SELECT sampled, skipped, exhausted FROM weeks WHERE issuer_cik = ? AND week = ?",
+                        (cik, week)).fetchone()
+    have = prev[0] if prev else 0
+    if prev and (prev[2] or have >= per_week):
         return None
-    page = client.full_text_search(forms=["424B2"], startdt=w0.isoformat(), enddt=w1.isoformat(),
-                                    ciks=cik.zfill(10))
+    need = per_week - have
+    page = client.full_text_search(forms=["424B2"], startdt=week, enddt=w1.isoformat(), ciks=cik.zfill(10))
     hits = [parse_hit(h) for h in ((page.get("hits") or {}).get("hits") or [])]
     hits = sorted({h["accession"]: h for h in hits if h.get("accession")}.values(),
                   key=lambda h: (h.get("file_date") or "", h["accession"]))
+    seen = {r[0] for r in conn.execute("SELECT accession FROM tried WHERE issuer_cik = ?", (cik,))}
+    seen |= {r[0] for r in conn.execute("SELECT accession FROM notes WHERE issuer_cik = ?", (cik,))}
     kept, skipped, tries = 0, {}, 0
     # Spread across the week: walk candidates in an order that alternates
     # through it rather than taking the newest first.
-    order = sorted(range(len(hits)), key=lambda i: ((i * 7919) % max(1, len(hits)), i))
+    order = [i for i in sorted(range(len(hits)), key=lambda i: ((i * 7919) % max(1, len(hits)), i))
+             if hits[i]["accession"] not in seen]
+    ran_out = True
     for i in order:
         # Up to 6 reads per wanted note: some issuers file several
         # preliminaries for every final (Barclays, 2026-10: 12 of 14 sampled).
-        if kept >= per_week or tries >= per_week * 6:
+        if kept >= need or tries >= need * 6:
+            ran_out = False
             break
         h = hits[i]
-        if conn.execute("SELECT 1 FROM notes WHERE accession = ?", (h["accession"],)).fetchone():
-            continue
         tries += 1
         try:
             terms = extract(client, h.get("cik") or cik, h["accession"]) or {}
-        except Exception as exc:
-            skipped["extract failed"] = skipped.get("extract failed", 0) + 1
-            continue
-        row, why = note_row(issuer, cik, h["accession"], h.get("file_date") or w0.isoformat(),
-                            terms, market, lookup)
+            row, why = note_row(issuer, cik, h["accession"], h.get("file_date") or week, terms, market, lookup)
+        except Exception:
+            row, why = None, "extract failed"
         if row is None:
             skipped[why] = skipped.get(why, 0) + 1
+            conn.execute("INSERT OR REPLACE INTO tried VALUES (?, ?, ?, ?)", (h["accession"], cik, week, why))
             continue
         conn.execute(f"INSERT OR REPLACE INTO notes ({', '.join(COLUMNS)}) VALUES ({', '.join('?' * len(COLUMNS))})",
                      [row[c] for c in COLUMNS])
+        conn.execute("INSERT OR REPLACE INTO tried VALUES (?, ?, ?, ?)", (h["accession"], cik, week, "kept"))
         kept += 1
-    conn.execute("INSERT OR REPLACE INTO weeks VALUES (?, ?, ?, ?)",
-                 (cik, w0.isoformat(), kept, json.dumps(skipped)))
+    total = dict(json.loads(prev[1] or "{}")) if prev else {}
+    for k, v in skipped.items():
+        total[k] = total.get(k, 0) + v
+    exhausted = 1 if (ran_out and have + kept < per_week) else 0
+    conn.execute("INSERT OR REPLACE INTO weeks (issuer_cik, week, sampled, skipped, exhausted) VALUES (?, ?, ?, ?, ?)",
+                 (cik, week, have + kept, json.dumps(total), exhausted))
     conn.commit()
     return kept, skipped
 
@@ -326,6 +346,53 @@ def build(client, market, n_weeks=104, per_week=4, issuers=None, home=HOME, extr
         after = conn.execute("SELECT COUNT(*) FROM notes WHERE issuer_cik = ?", (cik,)).fetchone()[0]
         log(f"{name}: {after} notes ({after - before} new)")
     return coverage(conn)
+
+
+def unpriced(conn, market):
+    """(ticker -> notes, unmapped name -> notes): underlyings with a known
+    ticker but no price history, and names no ticker was found for (#377)."""
+    no_price, no_ticker = {}, {}
+    for names, tickers in conn.execute("SELECT underlyings, tickers FROM notes"):
+        for name, tk in zip(json.loads(names or "[]"), json.loads(tickers or "[]")):
+            if not tk:
+                no_ticker[name] = no_ticker.get(name, 0) + 1
+            elif not market.series(tk):
+                no_price[tk] = no_price.get(tk, 0) + 1
+    order = lambda d: dict(sorted(d.items(), key=lambda kv: -kv[1]))
+    return order(no_price), order(no_ticker)
+
+
+def usable_share(conn):
+    n = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+    u = conn.execute("SELECT COUNT(*) FROM notes WHERE coupon_rate IS NOT NULL AND "
+                     "COALESCE(vol60_max, vol20_max) IS NOT NULL").fetchone()[0]
+    return {"notes": n, "usable": u, "share": round(u / n, 4) if n else None}
+
+
+def refresh_market(conn, market):
+    """Recompute spot and 20/60-day vol on every row from the current price
+    history -- still only closes on or before each pricing date. Returns the
+    number of rows whose volatility changed."""
+    changed = 0
+    for acc, pricing, tickers, old in conn.execute(
+            "SELECT accession, pricing_date, tickers, vol60_max FROM notes").fetchall():
+        spots, v20, v60 = [], [], []
+        for tk in json.loads(tickers or "[]"):
+            if not tk:
+                continue
+            sp, a, b = market.on(tk, pricing)
+            if sp is not None:
+                spots.append(sp)
+            if a is not None:
+                v20.append(a)
+            if b is not None:
+                v60.append(b)
+        new = max(v60) if v60 else None
+        conn.execute("UPDATE notes SET spot = ?, vol20_max = ?, vol60_max = ? WHERE accession = ?",
+                     (spots[0] if len(spots) == 1 else None, max(v20) if v20 else None, new, acc))
+        changed += new != old
+    conn.commit()
+    return changed
 
 
 def fill_rates(conn, market):
@@ -355,7 +422,7 @@ def coverage(conn):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Build the note-pricing sample (#365).")
-    ap.add_argument("cmd", choices=["build", "coverage", "fill-rates"])
+    ap.add_argument("cmd", choices=["build", "coverage", "fill-rates", "unpriced", "refresh-market"])
     ap.add_argument("--weeks", type=int, default=104)
     ap.add_argument("--per-week", type=int, default=4)
     a = ap.parse_args(argv)
@@ -364,6 +431,17 @@ def main(argv=None):
         return
     if a.cmd == "fill-rates":
         print(f"filled rate_1y on {fill_rates(connect(), Market())} row(s)")
+        return
+    if a.cmd == "unpriced":
+        no_price, no_ticker = unpriced(connect(), Market())
+        print(json.dumps({"usable": usable_share(connect()), "ticker_without_prices": no_price,
+                          "no_ticker": dict(list(no_ticker.items())[:40])}, indent=1))
+        return
+    if a.cmd == "refresh-market":
+        conn = connect()
+        before = usable_share(conn)
+        n = refresh_market(conn, Market())
+        print(json.dumps({"rows_changed": n, "before": before, "after": usable_share(conn)}, indent=1))
         return
     from edgar_client import EdgarClient
     ua = os.environ.get("EDGAR_USER_AGENT", "").strip()

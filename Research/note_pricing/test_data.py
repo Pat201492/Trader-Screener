@@ -152,3 +152,59 @@ def test_rates_unavailable_leave_nulls_then_fill_rates(tmp_path):
 def test_issuer_list_is_the_issuing_entities():
     assert len(npd.ISSUERS) == 17 and all(len(c) == 10 for c in npd.ISSUERS.values())
     assert npd.ISSUERS["JPMorgan Chase Financial"] == "0001665650"     # not the parent 0000019617
+
+
+# -- #376 top-up ------------------------------------------------------------
+def test_higher_target_tops_up_a_sampled_week_without_rereading(tmp_path):
+    w0, w1 = date(2026, 8, 31), date(2026, 9, 6)
+    hits = {("0001665650", w0.isoformat()): [_hit(f"0003-26-{i:06d}", "2026-09-03") for i in range(20)]}
+    c, conn, read = StubClient(hits), npd.connect(tmp_path), []
+
+    def extract(cl, cik, acc):
+        read.append(acc)
+        return _terms(filing_stage="preliminary") if acc.endswith(("0", "5")) else _terms()
+    npd.sample_week(c, conn, "JPM", "0001665650", w0, w1, MARKET, LOOKUP, per_week=4, extract=extract)
+    first = list(read)
+    kept, _ = npd.sample_week(c, conn, "JPM", "0001665650", w0, w1, MARKET, LOOKUP, per_week=10, extract=extract)
+    assert conn.execute("SELECT sampled FROM weeks").fetchone()[0] == 4 + kept
+    assert not set(first) & set(read[len(first):])               # nothing read twice
+    assert conn.execute("SELECT COUNT(*) FROM tried").fetchone()[0] == len(read)
+
+
+def test_exhausted_week_is_not_searched_again(tmp_path):
+    w0, w1 = date(2026, 8, 31), date(2026, 9, 6)
+    hits = {("0001665650", w0.isoformat()): [_hit("0004-26-000001", "2026-09-03")]}
+    c, conn = StubClient(hits), npd.connect(tmp_path)
+    npd.sample_week(c, conn, "JPM", "0001665650", w0, w1, MARKET, LOOKUP, per_week=4, extract=lambda *a: _terms())
+    assert conn.execute("SELECT sampled, exhausted FROM weeks").fetchone() == (1, 1)
+    assert npd.sample_week(c, conn, "JPM", "0001665650", w0, w1, MARKET, LOOKUP, per_week=10,
+                           extract=lambda *a: _terms()) is None
+    assert len(c.calls) == 1
+
+
+def test_old_weeks_table_is_migrated(tmp_path):
+    import sqlite3
+    old = sqlite3.connect(str(tmp_path / "notes.sqlite"))
+    old.execute("CREATE TABLE weeks (issuer_cik TEXT, week TEXT, sampled INTEGER, skipped TEXT, PRIMARY KEY (issuer_cik, week))")
+    old.execute("INSERT INTO weeks VALUES ('c', '2026-08-31', 4, '{}')")
+    old.commit(); old.close()
+    conn = npd.connect(tmp_path)
+    assert conn.execute("SELECT sampled, exhausted FROM weeks").fetchone() == (4, 0)
+
+
+# -- #377 pricing more underlyings ------------------------------------------
+def test_unpriced_and_refresh_market(tmp_path):
+    conn = npd.connect(tmp_path)
+    t = _terms(underlyings=[{"name": "Gen Digital Inc."}])
+    lookup = lambda n: {"Gen Digital Inc.": "GEN"}.get(n)
+    row, _ = npd.note_row("JPM", "c", "a-1", "2026-09-03", t, MARKET, lookup)
+    assert row["vol60_max"] is None                        # GEN has no prices yet
+    conn.execute(f"INSERT INTO notes ({', '.join(npd.COLUMNS)}) VALUES ({', '.join('?' * len(npd.COLUMNS))})",
+                 [row[c] for c in npd.COLUMNS])
+    no_price, no_ticker = npd.unpriced(conn, MARKET)
+    assert no_price == {"GEN": 1} and no_ticker == {}
+    assert npd.usable_share(conn)["usable"] == 0
+    priced = npd.Market(closes={**CLOSES, "GEN": CLOSES["NVDA"]}, rates=RATES)   # after a backfill
+    assert npd.refresh_market(conn, priced) == 1
+    assert npd.usable_share(conn)["usable"] == 1
+    assert conn.execute("SELECT vol60_max FROM notes").fetchone()[0] == priced.on("GEN", "2026-09-01")[2]
