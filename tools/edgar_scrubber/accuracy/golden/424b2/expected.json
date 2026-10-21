@@ -26,7 +26,12 @@
     "underlyings": [
      "Space Exploration Technologies Corp."
     ],
-    "calculation_agent": "BofA Securities, Inc."
+    "calculation_agent": "BofA Securities, Inc.",
+    "selling_agents": [
+     "BofA Securities, Inc.",
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.325
    }
   },
   {
@@ -53,7 +58,12 @@
     "underlyings": [
      "GE Vernova Inc."
     ],
-    "calculation_agent": "Scotia Capital Inc."
+    "calculation_agent": "Scotia Capital Inc.",
+    "selling_agents": [
+     "Scotia Capital (USA) Inc.",
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.575
    }
   },
   {
@@ -80,7 +90,11 @@
     "underlyings": [
      "ServiceNow, Inc."
     ],
-    "calculation_agent": "Wells Fargo Securities, LLC"
+    "calculation_agent": "Wells Fargo Securities, LLC",
+    "selling_agents": [
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 1.825
    }
   },
   {
@@ -107,7 +121,11 @@
     "underlyings": [
      "Alphabet Inc."
     ],
-    "calculation_agent": "J.P. Morgan Securities LLC"
+    "calculation_agent": "J.P. Morgan Securities LLC",
+    "selling_agents": [
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.075
    }
   },
   {
@@ -136,7 +154,11 @@
      "CrowdStrike Holdings, Inc.",
      "Datadog, Inc."
     ],
-    "calculation_agent": "BMO Capital Markets Corp."
+    "calculation_agent": "BMO Capital Markets Corp.",
+    "selling_agents": [
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.325
    }
   },
   {
@@ -165,7 +187,11 @@
      "Datadog, Inc.",
      "Palantir Technologies Inc."
     ],
-    "calculation_agent": "BMO Capital Markets Corp."
+    "calculation_agent": "BMO Capital Markets Corp.",
+    "selling_agents": [
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.325
    }
   },
   {
@@ -192,7 +218,12 @@
     "underlyings": [
      "Space Exploration Technologies Corp."
     ],
-    "calculation_agent": "Scotia Capital Inc."
+    "calculation_agent": "Scotia Capital Inc.",
+    "selling_agents": [
+     "Scotia Capital (USA) Inc.",
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.325
    }
   },
   {
@@ -219,7 +250,11 @@
     "underlyings": [
      "Space Exploration Technologies Corp."
     ],
-    "calculation_agent": "Wells Fargo Securities, LLC"
+    "calculation_agent": "Wells Fargo Securities, LLC",
+    "selling_agents": [
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 1.825
    }
   },
   {
@@ -246,7 +281,12 @@
     "underlyings": [
      "Space Exploration Technologies Corp."
     ],
-    "calculation_agent": "BofA Securities, Inc."
+    "calculation_agent": "BofA Securities, Inc.",
+    "selling_agents": [
+     "BofA Securities, Inc.",
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.325
    }
   },
   {
@@ -273,7 +313,12 @@
     "underlyings": [
      "NVIDIA Corporation"
     ],
-    "calculation_agent": "BofA Securities, Inc."
+    "calculation_agent": "BofA Securities, Inc.",
+    "selling_agents": [
+     "BofA Securities, Inc.",
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.325
    }
   },
   {
@@ -298,7 +343,11 @@
     "estimated_value_high": 969.9,
     "filing_stage": "preliminary",
     "underlyings": null,
-    "calculation_agent": "RBC Capital Markets, LLC"
+    "calculation_agent": "RBC Capital Markets, LLC",
+    "selling_agents": [
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.325
    }
   },
   {
@@ -327,7 +376,12 @@
      "State Street® Financial Select Sector SPDR® ETF",
      "State Street® Technology Select Sector SPDR® ETF"
     ],
-    "calculation_agent": "Citigroup Global Markets Inc."
+    "calculation_agent": "Citigroup Global Markets Inc.",
+    "selling_agents": [
+     "Citigroup Global Markets Inc.",
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.325
    }
   },
   {
@@ -354,7 +408,12 @@
     "underlyings": [
      "UnitedHealth Group Incorporated"
     ],
-    "calculation_agent": "Barclays Bank PLC"
+    "calculation_agent": "Barclays Bank PLC",
+    "selling_agents": [
+     "Wells Fargo Securities, LLC",
+     "Barclays Capital Inc."
+    ],
+    "agent_commission_pct": 2.325
    }
   },
   {
@@ -382,7 +441,12 @@
      "Snowflake Inc.",
      "ServiceNow, Inc."
     ],
-    "calculation_agent": "HSBC Securities (USA) Inc."
+    "calculation_agent": "HSBC Securities (USA) Inc.",
+    "selling_agents": [
+     "HSBC Securities (USA) Inc.",
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.325
    }
   },
   {
@@ -411,7 +475,12 @@
      "Meta Platforms, Inc.",
      "NVIDIA Corporation"
     ],
-    "calculation_agent": "The Toronto-Dominion Bank"
+    "calculation_agent": "The Toronto-Dominion Bank",
+    "selling_agents": [
+     "TD Securities (USA) LLC",
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 1.575
    }
   },
   {
@@ -438,7 +507,11 @@
     "underlyings": [
      "Strategy Inc"
     ],
-    "calculation_agent": "Goldman Sachs & Co. LLC"
+    "calculation_agent": "Goldman Sachs & Co. LLC",
+    "selling_agents": [
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.325
    }
   },
   {
@@ -465,7 +538,12 @@
     "underlyings": [
      "Blackstone Inc."
     ],
-    "calculation_agent": null
+    "calculation_agent": null,
+    "selling_agents": [
+     "Morgan Stanley & Co. LLC",
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 1.575
    }
   },
   {
@@ -496,7 +574,11 @@
     ],
     "calculation_agent": null,
     "call_premium": 14.75,
-    "call_premium_schedule": null
+    "call_premium_schedule": null,
+    "selling_agents": [
+     "J.P. Morgan Securities LLC"
+    ],
+    "agent_commission_pct": 2.75
    }
   },
   {
@@ -527,7 +609,11 @@
     ],
     "calculation_agent": null,
     "call_premium": 18.0,
-    "call_premium_schedule": null
+    "call_premium_schedule": null,
+    "selling_agents": [
+     "J.P. Morgan Securities LLC"
+    ],
+    "agent_commission_pct": 2.75
    }
   },
   {
@@ -590,7 +676,11 @@
      104.975,
      108.0625,
      111.15
-    ]
+    ],
+    "selling_agents": [
+     "J.P. Morgan Securities LLC"
+    ],
+    "agent_commission_pct": 0.5
    }
   },
   {
@@ -617,7 +707,12 @@
      "NVIDIA Corporation",
      "Alphabet Inc."
     ],
-    "calculation_agent": "Citigroup Global Markets Inc."
+    "calculation_agent": "Citigroup Global Markets Inc.",
+    "selling_agents": [
+     "Citigroup Global Markets Inc.",
+     "Wells Fargo Securities, LLC"
+    ],
+    "agent_commission_pct": 2.325
    }
   }
  ]
