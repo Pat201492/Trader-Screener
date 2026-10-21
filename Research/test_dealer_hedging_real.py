@@ -143,6 +143,36 @@ def test_pruned_matching_equals_the_full_scan():
         assert [(id(a), id(b)) for a, b in fast] == [(id(a), id(b)) for a, b in slow], seed
 
 
+def test_oi_matched_grid_runs_on_the_oi_window():
+    oi = {tk: {d: 1000 + i for i, d in enumerate(DAYS) if i >= 120} for tk in TICKERS}   # 80 days
+    res = ct.run_real(_dataset(), _prices(), oi_by_ticker=oi, seeds=("shift-0",), log=lambda *a: None)
+    blk = res["oi_matched"]
+    assert blk["skipped"] is False and blk["oi_days"] == 80 and blk["matched_on"] == "size+ADV+OI"
+    assert len(blk["trials"]) == 27 and blk["window"][0] == DAYS[120]
+    assert len(blk["placebo_confirming"]) == 1 and blk["summary"]["verdict"] in ("confirmed", "refuted", "inconclusive")
+    assert "_days" not in res["universe"]
+    # The main size+ADV grid is the same with or without the partial OI.
+    plain = ct.run_real(_dataset(), _prices(), seeds=("shift-0",), log=lambda *a: None)
+    assert plain["trials"] == res["trials"] and plain["summary"] == res["summary"]
+
+
+def test_oi_matched_grid_waits_for_enough_days():
+    oi = {tk: {d: 5 for d in DAYS[-10:]} for tk in TICKERS}
+    res = ct.run_real(_dataset(), _prices(), oi_by_ticker=oi, seeds=(), log=lambda *a: None)
+    assert res["oi_matched"] == {"skipped": True, "oi_days": 10, "min_oi_days": 60}
+
+
+def test_oi_window_observes_only_days_every_ticker_has_prior_oi():
+    u, meta = ct.real_universe(_dataset(), _prices())
+    days = meta["_days"]
+    oi = {tk: {d: 7 for d in days[150:]} for tk in TICKERS}
+    oi["AAA"] = {d: 7 for d in days[160:]}                  # one ticker starts later
+    ou, obs, n = ct.oi_window_universe(u, days, oi)
+    assert n == len(days) - 160 and min(obs) == 161
+    assert ou["AAA"]["total_oi"][159] is None and ou["AAA"]["total_oi"][160] == 7
+    assert len(ct.matching_covariates(ou, "AAA", 170)) == 3
+
+
 def test_too_few_scored_trials_is_inconclusive_never_refuted():
     results = [{"underpowered": True} for _ in range(27)]
     assert ct.determine_verdict(results, [(0, False)] * 20)["verdict"] == "inconclusive"
