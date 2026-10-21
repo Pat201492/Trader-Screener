@@ -4821,6 +4821,211 @@ async function runDealerHedging(){
   renderDealerHedging();
 }
 
+// Note Pricing (#368): each bank's structured-note pricing over time. Data is
+// the issuer-sampled dataset (#365), the per-issuer model (#367) and per-stock
+// company events (#366). Plotly is loaded only when this tab opens.
+let PLOTLY_P=null;
+function loadPlotly(){
+  if(window.Plotly) return Promise.resolve();
+  if(PLOTLY_P) return PLOTLY_P;
+  PLOTLY_P=new Promise((res,rej)=>{
+    const s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.34.0/plotly.min.js';
+    s.onload=res; s.onerror=()=>{PLOTLY_P=null; rej(new Error('could not load Plotly from cdnjs'));};
+    document.head.appendChild(s);
+  });
+  return PLOTLY_P;
+}
+const NP={data:null,results:null,ticker:'',issuers:null,surface:null,events:{}};
+const NP_COLORS=['#2f81f7','#3fb950','#f0883e','#db61a2','#a371f7','#56d4dd','#e3b341','#f85149','#79c0ff',
+  '#7ee787','#ffa657','#ff7b72','#d2a8ff','#a5d6ff','#bc8cff','#ffdf5d','#8b949e'];
+const NP_EVENT_STYLE={annual_report:['square','#e3b341','Annual report (10-K)'],quarterly_report:['square-open','#e3b341','Quarterly report (10-Q)'],
+  earnings:['star','#3fb950','Earnings (8-K 2.02)'],shareholder_meeting:['diamond','#db61a2','Shareholder meeting (8-K 5.07)'],
+  proxy:['diamond-open','#db61a2','Proxy (DEF 14A)'],presentation:['triangle-up','#56d4dd','Presentation (8-K 7.01)']};
+function npShort(name){
+  return String(name||'?').replace(/,?\s+(Financial Company LLC|Finance LLC|Finance Corp\.|Holdings Inc\.|Company LLC|LLC|Inc\.|PLC|AG)$/i,'')
+    .replace(/^The\s+/,'').replace(/Global Markets/,'GM');
+}
+function npColor(cik){
+  const ciks=Object.keys(NP.byIssuer||{}).sort();
+  return NP_COLORS[Math.max(0,ciks.indexOf(cik))%NP_COLORS.length];
+}
+function npLayout(extra){
+  const ax={gridcolor:'#30363d',zerolinecolor:'#30363d',color:'#8b949e'};
+  return Object.assign({paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{color:'#e6edf3',size:11},
+    margin:{l:60,r:20,t:30,b:40},xaxis:{...ax},yaxis:{...ax},legend:{orientation:'h',y:-0.18},hovermode:'closest'},extra||{});
+}
+function npRollingMedian(points,win){
+  // points sorted by x; median of the last `win` y values at each point.
+  const out=[];
+  for(let i=0;i<points.length;i++){
+    const w=points.slice(Math.max(0,i-win+1),i+1).map(p=>p.y).sort((a,b)=>a-b);
+    out.push({x:points[i].x,y:w.length%2?w[(w.length-1)/2]:(w[w.length/2-1]+w[w.length/2])/2});
+  }
+  return out;
+}
+function npNotes(){
+  const t=NP.ticker;
+  return (NP.data.notes||[]).filter(n=>NP.issuers.has(n.issuer_cik)&&(!t||(n.tickers||[]).includes(t)));
+}
+async function renderNotePricing(){
+  const v=document.getElementById('view');
+  v.innerHTML='<div class="loading">Loading note pricing…</div>';
+  stopPolling();
+  if(DEMO_ON||!RUNNER){
+    v.innerHTML=`<div class="card"><div class="name">Note Pricing</div><div class="muted" style="margin-top:6px">This view reads the local note-pricing dataset, which needs the tool runner: <code>python tools/server.py</code>.</div></div>`;
+    return;
+  }
+  try{
+    const [d,r]=await Promise.all([fetch('/api/tools/note-pricing/data').then(x=>x.json()),
+                                    fetch('/api/tools/note-pricing/results').then(x=>x.json())]);
+    if(d.error) throw new Error(d.error);
+    NP.data=d; NP.results=(r&&r.results)||null;
+    await loadPlotly();
+  }catch(e){ v.innerHTML=`<div class="err">Could not load note pricing: ${esc(e.message)}</div>`; return; }
+  NP.byIssuer={};
+  (NP.data.notes||[]).forEach(n=>{(NP.byIssuer[n.issuer_cik]=NP.byIssuer[n.issuer_cik]||{name:n.issuer,n:0}).n++;});
+  if(!NP.issuers) NP.issuers=new Set(Object.keys(NP.byIssuer));
+  const ciks=Object.keys(NP.byIssuer).sort((a,b)=>NP.byIssuer[b].n-NP.byIssuer[a].n);
+  if(!NP.surface||!NP.byIssuer[NP.surface]) NP.surface=ciks[0]||null;
+  const tick={};
+  (NP.data.notes||[]).forEach(n=>(n.tickers||[]).forEach(t=>{if(t) tick[t]=(tick[t]||0)+1;}));
+  const tickers=Object.keys(tick).sort((a,b)=>tick[b]-tick[a]);
+  const cov=NP.data.coverage||{};
+  const sel='background:var(--bg);border:1px solid var(--border);color:var(--txt);border-radius:6px;padding:5px 8px;font-size:12px';
+  const chip=(cik)=>{const on=NP.issuers.has(cik);const c=npColor(cik);
+    return `<button onclick="npToggleIssuer('${cik}')" title="${esc(NP.byIssuer[cik].name)}" style="border:1px solid ${on?c:'var(--border)'};background:${on?c+'33':'transparent'};color:${on?'var(--txt)':'var(--muted)'};border-radius:14px;padding:2px 9px;font-size:11px;cursor:pointer">${esc(npShort(NP.byIssuer[cik].name))} <span style="opacity:.6">${NP.byIssuer[cik].n}</span></button>`;};
+  const res=NP.results;
+  v.innerHTML=`
+    <div class="card" style="margin-bottom:12px">
+      <div class="name" style="font-size:16px">Note Pricing</div>
+      <div class="muted" style="font-size:12px;line-height:1.5;margin:6px 0">Assumption under test: each bank prices its structured notes with <b>one desk running one algorithm</b>, so a note's coupon is a stable function of barrier, tenor, volatility and rates on its pricing date. The sample is a few notes per bank per week; the model fits each bank's function and the fit check says whether the notes bear the assumption out.</div>
+      <div class="muted" style="font-size:11.5px">${esc(cov.notes||0)} notes · ${esc(cov.issuers||0)} banks · priced ${esc(cov.first_pricing||'—')} → ${esc(cov.last_pricing||'—')} · ${esc(cov.issuer_weeks_done||0)} bank-weeks sampled${res?` · model run ${esc(res.ran_at||'')}`:' · model not run yet'}${cov.notes&&!cov.with_rate?' · rates pending (FRED)':''}</div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px">
+        <label class="muted" style="font-size:12px">Stock <select id="np_ticker" onchange="npSetTicker(this.value)" style="${sel}">
+          <option value="">All stocks</option>${tickers.map(t=>`<option value="${esc(t)}"${t===NP.ticker?' selected':''}>${esc(t)} (${tick[t]})</option>`).join('')}</select></label>
+        <button onclick="npAllIssuers(true)" style="${sel};cursor:pointer">all banks</button>
+        <button onclick="npAllIssuers(false)" style="${sel};cursor:pointer">none</button>
+      </div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:8px">${ciks.map(chip).join('')}</div>
+    </div>
+    ${toolSection('1 · Filing timeline'+(NP.ticker?' — '+esc(NP.ticker)+' with company events':''))}
+    <div class="card"><div id="np_timeline" style="height:${Math.max(260,90+28*NP.issuers.size)}px"></div>
+      ${NP.ticker?'':'<div class="muted" style="font-size:11.5px">Pick a stock to see that company\'s reports, earnings, meetings and presentations on the same timeline.</div>'}</div>
+    ${toolSection('2 · Barrier level over time')}
+    <div class="card"><div id="np_barrier" style="height:330px"></div></div>
+    ${toolSection('3 · Pricing surface (3D)')}
+    <div class="card"><label class="muted" style="font-size:12px">Bank <select onchange="NP.surface=this.value;npSurface()" style="${sel}">${ciks.map(c=>`<option value="${c}"${c===NP.surface?' selected':''}>${esc(npShort(NP.byIssuer[c].name))}</option>`).join('')}</select></label>
+      <div id="np_surface" style="height:460px"></div>
+      <div class="muted" style="font-size:11px">Surface: the bank's fitted coupon for a 1-year single-stock note at each barrier and volatility. Dots: that bank's actual notes.</div></div>
+    ${toolSection('4 · The same note, every bank')}
+    <div class="card"><div id="np_std" style="height:330px"></div>
+      <div class="muted" style="font-size:11px">Fitted coupon each bank would pay on one standard note — 70% barrier, 1 year, 30% volatility, one underlying — quarter by quarter, with its uncertainty band.</div></div>
+    ${toolSection('5 · Markup (what the bank keeps)')}
+    <div class="card"><div id="np_markup" style="height:330px"></div>
+      <div class="muted" style="font-size:11px">$1,000 minus the bank's own estimated value, per $1,000 note. Higher = the bank keeps more.</div></div>
+    ${toolSection('6 · Fit check: one algorithm?')}
+    <div class="card"><div id="np_fit" style="height:320px"></div><div id="np_verdicts"></div></div>`;
+  npDraw();
+}
+function npToggleIssuer(cik){ NP.issuers.has(cik)?NP.issuers.delete(cik):NP.issuers.add(cik); renderNotePricing(); }
+function npAllIssuers(on){ NP.issuers=new Set(on?Object.keys(NP.byIssuer):[]); renderNotePricing(); }
+function npSetTicker(t){ NP.ticker=t; renderNotePricing(); }
+async function npDraw(){
+  npTimeline(); npBarrier(); npSurface(); npStd(); npMarkup(); npFit();
+}
+async function npTimeline(){
+  const notes=npNotes(), traces=[];
+  const by={};
+  notes.forEach(n=>(by[n.issuer_cik]=by[n.issuer_cik]||[]).push(n));
+  Object.keys(by).forEach(cik=>{
+    const ns=by[cik];
+    traces.push({type:'scattergl',mode:'markers',name:npShort(NP.byIssuer[cik].name),x:ns.map(n=>n.pricing_date),
+      y:ns.map(()=>npShort(NP.byIssuer[cik].name)),marker:{color:npColor(cik),size:7,opacity:.75},
+      text:ns.map(n=>`${esc(n.issuer)}<br>${(n.underlyings||[]).join(', ')}<br>coupon ${n.coupon_rate??'—'}% · barrier ${n.barrier_pct??'—'}% · ${n.tenor_years??'—'}y<br>${n.accession}`),
+      hovertemplate:'%{x}<br>%{text}<extra></extra>'});
+  });
+  const shapes=[];
+  if(NP.ticker){
+    if(!NP.events[NP.ticker]){
+      try{ NP.events[NP.ticker]=(await (await fetch('/api/tools/note-pricing/events?ticker='+encodeURIComponent(NP.ticker))).json()).events||[]; }
+      catch(e){ NP.events[NP.ticker]=[]; }
+    }
+    const evs=NP.events[NP.ticker], first=notes.length?notes[0].pricing_date:'', last=notes.length?notes[notes.length-1].pricing_date:'';
+    const inRange=evs.filter(e=>!first||(e.date>=first&&e.date<=last));
+    Object.keys(NP_EVENT_STYLE).forEach(type=>{
+      const es=inRange.filter(e=>e.type===type); if(!es.length) return;
+      const [sym,col,label]=NP_EVENT_STYLE[type];
+      traces.push({type:'scatter',mode:'markers',name:label,x:es.map(e=>e.date),y:es.map(()=>NP.ticker+' events'),
+        marker:{symbol:sym,size:11,color:col,line:{color:col,width:1}},text:es.map(e=>e.form),hovertemplate:'%{x} · '+label+' (%{text})<extra></extra>'});
+      es.forEach(e=>shapes.push({type:'line',xref:'x',yref:'paper',x0:e.date,x1:e.date,y0:0,y1:1,line:{color:col,width:1,dash:'dot'},opacity:.35}));
+    });
+  }
+  Plotly.react('np_timeline',traces,npLayout({shapes,showlegend:!!NP.ticker,yaxis:{type:'category',gridcolor:'#30363d',color:'#8b949e',automargin:true},margin:{l:150,r:20,t:20,b:40}}),{displaylogo:false,responsive:true});
+}
+function npSeries(field,transform){
+  const by={};
+  npNotes().forEach(n=>{let y=n[field]; if(y==null) return; y=transform?transform(y):y; if(y==null) return;
+    (by[n.issuer_cik]=by[n.issuer_cik]||[]).push({x:n.pricing_date,y});});
+  const traces=[];
+  Object.keys(by).forEach(cik=>{
+    const pts=by[cik].sort((a,b)=>a.x<b.x?-1:1), col=npColor(cik), name=npShort(NP.byIssuer[cik].name);
+    traces.push({type:'scattergl',mode:'markers',name,legendgroup:cik,showlegend:false,x:pts.map(p=>p.x),y:pts.map(p=>p.y),marker:{color:col,size:5,opacity:.25},hovertemplate:name+' %{x}: %{y}<extra></extra>'});
+    const med=npRollingMedian(pts,12);
+    traces.push({type:'scatter',mode:'lines',name,legendgroup:cik,x:med.map(p=>p.x),y:med.map(p=>p.y),line:{color:col,width:2},hovertemplate:name+' rolling median %{y}<extra></extra>'});
+  });
+  return traces;
+}
+function npBarrier(){
+  Plotly.react('np_barrier',npSeries('barrier_pct'),npLayout({yaxis:{title:'barrier, % of initial',gridcolor:'#30363d',color:'#8b949e'}}),{displaylogo:false,responsive:true});
+}
+function npMarkup(){
+  Plotly.react('np_markup',npSeries('estimated_value',v=>(v>=800&&v<=1000)?Math.round((1000-v)*100)/100:null),
+    npLayout({yaxis:{title:'$ kept per $1,000',gridcolor:'#30363d',color:'#8b949e'}}),{displaylogo:false,responsive:true});
+}
+function npSurface(){
+  const el=document.getElementById('np_surface'); if(!el) return;
+  const r=NP.results&&NP.results.issuers&&NP.results.issuers[NP.surface];
+  const notes=(NP.data.notes||[]).filter(n=>n.issuer_cik===NP.surface&&n.coupon_rate!=null&&n.vol60_max!=null&&(n.barrier_pct??n.coupon_barrier_pct)!=null);
+  const traces=[];
+  if(r&&r.surface) traces.push({type:'surface',x:r.surface.vol,y:r.surface.barrier,z:r.surface.coupon,colorscale:'Viridis',opacity:.85,showscale:false,
+    hovertemplate:'vol %{x}% · barrier %{y}% → coupon %{z:.2f}%<extra>fitted</extra>'});
+  traces.push({type:'scatter3d',mode:'markers',x:notes.map(n=>n.vol60_max),y:notes.map(n=>n.barrier_pct??n.coupon_barrier_pct),z:notes.map(n=>n.coupon_rate),
+    marker:{size:3,color:npColor(NP.surface)},text:notes.map(n=>n.accession),hovertemplate:'vol %{x}% · barrier %{y}% · coupon %{z}%<br>%{text}<extra>note</extra>'});
+  const ax=t=>({title:t,gridcolor:'#30363d',color:'#8b949e',backgroundcolor:'rgba(0,0,0,0)'});
+  Plotly.react('np_surface',traces,npLayout({margin:{l:0,r:0,t:10,b:0},scene:{xaxis:ax('60-day vol %'),yaxis:ax('barrier %'),zaxis:ax('coupon %')},
+    annotations:r&&r.surface?[]:[{text:'No fitted surface yet (model not run or too few notes) — showing the notes only.',showarrow:false,x:.5,y:.95,xref:'paper',yref:'paper',font:{color:'#8b949e'}}]}),{displaylogo:false,responsive:true});
+}
+function npStd(){
+  const res=NP.results, traces=[];
+  if(res&&res.issuers) Object.keys(res.issuers).filter(c=>NP.issuers.has(c)).forEach(cik=>{
+    const w=(res.issuers[cik].windows||[]).filter(x=>!x.skipped); if(!w.length) return;
+    traces.push({type:'scatter',mode:'lines+markers',name:npShort(res.issuers[cik].issuer),x:w.map(x=>x.quarter),y:w.map(x=>x.standard_note),
+      error_y:{type:'data',array:w.map(x=>x.sd),visible:true,thickness:1,width:3},line:{color:npColor(cik)},hovertemplate:'%{x}: %{y:.2f}% ± %{error_y.array:.2f}<extra>'+esc(npShort(res.issuers[cik].issuer))+'</extra>'});
+  });
+  Plotly.react('np_std',traces,npLayout({yaxis:{title:'fitted coupon %',gridcolor:'#30363d',color:'#8b949e'},xaxis:{type:'category',gridcolor:'#30363d',color:'#8b949e'},
+    annotations:traces.length?[]:[{text:'Model not run yet.',showarrow:false,x:.5,y:.5,xref:'paper',yref:'paper',font:{color:'#8b949e'}}]}),{displaylogo:false,responsive:true});
+}
+function npFit(){
+  const res=NP.results, traces=[], rows=[];
+  if(res&&res.issuers) Object.keys(res.issuers).forEach(cik=>{
+    const r=res.issuers[cik];
+    rows.push(r);
+    if(!NP.issuers.has(cik)||!r.residuals) return;
+    traces.push({type:'box',name:npShort(r.issuer),y:r.residuals.map(x=>Math.round((x.actual-x.fitted)*100)/100),marker:{color:npColor(cik)},boxpoints:'outliers',hovertemplate:'%{y} pp<extra></extra>'});
+  });
+  Plotly.react('np_fit',traces,npLayout({showlegend:false,yaxis:{title:'actual − fitted coupon (pp)',gridcolor:'#30363d',color:'#8b949e',zeroline:true},
+    annotations:traces.length?[]:[{text:'Model not run yet.',showarrow:false,x:.5,y:.5,xref:'paper',yref:'paper',font:{color:'#8b949e'}}]}),{displaylogo:false,responsive:true});
+  const badge=v=>({consistent:'<span style="color:var(--green)">consistent</span>',not_consistent:'<span style="color:var(--red)">not consistent</span>',insufficient:'<span class="muted">insufficient</span>'}[v]||esc(v||''));
+  const vt=document.getElementById('np_verdicts');
+  if(!vt) return;
+  vt.innerHTML=rows.length?`<div class="muted" style="font-size:11px;margin:8px 0 4px">Rule (declared before fitting): consistent when held-out R² ≥ ${res.rule.min_r2}, held-out error ≤ ${res.rule.max_rmse_pp} pp, and at most ${res.rule.max_regime_shifts} regime shift.</div>
+    <table style="font-size:11.5px;width:100%"><tr><th>Bank</th><th class="num">Notes</th><th class="num">k</th><th class="num">R²</th><th class="num">Error (pp)</th><th>Regime shifts</th><th>Verdict</th></tr>
+    ${rows.sort((a,b)=>b.n-a.n).map(r=>`<tr><td>${esc(npShort(r.issuer))}</td><td class="num">${r.n}</td><td class="num">${r.k??'—'}</td><td class="num">${r.r2!=null?r.r2.toFixed(2):'—'}</td><td class="num">${r.rmse!=null?r.rmse.toFixed(2):'—'}</td>
+      <td>${esc((r.regime_shifts||[]).join(', ')||'—')}</td><td>${badge(r.verdict)}${(r.reasons||[]).length?`<div class="muted" style="font-size:10.5px">${esc(r.reasons.join('; '))}</div>`:''}</td></tr>`).join('')}</table>`
+    :'<div class="muted" style="font-size:12px;margin-top:6px">Run the model once the dataset has filled: <code>python Research/note_pricing/model.py</code>.</div>';
+}
+
 // Testing: pick two runs, get the per-field before/after. The numbers come from
 // compare_runs.py (#180) through /api/tools/testing/compare, so the page and the
 // CLI cannot disagree about what "spanned" means.
@@ -5913,7 +6118,8 @@ const SECTIONS={
                 ['testing','Testing',renderToolTesting],
                 ['magic-formula','Magic Formula',()=>renderToolModel('magic-formula')],
                 ['smart-money-score','Smart Money',()=>renderToolModel('smart-money-score')],
-                ['dealer-hedging-barrier-test','Dealer Hedging',()=>renderDealerHedging()]]},
+                ['dealer-hedging-barrier-test','Dealer Hedging',()=>renderDealerHedging()],
+                ['note-pricing','Note Pricing',()=>renderNotePricing()]]},
   research:{label:'Research', icon:'🔬', desc:'Hypothesis projects — prediction, evidence, verdict',
           tabs:[['projects','Projects',renderResearchProjects]]},
 };

@@ -2618,6 +2618,34 @@ server.edgar_search = _prev_search
 server.build_research_provider = _prev_build
 server.RESEARCH = _prev_research
 
+# #368: the Note Pricing tab's routes -- empty before a build, rows and results after.
+section("note pricing: data / results routes (#368)")
+_npd = server._np_module("data")
+_np_prev_home, _np_prev_dir = _npd.HOME, server.NOTE_PRICING_DIR
+_np_tmp = Path(tempfile.mkdtemp(prefix="np-"))
+_npd.HOME = _np_tmp / "home"
+server.NOTE_PRICING_DIR = _np_tmp / "dir"
+server.NOTE_PRICING_DIR.mkdir()
+check("note pricing: no dataset reads as an empty set",
+      server.note_pricing_data() == {"notes": [], "coverage": None})
+check("note pricing: no model results reads as None", server.note_pricing_results() == {"results": None})
+_np_conn = _npd.connect(_npd.HOME)
+_np_row = {c: None for c in _npd.COLUMNS}
+_np_row.update(accession="0001-26-000001", issuer="Bank", issuer_cik="0000000001", pricing_date="2026-09-01",
+               filing_date="2026-09-02", tickers='["NVDA"]', underlyings='["NVIDIA Corporation"]',
+               selling_agents='["X Securities LLC"]', coupon_rate=12.0, barrier_pct=60.0)
+_np_conn.execute(f"INSERT INTO notes ({', '.join(_npd.COLUMNS)}) VALUES ({', '.join('?' * len(_npd.COLUMNS))})",
+                 [_np_row[c] for c in _npd.COLUMNS])
+_np_conn.commit()
+_np_conn.close()
+_np_got = server.note_pricing_data()
+check("note pricing: rows come back with their JSON lists decoded",
+      len(_np_got["notes"]) == 1 and _np_got["notes"][0]["tickers"] == ["NVDA"]
+      and _np_got["coverage"]["notes"] == 1)
+(server.NOTE_PRICING_DIR / "results.json").write_text(json.dumps({"issuers": {}}), encoding="utf-8")
+check("note pricing: model results are read back", server.note_pricing_results() == {"results": {"issuers": {}}})
+_npd.HOME, server.NOTE_PRICING_DIR = _np_prev_home, _np_prev_dir
+
 # #343: the Dealer Hedging tab's endpoints -- results read back, one run at a time.
 section("dealer hedging: results + background run (#343)")
 import time as _dh_time

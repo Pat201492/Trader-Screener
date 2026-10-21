@@ -3231,6 +3231,82 @@ def start_dealer_hedging_run(params):
     return 202, {"status": "running", "build": build}
 
 
+# ── Note pricing (#368) ────────────────────────────────────────────────────
+# The Note Pricing tab reads the issuer-sampled dataset (#365), the per-issuer
+# model results (#367) and per-stock company events (#366). The research
+# modules are loaded by file path: `data.py` is too generic a name to put on
+# the server's import path.
+
+NOTE_PRICING_DIR = REPO_ROOT / "Research" / "note_pricing"
+_NP_MODULES = {}
+
+
+def _np_module(name):
+    if name not in _NP_MODULES:
+        import importlib.util
+        research = str(NOTE_PRICING_DIR)
+        if research not in sys.path:
+            sys.path.insert(0, research)          # events.py imports `data`
+        for dep in ("data", name):
+            if f"np_{dep}" in _NP_MODULES:
+                continue
+            spec = importlib.util.spec_from_file_location(f"np_{dep}", NOTE_PRICING_DIR / f"{dep}.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _NP_MODULES[f"np_{dep}"] = mod
+        _NP_MODULES[name] = _NP_MODULES[f"np_{name}"]
+    return _NP_MODULES[name]
+
+
+def note_pricing_data():
+    """GET /api/tools/note-pricing/data: every sampled note (slim columns)
+    plus coverage, or an empty set before the first build."""
+    import sqlite3
+    npd = _np_module("data")
+    db = npd.HOME / "notes.sqlite"
+    if not db.exists():
+        return {"notes": [], "coverage": None}
+    conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    try:
+        cols = list(npd.COLUMNS)
+        notes = []
+        for row in conn.execute(f"SELECT {', '.join(cols)} FROM notes ORDER BY pricing_date"):
+            rec = dict(zip(cols, row))
+            for k in ("selling_agents", "underlyings", "tickers"):
+                try:
+                    rec[k] = json.loads(rec[k] or "[]")
+                except ValueError:
+                    rec[k] = []
+            notes.append(rec)
+        return {"notes": notes, "coverage": npd.coverage(conn)}
+    finally:
+        conn.close()
+
+
+def note_pricing_results():
+    """GET /api/tools/note-pricing/results: the model's results.json, or None."""
+    path = NOTE_PRICING_DIR / "results.json"
+    if not path.exists():
+        return {"results": None}
+    try:
+        return {"results": json.loads(path.read_text(encoding="utf-8"))}
+    except ValueError:
+        return {"results": None, "error": "results.json is not valid JSON"}
+
+
+def note_pricing_events(ticker, start, end):
+    """GET /api/tools/note-pricing/events?ticker=&from=&to=: the company's
+    reports, earnings, meetings and presentations (EDGAR metadata, cached)."""
+    from edgar_client import EdgarClient
+    ua = os.environ.get("EDGAR_USER_AGENT", "").strip()
+    if not ua:
+        raise RuntimeError("EDGAR_USER_AGENT is not set")
+    ev = _np_module("events")
+    home = Path(os.environ.get("EDGAR_SCRUBBER_HOME", DEFAULT_HOME)).expanduser()
+    client = EdgarClient(user_agent=ua, cache_dir=str(home / "cache"))
+    return {"ticker": (ticker or "").upper(), "events": ev.events_for_ticker(client, ticker, start, end)}
+
+
 def research_digest_for(results):
     """The no-model digest of every hit across a batch's results (a seam: the
     tests replace it, so approval stays network-free there)."""
@@ -4672,6 +4748,20 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"error": "scrubbers registry not available"}, 503)
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+        if path == "/api/tools/note-pricing/data":
+            try:
+                return self._json(note_pricing_data())
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+        if path == "/api/tools/note-pricing/results":
+            return self._json(note_pricing_results())
+        if path == "/api/tools/note-pricing/events":
+            first = lambda k, d=None: (qs.get(k) or [d])[0]
+            try:
+                return self._json(note_pricing_events(first("ticker", ""), first("from", "2000-01-01"),
+                                                      first("to", "2100-01-01")))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 502)
         if path == "/api/tools/dealer-hedging/results":
             return self._json(dealer_hedging_results())
         if path == "/api/tools/testing/compare":
