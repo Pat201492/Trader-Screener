@@ -254,8 +254,12 @@ def note_row(issuer, cik, accession, file_date, terms, market, lookup):
 
 
 def _default_extract(client, cik, accession):
+    """Key terms from the primary document alone (#372: fetching every
+    exhibit cost ~5 s a note)."""
     import research_digest
-    return research_digest.key_terms_for_filing(client, cik, accession)
+    from document_expand import expand_accession
+    return research_digest.key_terms_for_filing(
+        client, cik, accession, expand=lambda c, k, a: expand_accession(c, k, a, primary_only=True))
 
 
 def _weeks(n_weeks, today=None):

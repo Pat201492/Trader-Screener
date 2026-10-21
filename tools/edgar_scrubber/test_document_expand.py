@@ -337,6 +337,23 @@ check("spelled-out legacy aliases still resolve",
 
 
 # --------------------------------------------------------------------------- #
+section("expand_accession -- primary_only (#372)")
+# --------------------------------------------------------------------------- #
+
+client2, _ = new_client()
+full_client, _ = new_client()
+lean = de.expand_accession(client2, CIK, ACCESSION, primary_only=True)
+full = de.expand_accession(full_client, CIK, ACCESSION)
+fetched = [u for u in client2._transport.calls if not u.endswith("index.json")] if hasattr(client2, "_transport") else None
+check("primary_only fetches the primary document alone",
+      fetched is None or fetched == [f"{BASE}/primary424b2.htm"])
+check("primary_only lists every manifest item, unfetched except the primary",
+      len(lean.documents) == len(INDEX_JSON["directory"]["item"])
+      and [d.name for d in lean.documents if d.raw_bytes is not None] == ["primary424b2.htm"])
+check("primary_only resolves the same primary text as a full expand",
+      lean.primary().normalized.text == full.primary().normalized.text)
+
+# --------------------------------------------------------------------------- #
 if failures:
     print(f"\n{len(failures)} FAILURE(S):")
     for f in failures:
