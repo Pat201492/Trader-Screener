@@ -4774,6 +4774,15 @@ async function renderDealerHedging(){
           empirical p ${sm.empirical_p!=null?Number(sm.empirical_p).toFixed(3):'—'}</div></div>
       <div class="muted" style="font-size:11.5px;margin-top:4px">${esc((res.universe||{}).tickers)} underlyings × ${esc((res.universe||{}).days)} trading days ·
         matched on ${esc((res.universe||{}).matched_on||'')} · ran ${esc(res.ran_at||'')}</div>`;
+    // The same grid matched on options OI too, on the days point-in-time OI
+    // exists for every underlying (#360) -- or how far that history has got.
+    const om=res.oi_matched;
+    if(om&&om.skipped) verdict+=`<div class="muted" style="font-size:11.5px;margin-top:6px">OI-matched check: waiting for point-in-time options OI — ${esc(om.oi_days)} of ${esc(om.min_oi_days)} days so far.</div>`;
+    else if(om&&om.summary){
+      const os=om.summary, opc=om.placebo_confirming||[];
+      verdict+=`<div style="font-size:12px;margin-top:6px">OI-matched check (${esc((om.window||[])[0]||'')} → ${esc((om.window||[])[1]||'')}, ${esc(om.oi_days)} OI days):
+        <b>${esc((os.verdict||'').toUpperCase())}</b> <span class="muted">· ${n(os.n_confirming)} of ${n(os.n_scored)} scored confirm · placebo ${opc.length?Math.min(...opc)+'–'+Math.max(...opc):'—'} · p ${os.empirical_p!=null?Number(os.empirical_p).toFixed(3):'—'}</span></div>`;
+    }
   }
   const f=x=>(x==null?'—':(x>=0?'+':'')+Number(x).toFixed(4));
   const pv=x=>(x==null?'':` <span class="muted">p=${Number(x).toFixed(3)}</span>`);

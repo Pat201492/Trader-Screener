@@ -511,13 +511,15 @@ def _match_full_scan(treated, controls):
 CONTROL_RULES = ("zero", "low_tercile")
 
 
-def run_trial(universe, tickers, issuance_window, proximity_pct, horizon, control="zero"):
+def run_trial(universe, tickers, issuance_window, proximity_pct, horizon, control="zero", obs_days=None):
     """Build treatment/control observation pools, match, and test both
     outcomes for one (issuance_window, proximity_pct, horizon) cell."""
     assert control in CONTROL_RULES
     treated_obs, control_obs = [], []
     n_days = len(universe[tickers[0]]["closes"])
     for i in range(70, n_days - horizon):
+        if obs_days is not None and i not in obs_days:
+            continue
         percentiles = issuance_intensity_percentile(universe, tickers, i, issuance_window)
         for tk in tickers:
             if not near_barrier(universe, tk, i, proximity_pct):
@@ -570,13 +572,14 @@ def run_trial(universe, tickers, issuance_window, proximity_pct, horizon, contro
 
 # ── Full declared grid + verdict ─────────────────────────────────────────
 
-def run_declared_grid(universe, control="zero"):
+def run_declared_grid(universe, control="zero", obs_days=None):
     tickers = list(universe.keys())
     results = []
     for window in ISSUANCE_WINDOWS:
         for prox in BARRIER_PROXIMITY_PCTS:
             for horizon in HORIZONS:
-                r = run_trial(universe, tickers, window, prox, horizon, control=control)
+                r = run_trial(universe, tickers, window, prox, horizon, control=control,
+                              obs_days=obs_days)
                 r.update(issuance_window=window, proximity_pct=prox, horizon=horizon)
                 results.append(r)
     assert len(results) == TRIAL_COUNT
@@ -743,11 +746,36 @@ def real_universe(dataset, prices, oi_by_ticker=None):
     meta = {"tickers": len(universe), "days": len(days), "first_day": days[0], "last_day": days[-1],
             "matched_on": "size+ADV+OI" if with_oi else "size+ADV (no point-in-time OI yet)",
             "excluded": sorted(set(dataset["tickers"]) - set(universe)),
-            "mkt_cap_imputed": sorted(tk for tk, u in universe.items() if u.get("mkt_cap_imputed"))}
+            "mkt_cap_imputed": sorted(tk for tk, u in universe.items() if u.get("mkt_cap_imputed")),
+            "_days": days}
     return universe, meta
 
 
 REAL_PLACEBO_SEEDS = tuple(f"shift-{k}" for k in range(20))
+MIN_OI_DAYS = 60   # common point-in-time OI days before the OI-matched grid runs (#360)
+
+
+def oi_window_universe(universe, days, oi_by_ticker):
+    """(universe_with_oi, obs_days, n_common) for the OI-matched grid (#360).
+
+    The whole calendar stays (issuance windows and prices need their
+    history); OI is filled in from each ticker's own history -- carried
+    forward over a missing day, never back before its first snapshot -- and
+    an observation day i is used only when EVERY ticker has OI at i-1, the
+    prior close the matching covariates read. n_common counts those days."""
+    oi_by_ticker = oi_by_ticker or {}
+    out, have = {}, None
+    for tk, u in universe.items():
+        hist = oi_by_ticker.get(tk) or {}
+        last, series = None, []
+        for d in days:
+            last = hist.get(d, last)
+            series.append(last)
+        out[tk] = {**u, "total_oi": series}
+        ok = {k for k, x in enumerate(series) if x is not None}
+        have = ok if have is None else have & ok
+    obs = {i for i in range(1, len(days)) if (i - 1) in (have or set())}
+    return out, obs, len(have or ())
 
 
 def real_placebo_universe(universe, seed):
@@ -787,6 +815,7 @@ def run_real(dataset, prices, oi_by_ticker=None, seeds=REAL_PLACEBO_SEEDS, log=p
     universe, meta = real_universe(dataset, prices, oi_by_ticker)
     meta["excluded_by_design"] = dict(exclude)
     if len(universe) < 4:
+        meta.pop("_days", None)
         return {"ok": False, "reason": f"only {len(universe)} priced underlyings", "universe": meta}
     log(f"real universe: {meta['tickers']} underlyings x {meta['days']} days, matched on {meta['matched_on']}")
     results = run_declared_grid(universe, control="low_tercile")
@@ -797,9 +826,27 @@ def run_real(dataset, prices, oi_by_ticker=None, seeds=REAL_PLACEBO_SEEDS, log=p
         placebo.append((len(confirming), len({r["direction"] for r in confirming}) <= 1 and bool(confirming)))
         log(f"  placebo {seed}: {placebo[-1][0]} confirming")
     summary = determine_verdict(results, placebo)
+    days = meta.pop("_days")
+    oi_universe, obs, n_oi = oi_window_universe(universe, days, oi_by_ticker)
+    if n_oi < MIN_OI_DAYS:
+        oi_block = {"skipped": True, "oi_days": n_oi, "min_oi_days": MIN_OI_DAYS}
+    else:
+        log(f"OI-matched grid: {n_oi} common OI days")
+        oi_results = run_declared_grid(oi_universe, control="low_tercile", obs_days=obs)
+        oi_placebo = []
+        for seed in seeds:
+            pr = run_declared_grid(real_placebo_universe(oi_universe, seed), control="low_tercile", obs_days=obs)
+            c = [r for r in pr if not r["underpowered"] and r["confirms_difference"]]
+            oi_placebo.append((len(c), len({r["direction"] for r in c}) <= 1 and bool(c)))
+        first = days[min(obs) - 1] if obs else None
+        oi_block = {"skipped": False, "oi_days": n_oi, "window": [first, days[-1]],
+                    "matched_on": "size+ADV+OI", "trials": oi_results,
+                    "placebo_confirming": [c for c, _ in oi_placebo],
+                    "summary": determine_verdict(oi_results, oi_placebo)}
     meta["control_rule"] = "low_tercile: zero issuance, or bottom third of the day's rank"
     meta["index_counts"] = INDEX_COUNT_NOTE
     return {"ok": True, "universe": meta, "trials": results, "placebo_confirming": [c for c, _ in placebo],
+            "oi_matched": oi_block,
             "summary": summary, "trial_count": TRIAL_COUNT, "lookahead_posture": LOOKAHEAD_POSTURE}
 
 
