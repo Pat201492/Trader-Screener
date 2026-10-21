@@ -178,13 +178,17 @@ class AccessionDocuments:
         return None
 
 
-def expand_accession(client, cik, accession, *, fetch_graphics=False):
+def expand_accession(client, cik, accession, *, fetch_graphics=False, primary_only=False):
     """Fetch `index.json` for `(cik, accession)` and expand EVERY item in its
     manifest -- not just the primary document. Prose/HTML items are run
     through `normalize_html`; the EX-107 fee exhibit (if present) is also
     parsed for its inline-XBRL `ffd:` facts. Graphics are skipped by default
     (`fetch_graphics=True` to include them) since they carry no extractable
     text and would otherwise burn the 10 req/s ceiling for nothing.
+
+    `primary_only=True` fetches and normalizes the primary document alone
+    (the other items are listed, unfetched): the key terms live there, and a
+    sample of thousands of notes (#372) cannot afford ~15 fetches each.
     """
     index_json = client.filing_index(cik, accession)
     items = ((index_json.get("directory", {}) or {}).get("item", []) or [])
@@ -211,7 +215,7 @@ def expand_accession(client, cik, accession, *, fetch_graphics=False):
         if fallback_primary and name == fallback_primary and category == "other":
             category = "primary"
 
-        if category == "graphic" and not fetch_graphics:
+        if (category == "graphic" and not fetch_graphics) or (primary_only and category != "primary"):
             documents.append(ExpandedDocument(name, doc_type, size, category))
             continue
 
