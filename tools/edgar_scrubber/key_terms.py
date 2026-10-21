@@ -668,12 +668,149 @@ _DENOM_PROSE_RE = re.compile(
     r"minimum denominations of \$\s?(\d{1,3}(?:,\d{3})*)(?:\.00)?\s+and integral multiples", re.I)
 
 
+# ── Selling agents and their commission (#364) ──────────────────────────────
+
+_AGENT_LABELS = ("agent", "agents", "selling agent", "selling agents", "placement agent",
+                 "placement agents", "underwriter", "underwriters", "agent's commission and other fees",
+                 "agent’s commission and other fees", "fees and commissions")
+# A firm: 1-6 capitalised words (initials "J.P.", "&"), an optional "(USA)",
+# an optional comma, then a broker-dealer suffix -- "Wells Fargo Securities,
+# LLC", "Morgan Stanley & Co. LLC", "HSBC Securities (USA) Inc.".
+_FIRM = (r"(?:[A-Z][\w.'’-]*|&)(?:\s+(?:[A-Z][\w.'’-]*|&)){0,5}(?:\s+\(USA\))?"
+         r",?\s+(?:LLC|L\.L\.C\.|Inc\.|Corp\.|Corporation|Limited|Ltd\.|plc|PLC|L\.P\.|N\.A\.)")
+_FIRM_RE = re.compile(r"(?<![\w.])(" + _FIRM + r")")
+# A period that ends "Co." / "Inc." / an initial is not a sentence end:
+# "Morgan Stanley & Co. LLC" must survive the split.
+_SENTENCE_END = (r"(?<!\bCo)(?<!\bInc)(?<!\bCorp)(?<!\bLtd)(?<!\bN\.V)(?<!\b[A-Z])"
+                 r"\.\s+(?=[A-Z])")
+_PROSE_AGENT = re.compile(
+    r"(?:will act as|acting as|act as|is|are|,?\s*as)\s+(?:an?\s+|the\s+|our\s+)?(?:sole\s+|lead\s+)?"
+    r"(?:selling\s+|placement\s+)?(?:agents?|underwriters?)\b(?!\s+(?:discount|for the calculation))")
+
+
+def _firm_definitions(text):
+    """{defined name: firm} for every `Firm (“Name”)` on the document --
+    "BofA Securities, Inc. (“BofAS”)", "Wells Fargo Securities, LLC (“Wells
+    Fargo”)" -- plus "Firm, which we refer to as NAME"."""
+    out = {}
+    for m in re.finditer(r"(" + _FIRM + r")(?:’s|'s)?\s*\((?:the\s+)?[“\"]([^”\"]{2,30})[”\"]", text):
+        out.setdefault(m.group(2).strip(), " ".join(_FIRM_RE.search(m.group(1)).group(1).split()))
+    for m in re.finditer(r"(" + _FIRM + r"),\s+which we refer to as ([A-Z][\w&.]{1,10})", text):
+        out.setdefault(m.group(2), " ".join(_FIRM_RE.search(m.group(1)).group(1).split()))
+    return out
+
+
+def _firms_in(text, chunk):
+    """Firm names in `chunk`, in order -- spelled out, or as names the
+    document defines (an undefined word is not a firm)."""
+    spans = [(m.start(1), m.end(1), " ".join(m.group(1).split())) for m in _FIRM_RE.finditer(chunk)]
+    for short, full in _firm_definitions(text).items():
+        for m in re.finditer(r"(?<![\w“\"])" + re.escape(short) + r"(?![\w”\"])", chunk):
+            if not any(a <= m.start() < e for a, e, _ in spans):
+                spans.append((m.start(), m.end(), full))
+    names = []
+    for _, _, n in sorted(spans):
+        n = re.sub(r"^(?:The|and|by)\s+", "", n)
+        if n not in names:
+            names.append(n)
+    # "Morgan Securities LLC" read from a line break inside "J.P. Morgan
+    # Securities LLC" is the same firm: keep the longest spelling.
+    return [n for n in names if not any(o != n and o.endswith(" " + n) for o in names)]
+
+
+def _selling_agents(text, terms, exclude=()):
+    """KeyTermValue with the list of selling agents, or None. Every firm in
+    the agent term's first sentence ("Morgan Stanley & Co. LLC (“MS & Co.”),
+    an affiliate of MSFL ..., and Wells Fargo Securities, LLC (“WFS”)"), else
+    in the sentence that says who acts as agent ("CGMI, as the lead agent ...,
+    expects to sell the securities to Wells Fargo Securities, LLC ..., as
+    agent"). The note's own issuer and guarantor are never agents."""
+    skip = {" ".join(str(x).split()).lower() for x in exclude if x}
+
+    def keep(names):
+        return [n for n in names if n.lower() not in skip]
+
+    for t in terms:
+        if t.label not in _AGENT_LABELS:
+            continue
+        head = re.split(_SENTENCE_END, t.value[:500], maxsplit=1)[0]
+        names = keep(_firms_in(text, head))
+        if names:
+            s0 = t.value_start
+            return KeyTermValue("selling_agents", names, t.value[:len(head)], (s0, s0 + len(head)),
+                                t.raw_label, "term")
+    for m in _PROSE_AGENT.finditer(text):
+        lo = max(0, m.start() - 400)
+        starts = [x.end() for x in re.finditer(_SENTENCE_END, text[lo:m.start()])]
+        s0 = lo + (starts[-1] if starts else 0)
+        nxt = re.search(_SENTENCE_END, text[m.end():m.end() + 400])
+        e0 = m.end() + (nxt.start() if nxt else 0)
+        names = keep(_firms_in(text, text[s0:e0]))
+        if names:
+            return KeyTermValue("selling_agents", names, text[s0:e0], (s0, e0), "agent (prose)", "prose")
+    return None
+
+
+_PER_UNIT = r"per\s+(?:\$1,000\s+)?(?:stated\s+)?(?:principal\s+amount\s+)?(?:security|note|unit)"
+_HEDGE = re.compile(r"(?:up to|not more than|no more than|maximum|exceed)", re.I)
+# The cover's price table, which nearly every issuer prints: "Original
+# Offering Price Agent Discount Proceeds ... Per Security: $1,000.00 $23.25
+# $976.75" (GS: "... up to $23.25 ..."); Citi labels the row instead:
+# "Maximum Underwriting Discount and Commission(2)(3): $23.25".
+_TABLE_COMMISSION = re.compile(
+    r"Per (?:Security|Note|Unit):?\s*\$1,000(?:\.00)?\s+(up to\s+)?\$\s?(\d{1,3}(?:\.\d{1,4})?)\b", re.I)
+_LABELLED_COMMISSION = re.compile(
+    r"(Maximum\s+)?Underwriting Discount and Commission[^:$\n]{0,20}:\s*(?:up to\s+)?\$\s?(\d{1,3}(?:\.\d{1,4})?)\b", re.I)
+_TEXT_COMMISSION = re.compile(r"\$\s?(\d{1,3}(?:\.\d{1,4})?)\s+" + _PER_UNIT, re.I)
+
+
+def _agent_commission(text, terms, denom=1000.0):
+    """The agent's commission as a percent of principal. The cover price
+    table first (its "Agent Discount" / "Underwriting Discount" column), then
+    a commission sentence ("$23.25 per security", "exceed $27.50 per
+    $1,000"). bound="max" for a ceiling ("up to", "Maximum", "exceed").
+    None when no figure is stated."""
+    def value(m, amt_group, hedged):
+        amt = float(m.group(amt_group))
+        if denom and amt >= denom * 0.2:
+            return None                   # a price, not a commission
+        s0 = m.start(amt_group)
+        return amt, s0, hedged
+
+    head = text[:40000]
+    got = None
+    m = _TABLE_COMMISSION.search(head)
+    if m:
+        header = head[max(0, m.start() - 300):m.start()]
+        got = value(m, 2, bool(m.group(1)) or bool(re.search(r"\bmaximum\b", header, re.I)))
+    if got is None:
+        m = _LABELLED_COMMISSION.search(head)
+        if m:
+            got = value(m, 2, bool(m.group(1)) or "up to" in m.group(0).lower())
+    if got is None:
+        for c in re.finditer(r"(?:selling|agent'?s?|agent’s|underwriting)\s+(?:discount and\s+)?"
+                             r"(?:commissions?|discount)", text, re.I):
+            chunk_start = c.start()
+            m = _TEXT_COMMISSION.search(text, chunk_start, chunk_start + 400)
+            if not m:
+                continue
+            got = value(m, 1, bool(_HEDGE.search(text[max(chunk_start, m.start(1) - 80):m.start(1)])))
+            if got:
+                break
+    if not got:
+        return None
+    amt, s0, hedged = got
+    raw = re.match(r"\d{1,3}(?:\.\d{1,4})?", text[s0:]).group(0)
+    return KeyTermValue("agent_commission_pct", round(amt / denom * 100, 6), raw, (s0, s0 + len(raw)),
+                        "commission", "term", "max" if hedged else None)
+
+
 def extract_key_terms(text, fields=None):
     """{field: KeyTermValue} for every field this module can read with
     certainty. Fields it cannot read are absent (left for the model)."""
     wanted = set(fields) if fields else set(FIELD_LABELS) | {
         "estimated_value_per_1000", "estimated_value_low", "estimated_value_high", "filing_stage",
-        "call_premium_schedule"}
+        "call_premium_schedule", "selling_agents", "agent_commission_pct"}
     terms = [t for t in parse_terms(text) if not t.label.startswith("hypothetical")]
     known = sorted({lab for labs in FIELD_LABELS.values() for lab in labs}, key=len, reverse=True)
     by_label = {}
@@ -816,6 +953,19 @@ def extract_key_terms(text, fields=None):
                 out["denomination"] = KeyTermValue("denomination", amt, m.group(1),
                                                    (m.start(1), m.end(1)), "denominations",
                                                    "prose")
+
+    # The selling agent(s) and their commission (#364): who distributes the
+    # note, and what it costs the investor.
+    if "selling_agents" in wanted:
+        got = _selling_agents(text, terms, exclude=[getattr(out.get(f), "value", None)
+                                                     for f in ("issuer", "guarantor")])
+        if got:
+            out["selling_agents"] = got
+    if "agent_commission_pct" in wanted:
+        denom = out["denomination"].value if "denomination" in out else 1000.0
+        got = _agent_commission(text, terms, denom)
+        if got:
+            out["agent_commission_pct"] = got
 
     preliminary = bool(_PRELIM_RE.search(text[:2000]))
 
