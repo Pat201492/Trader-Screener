@@ -179,6 +179,55 @@ class Market:
 
 # ── Underlying -> ticker ───────────────────────────────────────────────────
 
+# Index / ETF names -> the ETF that prices them (#379). Matched on the name
+# lower-cased with registered marks removed. A proxy stands in for its index's
+# volatility, which is what the model reads. Proprietary indices (MerQube's
+# vol-advantage family) have no public price and are deliberately absent.
+PROXIES = (
+    (r"nasdaq-?\s?100.*technology sector", "QTEC"),
+    (r"nasdaq-?\s?100.*futures excess return", "QQQ"),
+    (r"s&p 500.*futures excess return", "SPY"),
+    (r"euro\s*stoxx 50", "FEZ"),
+    (r"msci eafe", "EFA"),
+    (r"msci brazil", "EWZ"),
+    (r"msci emerging markets", "EEM"),
+    (r"20\+ year treasury|treasury 20\+ year", "TLT"),
+    (r"regional banking", "KRE"),
+    (r"gold miners", "GDX"),
+    (r"technology select sector", "XLK"),
+    (r"utilities select sector", "XLU"),
+    (r"financial select sector", "XLF"),
+    (r"consumer discretionary select sector", "XLY"),
+    (r"energy select sector", "XLE"),
+    (r"health care select sector", "XLV"),
+    (r"industrial select sector", "XLI"),
+    (r"s&p.*biotech", "XBI"),
+    (r"ishares.*biotechnology", "IBB"),
+    (r"invesco qqq", "QQQ"),
+    (r"semiconductor etf", "SMH"),
+)
+_PROXY_RES = [(re.compile(pat), tk) for pat, tk in PROXIES]
+# Two index / ETF names glued into one list item by a table layout:
+# "Nasdaq-100 Index® Russell 2000® Index".
+_GLUED = re.compile(r"(?:(?<=Index)|(?<=Fund)|(?<=Trust))(?:®|SM|TM)?(?:®|SM|TM)?\s+(?=[A-Z])|(?<=ETF)\s+(?=[A-Z])")
+
+
+def clean_names(names):
+    """Whitespace collapsed (a line break inside "EURO \\n\\nSTOXX 50"), and
+    glued index/ETF names split apart."""
+    out = []
+    for n in names:
+        n = " ".join(str(n or "").split())
+        if not n:
+            continue
+        parts = [x.strip() for x in _GLUED.split(n) if x.strip()]
+        if len(parts) > 1 and all(re.search(r"(?:Index|ETF|Fund|Trust)(?:®|SM|TM)*$", x) for x in parts):
+            out.extend(parts)
+        else:
+            out.append(n)
+    return out
+
+
 def _ticker_map(client=None):
     """name -> ticker: the dealer-hedging map (indices -> ETF proxies), then
     SEC's company tickers file for any other company name."""
@@ -188,20 +237,29 @@ def _ticker_map(client=None):
     # listing for a key wins -- the file is ordered by market value.
     suffix = re.compile(r"\b(?:incorporated|inc|corporation|corp|company|co|plc|ltd|limited|n v|s a|"
                         r"ag|se|holdings|group|the)\b")
+    state_tag = re.compile(r"\s*/[A-Za-z]{2,3}/?\s*$")         # "DANAHER CORP /DE/"
     short = lambda s: re.sub(r"\s+", " ", suffix.sub("", dh._stock_key(s))).strip()
     titles = {}
     if client is not None:
         try:
             raw = client.get_json(client.TICKERS_URL)
             for row in (raw.values() if isinstance(raw, dict) else raw):
-                k = short(row.get("title", ""))
+                k = short(state_tag.sub("", row.get("title", "")))
                 if k and k not in titles:
                     titles[k] = (row.get("ticker") or "").upper() or None
         except Exception:
             titles = {}
 
     def lookup(name):
-        return dh.ticker_for_name(name) or titles.get(short(name))
+        name = " ".join(str(name or "").split())
+        tk = dh.ticker_for_name(name)
+        if tk:
+            return tk
+        norm = dh.normalize_name(name)
+        for rx, proxy in _PROXY_RES:
+            if rx.search(norm):
+                return proxy
+        return titles.get(short(name))
     return lookup
 
 
@@ -222,7 +280,7 @@ def note_row(issuer, cik, accession, file_date, terms, market, lookup):
     pricing = _v(terms, "pricing_date") or file_date
     if pricing > file_date:
         return None, "preliminary"
-    names = [u.get("name") if isinstance(u, dict) else u for u in (_v(terms, "underlyings") or [])]
+    names = clean_names([u.get("name") if isinstance(u, dict) else u for u in (_v(terms, "underlyings") or [])])
     if not names:
         return None, "no underlyings extracted"      # a partial read, not a usable note
     tickers = [lookup(n) for n in names]
@@ -369,13 +427,20 @@ def usable_share(conn):
     return {"notes": n, "usable": u, "share": round(u / n, 4) if n else None}
 
 
-def refresh_market(conn, market):
+def refresh_market(conn, market, lookup=None):
     """Recompute spot and 20/60-day vol on every row from the current price
-    history -- still only closes on or before each pricing date. Returns the
-    number of rows whose volatility changed."""
+    history -- still only closes on or before each pricing date. With
+    `lookup`, the names are cleaned and re-mapped to tickers first (#379), so
+    rows collected before a proxy existed benefit too. Returns the number of
+    rows whose volatility changed."""
     changed = 0
-    for acc, pricing, tickers, old in conn.execute(
-            "SELECT accession, pricing_date, tickers, vol60_max FROM notes").fetchall():
+    for acc, pricing, names, tickers, old in conn.execute(
+            "SELECT accession, pricing_date, underlyings, tickers, vol60_max FROM notes").fetchall():
+        if lookup is not None:
+            names_l = clean_names(json.loads(names or "[]"))
+            tickers = json.dumps([lookup(n) for n in names_l])
+            conn.execute("UPDATE notes SET underlyings = ?, tickers = ?, n_underlyings = ? WHERE accession = ?",
+                         (json.dumps(names_l), tickers, len(names_l) or None, acc))
         spots, v20, v60 = [], [], []
         for tk in json.loads(tickers or "[]"):
             if not tk:
@@ -440,7 +505,10 @@ def main(argv=None):
     if a.cmd == "refresh-market":
         conn = connect()
         before = usable_share(conn)
-        n = refresh_market(conn, Market())
+        from edgar_client import EdgarClient
+        ua = os.environ.get("EDGAR_USER_AGENT", "").strip()
+        client = EdgarClient(user_agent=ua, cache_dir=str(Path.home() / ".edgar-scrubber" / "cache")) if ua else None
+        n = refresh_market(conn, Market(), lookup=_ticker_map(client))
         print(json.dumps({"rows_changed": n, "before": before, "after": usable_share(conn)}, indent=1))
         return
     from edgar_client import EdgarClient

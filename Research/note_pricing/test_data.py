@@ -192,6 +192,39 @@ def test_old_weeks_table_is_migrated(tmp_path):
     assert conn.execute("SELECT sampled, exhausted FROM weeks").fetchone() == (4, 0)
 
 
+# -- #379 proxies and broken names --------------------------------------------
+class _TitlesClient:
+    TICKERS_URL = "t"
+
+    def get_json(self, url):
+        return {"0": {"ticker": "DHR", "title": "DANAHER CORP /DE/"}, "1": {"ticker": "NVDA", "title": "NVIDIA CORP"}}
+
+
+def test_proxies_glued_names_and_state_tags():
+    lk = npd._ticker_map(_TitlesClient())
+    for name, tk in (("EURO \n\nSTOXX 50® Index", "FEZ"), ("Nasdaq-100® Technology Sector IndexSM", "QTEC"),
+                     ("MSCI EAFE® Index", "EFA"), ("iShares® 20+ Year Treasury Bond ETF", "TLT"),
+                     ("SPDR® S&P® Regional Banking ETF", "KRE"), ("Technology Select Sector SPDR® Fund", "XLK"),
+                     ("S&P 500® Futures Excess Return Index", "SPY"), ("Danaher Corporation", "DHR"),
+                     ("NVIDIA Corporation", "NVDA"), ("Russell 2000® Index", "IWM")):
+        assert lk(name) == tk, name
+    assert lk("MerQube US Large-Cap Vol Advantage Index") is None      # proprietary: no public price
+    glued = npd.clean_names(["Nasdaq-100 Index® Russell 2000® Index"])
+    assert len(glued) == 2 and [lk(n) for n in glued] == ["QQQ", "IWM"]
+    assert npd.clean_names(["Advanced Micro Devices, Inc."]) == ["Advanced Micro Devices, Inc."]
+
+
+def test_refresh_market_remaps_old_rows(tmp_path):
+    conn = npd.connect(tmp_path)
+    t = _terms(underlyings=[{"name": "EURO \n\nSTOXX 50® Index"}])
+    row, _ = npd.note_row("JPM", "c", "a-2", "2026-09-03", t, MARKET, lambda n: None)   # old mapping: none
+    conn.execute(f"INSERT INTO notes ({', '.join(npd.COLUMNS)}) VALUES ({', '.join('?' * len(npd.COLUMNS))})",
+                 [row[c] for c in npd.COLUMNS])
+    priced = npd.Market(closes={**CLOSES, "FEZ": CLOSES["NVDA"]}, rates=RATES)
+    assert npd.refresh_market(conn, priced, lookup=npd._ticker_map(None)) == 1
+    assert json.loads(conn.execute("SELECT tickers FROM notes").fetchone()[0]) == ["FEZ"]
+
+
 # -- #377 pricing more underlyings ------------------------------------------
 def test_unpriced_and_refresh_market(tmp_path):
     conn = npd.connect(tmp_path)
