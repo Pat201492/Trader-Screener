@@ -818,6 +818,43 @@
     ],
     "agent_commission_pct": 0.25
    }
+  },
+  {
+   "accession": "0001193125-26-149510",
+   "doc": "0001193125-26-149510.txt.gz",
+   "expected": {
+    "cusip": "40058YQG0",
+    "isin": "US40058YQG07",
+    "maturity_date": "2027-05-12",
+    "pricing_date": "2026-04-07",
+    "issue_date": "2026-04-10",
+    "contingent_coupon_rate": 10.2,
+    "coupon_barrier_pct": 60.0,
+    "barrier_pct": 60.0,
+    "underlyings": [
+     "Eli Lilly and Company"
+    ],
+    "calculation_agent": "Goldman Sachs & Co. LLC"
+   }
+  },
+  {
+   "accession": "0001193125-26-147159",
+   "doc": "0001193125-26-147159.txt.gz",
+   "expected": {
+    "guarantor": "The Goldman Sachs Group, Inc.",
+    "cusip": "40058YYF3",
+    "isin": "US40058YYF32",
+    "maturity_date": "2031-10-06",
+    "pricing_date": "2026-04-06",
+    "issue_date": "2026-04-13",
+    "barrier_pct": 75.0,
+    "underlyings": [
+     "S&P 500® Equal Weight Index",
+     "Dow Jones Industrial Average®",
+     "Russell 2000® Index"
+    ],
+    "calculation_agent": "Goldman Sachs & Co. LLC"
+   }
   }
  ]
 }
