@@ -81,13 +81,17 @@ def test_worst_of_keeps_the_max_vol_and_no_single_spot():
 
 
 class StubClient:
-    """full_text_search by CIK + week; records calls."""
+    """full_text_search by CIK + week; records the main searches in `calls`
+    and the preliminary-phrase searches (#381) in `prelim_calls`."""
     TICKERS_URL = "x"
 
-    def __init__(self, hits):
-        self.hits, self.calls = hits, []
+    def __init__(self, hits, prelims=None):
+        self.hits, self.prelims, self.calls, self.prelim_calls = hits, prelims or {}, [], []
 
-    def full_text_search(self, forms=None, startdt=None, enddt=None, ciks=None, **kw):
+    def full_text_search(self, q=None, forms=None, startdt=None, enddt=None, ciks=None, **kw):
+        if q == npd.PRELIM_QUERY:
+            self.prelim_calls.append((ciks, startdt, enddt))
+            return {"hits": {"total": {"value": 0}, "hits": self.prelims.get((ciks, startdt), [])}}
         self.calls.append((ciks, startdt, enddt))
         return {"hits": {"total": {"value": 0}, "hits": self.hits.get((ciks, startdt), [])}}
 
@@ -125,6 +129,24 @@ def test_week_with_only_preliminaries_stops_after_bounded_tries(tmp_path):
     kept, skipped = npd.sample_week(StubClient(hits), npd.connect(tmp_path), "JPM", "0001665650", w0, w1,
                                     MARKET, LOOKUP, per_week=4, extract=extract)
     assert kept == 0 and skipped == {"preliminary": 24} and len(calls) == 24
+
+
+def test_preliminaries_listed_by_search_are_never_downloaded(tmp_path):
+    w0, w1 = date(2026, 8, 31), date(2026, 9, 6)
+    allh = [_hit(f"0005-26-{i:06d}", "2026-09-03") for i in range(10)]
+    key = ("0001665650", w0.isoformat())
+    c = StubClient({key: allh}, prelims={key: allh[:6]})
+    read = []
+    npd.sample_week(c, npd.connect(tmp_path), "JPM", "0001665650", w0, w1, MARKET, LOOKUP, per_week=10,
+                    extract=lambda cl, cik, acc: read.append(acc) or _terms())
+    assert c.prelim_calls == [key + (w1.isoformat(),)]
+    assert sorted(read) == sorted(h["_source"]["adsh"] for h in allh[6:])
+
+
+def test_invisible_characters_do_not_block_a_mapping():
+    lk = npd._ticker_map(None)
+    assert npd.clean_names(["S&P 500® Futures Excess Return Index‬‬"]) == ["S&P 500® Futures Excess Return Index"]
+    assert lk(npd.clean_names(["EURO STOXX 50® Index​"])[0]) == "FEZ"
 
 
 def test_weeks_are_complete_and_oldest_first():

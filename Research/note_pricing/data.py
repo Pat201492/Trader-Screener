@@ -212,12 +212,16 @@ _PROXY_RES = [(re.compile(pat), tk) for pat, tk in PROXIES]
 _GLUED = re.compile(r"(?:(?<=Index)|(?<=Fund)|(?<=Trust))(?:®|SM|TM)?(?:®|SM|TM)?\s+(?=[A-Z])|(?<=ETF)\s+(?=[A-Z])")
 
 
+_INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
+
+
 def clean_names(names):
-    """Whitespace collapsed (a line break inside "EURO \\n\\nSTOXX 50"), and
-    glued index/ETF names split apart."""
+    """Whitespace collapsed (a line break inside "EURO \\n\\nSTOXX 50"),
+    invisible bidi / zero-width characters stripped (#381: Morgan Stanley's
+    names end in U+202C), and glued index/ETF names split apart."""
     out = []
     for n in names:
-        n = " ".join(str(n or "").split())
+        n = " ".join(_INVISIBLE.sub("", str(n or "")).split())
         if not n:
             continue
         parts = [x.strip() for x in _GLUED.split(n) if x.strip()]
@@ -334,6 +338,9 @@ def _weeks(n_weeks, today=None):
             for k in range(n_weeks - 1, -1, -1)]
 
 
+PRELIM_QUERY = '"Preliminary Pricing Supplement" OR "Subject to Completion"'
+
+
 def sample_week(client, conn, issuer, cik, w0, w1, market, lookup, per_week=4,
                 extract=_default_extract):
     """Bring one issuer-week up to `per_week` kept notes (#376: a re-run with a
@@ -351,6 +358,13 @@ def sample_week(client, conn, issuer, cik, w0, w1, market, lookup, per_week=4,
     need = per_week - have
     page = client.full_text_search(forms=["424B2"], startdt=week, enddt=w1.isoformat(), ciks=cik.zfill(10))
     hits = [parse_hit(h) for h in ((page.get("hits") or {}).get("hits") or [])]
+    # Preliminaries carry no final terms, and were ~70% of all reads (#381).
+    # Search ignores negation, but a positive phrase search lists them, so
+    # they are skipped before anything is downloaded.
+    prelim_page = client.full_text_search(q=PRELIM_QUERY, forms=["424B2"], startdt=week, enddt=w1.isoformat(),
+                                          ciks=cik.zfill(10))
+    prelims = {h.get("accession") for h in (parse_hit(x) for x in ((prelim_page.get("hits") or {}).get("hits") or []))}
+    hits = [h for h in hits if h.get("accession") not in prelims]
     hits = sorted({h["accession"]: h for h in hits if h.get("accession")}.values(),
                   key=lambda h: (h.get("file_date") or "", h["accession"]))
     seen = {r[0] for r in conn.execute("SELECT accession FROM tried WHERE issuer_cik = ?", (cik,))}
