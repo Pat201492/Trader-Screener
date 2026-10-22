@@ -714,6 +714,110 @@
     ],
     "agent_commission_pct": 2.325
    }
+  },
+  {
+   "accession": "0001481057-24-013693",
+   "doc": "0001481057-24-013693.txt.gz",
+   "expected": {
+    "issuer": "BofA Finance",
+    "guarantor": "Bank of America Corporation",
+    "cusip": "09711F4W4",
+    "isin": null,
+    "maturity_date": "2028-10-23",
+    "pricing_date": "2024-10-18",
+    "issue_date": "2024-10-23",
+    "contingent_coupon_rate": 8.76,
+    "coupon_barrier_pct": 75.0,
+    "barrier_pct": 65.0,
+    "autocall_barrier_pct": 100.0,
+    "estimated_value_per_1000": 996.2,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "Nasdaq-100® Index"
+    ],
+    "calculation_agent": "BofA Securities, Inc.",
+    "selling_agents": [
+     "BofA Securities, Inc."
+    ],
+    "agent_commission_pct": 0.0
+   }
+  },
+  {
+   "accession": "0001839882-24-034643",
+   "doc": "0001839882-24-034643.txt.gz",
+   "expected": {
+    "issuer": "Morgan Stanley Finance LLC",
+    "guarantor": "Morgan Stanley",
+    "cusip": "61776WFG3",
+    "isin": "US61776WFG33",
+    "maturity_date": "2027-10-21",
+    "pricing_date": "2024-10-18",
+    "issue_date": "2024-10-23",
+    "contingent_coupon_rate": 15.1,
+    "coupon_barrier_pct": 75.0,
+    "barrier_pct": 60.0,
+    "coupon_frequency": "monthly",
+    "denomination": 1000.0,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "underlyings": [
+     "Russell 2000® Index",
+     "VanEck® Semiconductor ETF",
+     "Nasdaq-100® Technology Sector IndexSM"
+    ],
+    "selling_agents": [
+     "Morgan Stanley & Co. LLC"
+    ],
+    "agent_commission_pct": 0.25
+   }
+  },
+  {
+   "accession": "0001114446-24-005187",
+   "doc": "0001114446-24-005187.txt.gz",
+   "expected": {
+    "issuer": "UBS AG, London Branch",
+    "guarantor": null,
+    "cusip": "90308F841",
+    "isin": "US90308F8418",
+    "maturity_date": "2026-10-29",
+    "pricing_date": "2024-10-24",
+    "issue_date": "2024-10-28",
+    "contingent_coupon_rate": 17.99,
+    "coupon_barrier_pct": 60.0,
+    "denomination": 10.0,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "underlyings": [
+     "NVIDIA Corporation"
+    ]
+   }
+  },
+  {
+   "accession": "0001839882-24-034776",
+   "doc": "0001839882-24-034776.txt.gz",
+   "expected": {
+    "issuer": "UBS AG London Branch",
+    "guarantor": null,
+    "maturity_date": "2027-10-27",
+    "pricing_date": "2024-10-22",
+    "issue_date": "2024-10-25",
+    "contingent_coupon_rate": 11.0,
+    "coupon_barrier_pct": 70.0,
+    "barrier_pct": 70.0,
+    "denomination": 1000.0,
+    "estimated_value_per_1000": 987.7,
+    "estimated_value_low": null,
+    "estimated_value_high": null,
+    "filing_stage": "final",
+    "underlyings": [
+     "Nasdaq-100® Technology Sector IndexSM",
+     "Russell 2000® Index",
+     "S&P 500® Index"
+    ],
+    "agent_commission_pct": 0.25
+   }
   }
  ]
 }
