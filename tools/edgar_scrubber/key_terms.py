@@ -76,7 +76,11 @@ FIELD_LABELS = {
                     "underlying funds", "underlying fund", "reference stocks", "reference stock",
                     "underlying assets", "underlying asset",
                     "reference assets", "reference asset", "market measures", "market measure",
-                    "underliers", "underlier", "indices", "index", "fund"),
+                    "underliers", "underlier", "indices", "index", "fund",
+                    # Goldman (#385): "Underliers (each individually, an
+                    # underlier)", "Underlying index stock", "Index stock".
+                    "underliers (each individually, an underlier)",
+                    "underlying index stock", "index stock"),
     "issuer": ("issuer", "company (issuer)", "issuer (company)"),
     "maturity_date": ("maturity date", "stated maturity date"),
     "pricing_date": ("pricing date", "trade date"),
@@ -88,6 +92,7 @@ FIELD_LABELS = {
     "coupon_barrier_pct": ("coupon barrier", "coupon barrier level", "coupon threshold price",
                            "coupon threshold value", "coupon threshold level",
                            "interest barrier", "interest threshold", "coupon trigger",
+                           "coupon trigger level",       # Goldman (#385)
                            "trigger price/coupon barrier", "trigger level/coupon barrier",
                            # JPMorgan: one level for both coupon and downside.
                            "interest barrier / trigger level", "interest barrier / trigger value"),
@@ -98,7 +103,7 @@ FIELD_LABELS = {
                     "downside threshold level", "downside threshold", "threshold price",
                     "threshold value", "threshold level", "barrier", "barrier level",
                     "barrier price", "barrier amount", "trigger level", "trigger value",
-                    "trigger price", "knock-in level",
+                    "trigger price", "knock-in level", "trigger buffer level",   # Goldman (#385)
                     "trigger price/coupon barrier", "trigger level/coupon barrier",
                     "interest barrier / trigger level", "interest barrier / trigger value"),
 }
@@ -160,7 +165,10 @@ _RATE_PROSE_RE = re.compile(
     r"(?:contingent (?:coupon|interest) rate of\s+(?:at least\s+|approximately\s+)?|\(|"
     # BofA: "$21.90 per $1,000.00 ... (equal to a rate of 2.19% per quarter or
     # 8.76% per annum)" (#383)
-    r"\bor\s+(?:at least\s+|approximately\s+)?)"
+    r"\bor\s+(?:at least\s+|approximately\s+)?|"
+    # Goldman: "$8.5 (0.85% monthly, or the potential for up to 10.20% per
+    # annum)" -- the rate if every coupon pays, i.e. the stated rate (#385)
+    r"potential for up to\s+)"
     r"(\d{1,2}(?:\.\d+)?)\s?%\s*per\s+annum",
     re.I)
 # Morgan Stanley: "a contingent monthly coupon at an annual rate of 15.10%
@@ -370,7 +378,8 @@ def _resolve_defined(text, kt):
 # UN”)", "(current Bloomberg ticker: “GOOGL UW”)", "(Nasdaq Global Select
 # Market symbol: “SPCX”)".
 _TICKER_RE = re.compile(r"\s*\((?:current\s+)?(?:Bloomberg ticker|ticker symbol|"
-                        r"[A-Z][A-Za-z ]{0,40}symbol)\s*:[^)]*\)")
+                        # Goldman drops the colon once: '(current Bloomberg symbol “INDU Index”)' (#385)
+                        r"[A-Z][A-Za-z ]{0,40}symbol)\s*:?\s*[^)]*\)")
 _STOCK_LEAD = re.compile(r"^(?:the\s+|shares\s+of\s+)?(?:(?:class\s+[a-z]\s+)?(?:common|ordinary)\s+"
                          r"(?:stock|shares)|american depositary shares)\s+of\s+", re.I)
 _FUNDISH = re.compile(r"\b(?:index|average|etf|fund|trust)(?:SM|TM)?\b", re.I)   # "IndexSM"
@@ -412,7 +421,9 @@ def _clean_underlying(item):
     # Leftovers of the previous member: '(the “Index”) and the iShares...',
     # '(each referred to as an “Index,” ...) and Technology Select...'.
     item = re.sub(r"^(?:\s*\([^()]*\))+", "", item.strip())
-    item = re.sub(r"^(?:,\s*)?(?:and\s+)?", "", item.strip()).strip()
+    # Goldman: '..."SPW Index"), or any successor underlier, the Dow Jones ...' (#385).
+    item = re.sub(r"^(?:,\s*)?(?:or any successor (?:underlier|index)\s*,?\s*)?(?:and\s+)?", "",
+                  item.strip(), flags=re.I).strip()
     # A table row (Citi: 'Underlying shares Initial share price* ... $266.43
     # $133.215 Shares of Class A Common Stock of Alphabet Inc.'): the member
     # starts at its "Shares of" / "common stock of".
@@ -887,7 +898,9 @@ def extract_key_terms(text, fields=None):
 
     if "contingent_coupon_rate" in wanted and "contingent_coupon_rate" not in out:
         for t in terms:
-            if t.label.startswith(_COUPON_TERM_LEADS) and not re.search(r"barrier|date|threshold", t.label):
+            # Goldman's term is just "Coupon" (#385).
+            if (t.label == "coupon" or t.label.startswith(_COUPON_TERM_LEADS)) \
+                    and not re.search(r"barrier|date|threshold", t.label):
                 m = _RATE_PROSE_RE.search(t.value) or _ANNUAL_RATE_RE.search(t.value)
                 if m:
                     s, e = _span_of(t, m)
