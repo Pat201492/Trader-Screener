@@ -74,6 +74,7 @@ FIELD_LABELS = {
     "underlyings": ("underlyings", "underlying", "underlying stocks", "underlying stock",
                     "underlying shares", "underlying indices", "underlying index",
                     "underlying funds", "underlying fund", "reference stocks", "reference stock",
+                    "underlying assets", "underlying asset",
                     "reference assets", "reference asset", "market measures", "market measure",
                     "underliers", "underlier", "indices", "index", "fund"),
     "issuer": ("issuer", "company (issuer)", "issuer (company)"),
@@ -87,6 +88,7 @@ FIELD_LABELS = {
     "coupon_barrier_pct": ("coupon barrier", "coupon barrier level", "coupon threshold price",
                            "coupon threshold value", "coupon threshold level",
                            "interest barrier", "interest threshold", "coupon trigger",
+                           "trigger price/coupon barrier", "trigger level/coupon barrier",
                            # JPMorgan: one level for both coupon and downside.
                            "interest barrier / trigger level", "interest barrier / trigger value"),
     # Specific before generic: a note with both a "Call Threshold Price" (the
@@ -97,6 +99,7 @@ FIELD_LABELS = {
                     "threshold value", "threshold level", "barrier", "barrier level",
                     "barrier price", "barrier amount", "trigger level", "trigger value",
                     "trigger price", "knock-in level",
+                    "trigger price/coupon barrier", "trigger level/coupon barrier",
                     "interest barrier / trigger level", "interest barrier / trigger value"),
 }
 
@@ -154,9 +157,18 @@ _CUSIP_RE = re.compile(r"\b([0-9A-Z]{9})\b")
 # payment equal to at least $19 (equivalent to a contingent coupon rate of at
 # least 22.8% per annum)".
 _RATE_PROSE_RE = re.compile(
-    r"(?:contingent (?:coupon|interest) rate of\s+(?:at least\s+|approximately\s+)?|\()"
+    r"(?:contingent (?:coupon|interest) rate of\s+(?:at least\s+|approximately\s+)?|\(|"
+    # BofA: "$21.90 per $1,000.00 ... (equal to a rate of 2.19% per quarter or
+    # 8.76% per annum)" (#383)
+    r"\bor\s+(?:at least\s+|approximately\s+)?)"
     r"(\d{1,2}(?:\.\d+)?)\s?%\s*per\s+annum",
     re.I)
+# Morgan Stanley: "a contingent monthly coupon at an annual rate of 15.10%
+# (corresponding to approximately $12.583 per month ...)" (#383)
+_ANNUAL_RATE_RE = re.compile(r"\bannual rate of\s+(?:at least\s+|approximately\s+)?(\d{1,2}(?:\.\d+)?)\s?%", re.I)
+_COUPON_TERM_LEADS = ("contingent coupon", "contingent interest", "contingent monthly", "contingent quarterly",
+                      "contingent semi-annual", "contingent semiannual", "contingent annual", "contingent payment",
+                      "contingent income")
 # Preliminary: "expected to be between $920.00 and $970.00" (BNS adds the
 # percent: "$934.09 (93.409%) and $964.09"), or only a floor: Citi "at least
 # $901.00"; BMO "is $973.00 per security ... at pricing may differ from this
@@ -369,18 +381,28 @@ _CORP_SUFFIX = re.compile(r"\b(?:Inc\.?|Incorporated|Corporation|Corp\.?|Company
 _LIST_SEP = re.compile(r",\s*(?:and\s+)?|\s+and\s+")
 
 
+# A list member that is a fund or an index: "Russell 2000® Index", "VanEck®
+# Semiconductor ETF", "Nasdaq-100® Technology Sector IndexSM" (#383).
+_FUND_END = re.compile(r"\b(?:Index|ETF|Fund|Trust|Shares)(?:®|SM|TM|℠|™)*$")
+
+
+def _member_end(text):
+    t = text.strip()
+    return bool(_CORP_SUFFIX.search(t) or _FUND_END.search(t))
+
+
 def _split_bare_list(text):
     """'A Inc., B Corporation and C Inc.' -> ['A Inc.', 'B Corporation', 'C Inc.'],
-    splitting only where the text so far ends in a company suffix; anything
-    else -- an index name with "and" in it -- stays one piece."""
+    and 'X Index, Y ETF and Z Index' likewise: split only where the text so
+    far ends in a company suffix or a fund/index word, and only when every
+    piece does -- an index name with "and" in it stays one piece."""
     parts, start = [], 0
     for m in _LIST_SEP.finditer(text):
-        if _CORP_SUFFIX.search(text[start:m.start()].strip()):
+        if _member_end(text[start:m.start()]):
             parts.append(text[start:m.start()])
             start = m.end()
     parts.append(text[start:])
-    if len(parts) > 1 and all(_CORP_SUFFIX.search(p.strip().rstrip(".") + ("." if p.strip().endswith(".") else ""))
-                              for p in parts):
+    if len(parts) > 1 and all(_member_end(p) for p in parts):
         return parts
     return [text]
 
@@ -835,6 +857,15 @@ def extract_key_terms(text, fields=None):
             if t is None:
                 continue
             got = _parse_for(field, t)
+            if got is None and field == "underlyings":
+                # UBS repeats "Underlying Assets": first as a table header
+                # ("Bloomberg Tickers Contingent Coupon Rate ..."), later as
+                # the list of names (#383).
+                for later in (x for x in terms if x.label == lab and x is not t):
+                    got = _parse_for(field, later)
+                    if got:
+                        t = later
+                        break
             bound = None
             if got and not _committed(text, got[2][0], got[2][1]):
                 if field in ("contingent_coupon_rate", "call_premium") \
@@ -856,8 +887,8 @@ def extract_key_terms(text, fields=None):
 
     if "contingent_coupon_rate" in wanted and "contingent_coupon_rate" not in out:
         for t in terms:
-            if t.label.startswith(("contingent coupon", "contingent interest")):
-                m = _RATE_PROSE_RE.search(t.value)
+            if t.label.startswith(_COUPON_TERM_LEADS) and not re.search(r"barrier|date|threshold", t.label):
+                m = _RATE_PROSE_RE.search(t.value) or _ANNUAL_RATE_RE.search(t.value)
                 if m:
                     s, e = _span_of(t, m)
                     floor = _floor(text, s, e)
@@ -868,6 +899,20 @@ def extract_key_terms(text, fields=None):
                             "contingent_coupon_rate", float(m.group(1)), m.group(1), (s, e),
                             t.raw_label, "term-prose", "min" if floor else None)
                     break
+
+    # UBS prints the rate in a table column: "Bloomberg Tickers Contingent
+    # Coupon Rate Initial Levels ... RTY 11.00% per annum ..." (#383). One rate
+    # for the note only when every row in the column agrees.
+    if "contingent_coupon_rate" in wanted and "contingent_coupon_rate" not in out:
+        h = re.search(r"Contingent Coupon Rate\s+Initial Level", text[:40000])
+        if h:
+            rows = list(re.finditer(r"(\d{1,2}(?:\.\d+)?)\s?%\s*per\s+annum", text[h.end():h.end() + 1500]))
+            if rows and len({r.group(1) for r in rows[:4]}) == 1:
+                m = rows[0]
+                s0 = h.end() + m.start(1)
+                out["contingent_coupon_rate"] = KeyTermValue(
+                    "contingent_coupon_rate", float(m.group(1)), m.group(1), (s0, s0 + len(m.group(1))),
+                    "Contingent Coupon Rate (table)", "term-table")
 
     if "underlyings" in wanted and "underlyings" not in out:
         got = _table_underlyings(text)

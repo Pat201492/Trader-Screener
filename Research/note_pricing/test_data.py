@@ -247,6 +247,27 @@ def test_refresh_market_remaps_old_rows(tmp_path):
     assert json.loads(conn.execute("SELECT tickers FROM notes").fetchone()[0]) == ["FEZ"]
 
 
+# -- #383 re-extract ----------------------------------------------------------
+def test_reextract_updates_no_coupon_rows_and_adds_skipped_filings(tmp_path):
+    conn = npd.connect(tmp_path)
+    row, _ = npd.note_row("JPM", "0001665650", "n-1", "2026-09-03", _terms(contingent_coupon_rate=None),
+                          MARKET, LOOKUP)
+    conn.execute(f"INSERT INTO notes ({', '.join(npd.COLUMNS)}) VALUES ({', '.join('?' * len(npd.COLUMNS))})",
+                 [row[c] for c in npd.COLUMNS])
+    conn.execute("INSERT INTO weeks (issuer_cik, week, sampled, skipped, exhausted) VALUES ('0001665650', '2026-08-31', 1, '{}', 0)")
+    conn.execute("INSERT INTO tried VALUES ('t-1', '0001665650', '2026-08-31', 'no underlyings extracted')")
+    conn.execute("INSERT INTO tried VALUES ('t-2', '0001665650', '2026-08-31', 'preliminary')")
+    conn.commit()
+    read = []
+    stats = npd.reextract(None, conn, MARKET, LOOKUP, extract=lambda c, cik, acc: read.append(acc) or _terms(),
+                          log=lambda *a: None)
+    assert sorted(read) == ["n-1", "t-1"]                       # preliminaries are not re-read
+    assert stats == {"0001665650": {"updated": 1, "added": 1}}
+    assert conn.execute("SELECT coupon_rate FROM notes WHERE accession='n-1'").fetchone()[0] == 12.0
+    assert conn.execute("SELECT sampled FROM weeks").fetchone()[0] == 2
+    assert conn.execute("SELECT outcome FROM tried WHERE accession='t-1'").fetchone()[0] == "kept (reextract)"
+
+
 # -- #377 pricing more underlyings ------------------------------------------
 def test_unpriced_and_refresh_market(tmp_path):
     conn = npd.connect(tmp_path)

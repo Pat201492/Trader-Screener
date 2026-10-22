@@ -420,6 +420,51 @@ def build(client, market, n_weeks=104, per_week=4, issuers=None, home=HOME, extr
     return coverage(conn)
 
 
+REEXTRACT_OUTCOMES = ("no underlyings extracted", "not a structured note", "extract failed")
+
+
+def reextract(client, conn, market, lookup, extract=_default_extract, log=print, limit=None):
+    """Re-read with the current extractor (#383): sampled notes that have no
+    coupon, and filings skipped as one of REEXTRACT_OUTCOMES. A row is
+    replaced in place; a skipped filing that now qualifies becomes a note
+    and counts toward its week. Returns {issuer_cik: {"updated", "added"}}."""
+    stats = {}
+
+    def bump(cik, k):
+        stats.setdefault(cik, {"updated": 0, "added": 0})[k] += 1
+
+    todo = [(acc, cik, fdate, None) for acc, cik, fdate in conn.execute(
+        "SELECT accession, issuer_cik, filing_date FROM notes WHERE coupon_rate IS NULL")]
+    todo += [(acc, cik, None, week) for acc, cik, week in conn.execute(
+        f"SELECT accession, issuer_cik, week FROM tried WHERE outcome IN ({','.join('?' * len(REEXTRACT_OUTCOMES))})",
+        REEXTRACT_OUTCOMES)]
+    names = {v: k for k, v in ISSUERS.items()}
+    for n, (acc, cik, fdate, week) in enumerate(todo[:limit] if limit else todo):
+        try:
+            terms = extract(client, cik, acc) or {}
+        except Exception:
+            continue
+        # A skipped filing's own date was not kept: bound it by its week's end
+        # (the knowledge date stays within the week it was sampled from).
+        fd = fdate or (date.fromisoformat(week) + timedelta(days=6)).isoformat()
+        row, why = note_row(names.get(cik, cik), cik, acc, fd, terms, market, lookup)
+        if row is None:
+            continue
+        conn.execute(f"INSERT OR REPLACE INTO notes ({', '.join(COLUMNS)}) VALUES ({', '.join('?' * len(COLUMNS))})",
+                     [row[c] for c in COLUMNS])
+        if week is None:
+            bump(cik, "updated")
+        else:
+            conn.execute("UPDATE tried SET outcome = 'kept (reextract)' WHERE accession = ?", (acc,))
+            conn.execute("UPDATE weeks SET sampled = sampled + 1 WHERE issuer_cik = ? AND week = ?", (cik, week))
+            bump(cik, "added")
+        if n % 200 == 0:
+            conn.commit()
+            log(f"reextract {n}/{len(todo)}")
+    conn.commit()
+    return stats
+
+
 def unpriced(conn, market):
     """(ticker -> notes, unmapped name -> notes): underlyings with a known
     ticker but no price history, and names no ticker was found for (#377)."""
@@ -501,7 +546,7 @@ def coverage(conn):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Build the note-pricing sample (#365).")
-    ap.add_argument("cmd", choices=["build", "coverage", "fill-rates", "unpriced", "refresh-market"])
+    ap.add_argument("cmd", choices=["build", "coverage", "fill-rates", "unpriced", "refresh-market", "reextract"])
     ap.add_argument("--weeks", type=int, default=104)
     ap.add_argument("--per-week", type=int, default=4)
     a = ap.parse_args(argv)
@@ -515,6 +560,15 @@ def main(argv=None):
         no_price, no_ticker = unpriced(connect(), Market())
         print(json.dumps({"usable": usable_share(connect()), "ticker_without_prices": no_price,
                           "no_ticker": dict(list(no_ticker.items())[:40])}, indent=1))
+        return
+    if a.cmd == "reextract":
+        from edgar_client import EdgarClient
+        client = EdgarClient(user_agent=os.environ.get("EDGAR_USER_AGENT", "").strip(),
+                             cache_dir=str(Path.home() / ".edgar-scrubber" / "cache"))
+        conn = connect()
+        before = usable_share(conn)
+        stats = reextract(client, conn, Market(), _ticker_map(client))
+        print(json.dumps({"by_issuer": stats, "before": before, "after": usable_share(conn)}, indent=1))
         return
     if a.cmd == "refresh-market":
         conn = connect()
